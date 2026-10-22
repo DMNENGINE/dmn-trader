@@ -3,7 +3,7 @@ Cada agente: opera con su genoma → autopsia de cada pérdida con su arreglo �
 El enjambre: comparte lo que aprende (símbolos/horas que pierden para todos), evoluciona cada 2 h (el 20 % peor se reemplaza por hijos
 del 10 % mejor) y, si hay varios equipos (Pi = central, PC = nodo), intercambia los mejores genomas cada 30 min (modelo de islas)."""
 import copy, json, math, os, random, socket, statistics, sys, threading, time, traceback
-from . import datos, db, indicadores as ind, motor
+from . import ia, datos, db, indicadores as ind, motor
 
 ESQUEMA = """
 CREATE TABLE IF NOT EXISTS ag_agentes (id INTEGER PRIMARY KEY, nombre TEXT, cuenta_id INTEGER, genoma TEXT, generacion INTEGER DEFAULT 0,
@@ -28,7 +28,15 @@ ESTRATEGIAS = {
 GENOMA_BASE = {'marco': '1m', 'estrategia': 'ema_cruce', 'p': dict(ESTRATEGIAS['ema_cruce']), 'stop_atr': 1.5, 'rr': 1.5, 'filtro_tendencia': False,
                'vol_min_pct': 0.0, 'vol_max_pct': 3.0, 'riesgo_pct': 20.0, 'max_barras': 30, 'be_en_r': 0.0, 'min_ventaja': 2.0,
                'cortos': True, 'horas_bloqueadas': [], 'simbolos_bloqueados': [],
-               'entrada': 'mercado', 'retroceso': 0.3, 'espera': 3, 'tramos': 1}
+               'entrada': 'mercado', 'retroceso': 0.3, 'espera': 3, 'tramos': 1,
+               'enfriar': 2, 'guardia': 3, 'roi_min': None, 'trail_r': 0.0, 'trail_frac': 0.8, 'filtro_ia': 0.0}
+# protecciones (idea de freqtrade): `enfriar` velas sin volver al mismo símbolo tras cerrar; `guardia` pérdidas seguidas → pausa.
+# roi_min: el objetivo baja con el tiempo de rr a roi_min (en R) a lo largo de max_barras; None = objetivo fijo.
+# trail_r: desde +trail_r R el stop persigue al precio a trail_frac × la distancia del stop; 0 = sin trailing.
+# filtro_ia: probabilidad mínima de ganar según el modelo del enjambre (trader/ia.py); 0 = sin filtro.
+POOL_CRIPTO = CRIPTO + ['LTC-USD', 'BCH-USD', 'DOT-USD', 'UNI-USD', 'AAVE-USD', 'NEAR-USD', 'SUI-USD', 'SHIB-USD', 'APT-USD', 'ARB-USD',
+                        'OP-USD', 'HBAR-USD', 'XLM-USD', 'ATOM-USD', 'FIL-USD', 'ETC-USD', 'PEPE-USD']
+N_CRIPTO, SPREAD_MAX, UNIVERSO_CADA, IA_CADA = 12, 0.15, 3600, 1800
 # entrada 'limite': espera un retroceso de `retroceso` ATR durante `espera` velas (no paga spread ni deslizamiento al entrar).
 # tramos > 1 (DCA): el resto de la posición se compra escalonado entre la entrada y el stop, promediando el precio.
 DCA_HASTA = 0.6  # el último tramo va al 60 % del camino hacia el stop
@@ -126,7 +134,7 @@ def simular(g, series, coste, ahorro=0.0):
     peso = sum(1 - f for f in fr)
     rs = []
     for v in series:
-        s, atr, _ = senales(g, v)
+        s, atr, tend = senales(g, v)
         i = 1
         while i < len(v) - 1:
             if not s[i - 1] or not atr[i - 1]:
@@ -147,7 +155,13 @@ def simular(g, series, coste, ahorro=0.0):
             if g['rr'] * dist / ent * 100 < g['min_ventaja'] * c0 or dist / ent * 100 < 2 * c0:
                 i += 1
                 continue
-            stop, obj, be_hecho = ent - d * dist, ent + d * g['rr'] * dist, False
+            if g.get('filtro_ia'):
+                pr = ia.probabilidad({'atr_pct': atr[i - 1] / v[i - 1]['c'] * 100, 'tendencia': tend[i - 1], 'hora': time.gmtime(v[i]['t']).tm_hour,
+                                      'coste_pct': c0, 'dist': dist, 'precio': ent}, g, d)
+                if pr is not None and pr < g['filtro_ia']:
+                    i += 1
+                    continue
+            stop, obj, be_hecho, mejor = ent - d * dist, ent + d * g['rr'] * dist, False, ent
             lleno = [ent]  # precios de los tramos ya comprados
             salida, j = None, i
             while j < len(v) and j - i < g['max_barras']:
@@ -164,13 +178,23 @@ def simular(g, series, coste, ahorro=0.0):
                     break
                 if g['be_en_r'] and not be_hecho and (b['h'] - ent if d > 0 else ent - b['l']) >= g['be_en_r'] * dist:
                     stop, be_hecho = ent, True
+                if g.get('trail_r'):  # el stop persigue al precio (vale desde la vela siguiente)
+                    mejor = max(mejor, b['h']) if d > 0 else min(mejor, b['l'])
+                    if (mejor - ent) * d >= g['trail_r'] * dist:
+                        nv = mejor - d * dist * g.get('trail_frac', 0.8)
+                        stop = max(stop, nv) if d > 0 else min(stop, nv)
+                if g.get('roi_min') is not None:  # tabla ROI: cuanto más tiempo, menos ganancia exige
+                    req = g['rr'] - (g['rr'] - g['roi_min']) * min(1, (j - i + 1) / g['max_barras'])
+                    if (b['c'] - ent) * d >= req * dist:
+                        salida = b['c']
+                        break
                 j += 1
             if salida is None:
                 j = min(j, len(v) - 1)
                 salida = v[j]['c']
             r = sum((salida - x) * d for x in lleno) / (peso * dist) - (c0 + (len(lleno) - 1) * (coste - ahorro)) / 100 * ent / (peso * dist)
             rs.append(r)
-            i = j + 1
+            i = j + 1 + int(g.get('enfriar', 0))
     return rs
 
 
@@ -207,6 +231,19 @@ def _mutar(g, rnd, fuerte=False):
         g['espera'] = rnd.choice([2, 3, 5, 8])
     if rnd.random() < 0.12:
         g['tramos'] = rnd.choice([1, 1, 2, 3])
+    if rnd.random() < 0.1:
+        g['enfriar'] = rnd.choice([0, 1, 2, 3, 5])
+    if rnd.random() < 0.1:
+        g['guardia'] = rnd.choice([0, 2, 3, 4])
+    if rnd.random() < 0.15:
+        g['roi_min'] = None if g.get('roi_min') is not None else round(rnd.uniform(0.2, 1.0), 2)
+    elif g.get('roi_min') is not None:
+        g['roi_min'] = round(min(max(g['roi_min'] * rnd.uniform(1 - f, 1 + f), 0.0), g['rr']), 2)
+    if rnd.random() < 0.15:
+        g['trail_r'] = 0.0 if g.get('trail_r') else round(rnd.uniform(0.5, 1.5), 2)
+    g['trail_frac'] = round(min(max(g.get('trail_frac', 0.8) * rnd.uniform(1 - f, 1 + f), 0.3), 1.5), 2)
+    if rnd.random() < 0.15:
+        g['filtro_ia'] = 0.0 if g.get('filtro_ia') else round(rnd.uniform(0.45, 0.6), 2)
     return g
 
 
@@ -228,6 +265,8 @@ def preparar():
         cols = {r[1] for r in c.execute(f'PRAGMA table_info({t})')}
         if 'agente_id' not in cols:
             c.execute(f'ALTER TABLE {t} ADD COLUMN agente_id INTEGER')
+    c.execute('CREATE INDEX IF NOT EXISTS ix_agt ON ag_trades(agente_id, trade_id)')
+    c.execute('CREATE INDEX IF NOT EXISTS ix_tr_cta ON trades(cuenta_id, estado, cerrado)')
     viejo = db.ajuste('agente')
     if viejo and viejo.get('cuenta_id'):  # el agente único de la v1 se retira (sus datos se quedan)
         db.ex('UPDATE cuentas SET archivada=1 WHERE id=?', (viejo['cuenta_id'],))
@@ -273,6 +312,9 @@ def genoma_inicial(i, rnd):
     g['be_en_r'] = rnd.choice([0.0, 0.0, 1.0])
     g['entrada'] = 'limite' if est == 'rejilla' or rnd.random() < 0.4 else 'mercado'
     g['tramos'] = rnd.choice([1, 1, 2, 3])
+    g['roi_min'] = rnd.choice([None, None, 0.5])
+    g['trail_r'] = rnd.choice([0.0, 0.0, 1.0])
+    g['filtro_ia'] = rnd.choice([0.0, 0.0, 0.5, 0.55])
     return g
 
 
@@ -407,11 +449,47 @@ def _bucle_():
 def _universo(e, g=None):
     sims = []
     if 'cripto' in e['mercados']:
-        sims += CRIPTO
+        sims += (e.get('universo') or {}).get('cripto') or CRIPTO
     if 'acciones' in e['mercados']:
         sims += ACCIONES
     bloq = set(e.get('bloqueos', {}).get('simbolos', [])) | set((g or {}).get('simbolos_bloqueados', []))
     return [s for s in sims if s not in bloq]
+
+
+def _refrescar_universo(e):
+    """Selección de mercados por volumen (VolumePairList): las criptos con más dólares negociados en 24 h y spread bajo."""
+    u = e.get('universo') or {}
+    if 'cripto' not in e.get('mercados', []) or time.time() - u.get('ts', 0) < UNIVERSO_CADA:
+        return e
+    filas = []
+    for s_ in POOL_CRIPTO:
+        try:
+            q = datos.cotizacion(s_)
+        except Exception:
+            continue
+        if not q.get('bid') or not q.get('ask') or not q.get('precio'):
+            continue
+        sp = (q['ask'] - q['bid']) / q['precio'] * 100
+        if sp <= SPREAD_MAX:
+            filas.append((q['volumen'] * q['precio'], s_, sp))
+    filas.sort(reverse=True)
+    elegidas = [x[1] for x in filas[:N_CRIPTO]]
+    if len(elegidas) < 4:
+        return e
+    u = {'ts': int(time.time()), 'cripto': elegidas, 'detalle': [[x[1], round(x[0] / 1e6), round(x[2], 4)] for x in filas[:N_CRIPTO]]}
+    e2 = estado()
+    e2['universo'] = e['universo'] = u
+    guardar(e2)
+    log('🌐 mercados cripto por volumen: ' + ', '.join(x.replace('-USD', '') for x in elegidas))
+    return e
+
+
+def _entrenar_ia():
+    try:
+        ia.entrenar()
+        log('🤖 ' + ia.resumen())
+    except Exception:
+        log('error entrenando la IA: ' + traceback.format_exc().splitlines()[-1])
 
 
 def contexto(e, marcos):
@@ -446,6 +524,7 @@ def _senales_cache(ctx, g, s):
 
 
 def paso_enjambre(e):
+    e = _refrescar_universo(e)
     vivos = agentes()
     marcos = {_g(a).get('marco', '1m') for a in vivos} or {'5m'}
     ctx = contexto(e, marcos)
@@ -463,6 +542,10 @@ def paso_enjambre(e):
     if ahora_ - e.get('ultima_evolucion', 0) > EVOLUCION:
         e['ultima_evolucion'] = ahora_
         evolucionar(e)
+    if ahora_ - e.get('ultima_ia', 0) > IA_CADA:
+        e['ultima_ia'] = ahora_
+        guardar(e)
+        threading.Thread(target=_entrenar_ia, daemon=True).start()
     if CENTRAL and ahora_ - e.get('ultima_sincronia', 0) > SINCRONIA:
         e['ultima_sincronia'] = ahora_
         guardar(e)
@@ -497,6 +580,48 @@ def _leccion(aid, intento, tid, tipo, texto, cambio):
     db.ex('INSERT INTO ag_lecciones(ts,intento,trade_id,tipo,texto,cambio,agente_id) VALUES(?,?,?,?,?,?,?)',
           (int(time.time()), intento, tid, tipo, texto, json.dumps(cambio, ensure_ascii=False), aid))
     log('🧠 ' + texto[:200])
+
+
+_PAUSA, _MALOS, _MEJOR = {}, {}, {}
+
+
+def _proteccion(a, g, it):
+    """Protecciones: StoplossGuard (N pérdidas seguidas) y racha mala (≤ -4R en 6 h) pausan al agente; devuelve el motivo."""
+    ahora_ = time.time()
+    hasta, motivo, ref = _PAUSA.get(a['id'], (0, '', None))
+    if ahora_ < hasta:
+        return motivo
+    ult = db.q("""SELECT trade_id, r FROM ag_trades WHERE agente_id=? AND r IS NOT NULL AND COALESCE(causa,'')<>'sistema' AND abierto>=?
+                  ORDER BY trade_id DESC LIMIT 40""", (a['id'], max(a['genoma_desde'] or 0, int(ahora_) - 6 * 3600)))
+    if not ult or ult[0]['trade_id'] == ref:  # sin operaciones nuevas desde la última pausa
+        return None
+    marco = MARCOS.get(g['marco'], 1)
+    n = int(g.get('guardia') or 0)
+    if n and len(ult) >= n and all(x['r'] <= 0 for x in ult[:n]):
+        mins = min(30 * marco, 180)
+        motivo = f'⏸ {n} pérdidas seguidas: pausa de {mins} min'
+    elif sum(x['r'] for x in ult) <= -4:
+        mins = 120
+        motivo = f"⏸ racha mala ({sum(x['r'] for x in ult):+.1f}R en 6 h): pausa de {mins} min"
+    else:
+        return None
+    _PAUSA[a['id']] = (ahora_ + mins * 60, motivo, ult[0]['trade_id'])
+    _leccion(a['id'], it['id'], None, 'proteccion', f"{a['nombre']}: {motivo[2:]} para no seguir perdiendo en un mal momento.", {})
+    return motivo
+
+
+def _vetados(a, cid, g):
+    """Símbolos que este agente no debe tocar ahora: enfriamiento tras cerrar y LowProfitPairs (≥3 trades, < -0,5R en 12 h)."""
+    ahora_ = time.time()
+    ts, malos = _MALOS.get(a['id'], (0, set()))
+    if ahora_ - ts > 300:
+        malos = {x['simbolo'] for x in db.q("""SELECT simbolo, AVG(r) m, COUNT(*) n FROM ag_trades WHERE agente_id=? AND r IS NOT NULL
+                  AND COALESCE(causa,'')<>'sistema' AND abierto>? GROUP BY simbolo HAVING n >= 3 AND m < -0.5""", (a['id'], int(ahora_) - 12 * 3600))}
+        _MALOS[a['id']] = (ahora_, malos)
+    espera = int(g.get('enfriar') or 0) * MARCOS.get(g['marco'], 1) * 60
+    frios = {x['simbolo'] for x in db.q("SELECT simbolo, MAX(cerrado) c FROM trades WHERE cuenta_id=? AND estado='cerrado' AND cerrado>? GROUP BY simbolo",
+                                        (cid, int(ahora_) - espera))} if espera else set()
+    return malos | frios
 
 
 _PEND = {}  # orden de entrada pendiente → datos para registrarla cuando se llene (si el proceso se reinicia, se cancelan)
@@ -585,13 +710,18 @@ def paso_agente(e, a, ctx):
         _poner(a['id'], estado='en posición', ultimo=' · '.join(f"{p['simbolo']} {'largo' if p['cantidad'] > 0 else 'corto'}" for p in pos))
     else:
         _poner(a['id'], estado='buscando')
+    pausa = _proteccion(a, g, it)
+    if pausa:
+        if not pos:
+            _poner(a['id'], estado='en pausa', ultimo=pausa)
+        return
     esperando = {o['simbolo'] for o in db.q("SELECT simbolo FROM ordenes WHERE cuenta_id=? AND estado='pendiente' AND reduce=0 AND origen='agente'", (cid,))}
     if len(pos) + len(esperando - {p['simbolo'] for p in pos}) >= CUENTA_CFG['max_posiciones']:
         return
     hora = time.gmtime().tm_hour
     if hora in g['horas_bloqueadas'] or hora in e.get('bloqueos', {}).get('horas', []):
         return
-    abiertos = {p['simbolo'] for p in pos} | esperando
+    abiertos = {p['simbolo'] for p in pos} | esperando | _vetados(a, cid, g)
     for sim in _universo(e, g):
         if sim in abiertos or sim not in ctx['q']:
             continue
@@ -622,6 +752,13 @@ def paso_agente(e, a, ctx):
         sl, tp = p - d * dist, p + d * g['rr'] * dist
         rasgos = {'atr_pct': round(atr[-1] / p * 100, 4), 'tendencia': tend[-1], 'hora': hora, 'spread_pct': round(spread, 4),
                   'coste_pct': round(coste, 4), 'precio': p, 'dist': dist, 'entrada': g['entrada'], 'tramos': len(fr)}
+        if g.get('filtro_ia'):  # el modelo del enjambre opina: si ve pocas opciones de ganar, no entra
+            pr = ia.probabilidad(rasgos, g, d)
+            if pr is not None:
+                rasgos['p_ia'] = round(pr, 3)
+                if pr < g['filtro_ia']:
+                    db.ex('UPDATE ag_agentes SET descartes=descartes+1 WHERE id=?', (a['id'],))
+                    continue
         try:
             o = motor.enviar(cid, sim, 'buy' if d > 0 else 'sell', qty, 'limite' if lim else 'mercado', limite=p if lim else None, sl=sl, tp=tp,
                              setup=g['estrategia'], nota=f"{a['nombre']} {g['estrategia']} {g['marco']}", origen='agente')
@@ -651,6 +788,33 @@ def _gestionar(a, g):
             except motor.ErrorOrden:
                 pass
             continue
+        ag = db.uno('SELECT rasgos FROM ag_trades WHERE trade_id=?', (p['trade_id'],))
+        dist = (json.loads(ag['rasgos']).get('dist') if ag else None) or abs(t['entrada'] - (t['stop_inicial'] or t['entrada']))
+        sg = 1 if p['cantidad'] > 0 else -1
+        barras = (time.time() - t['abierto']) / 60 / MARCOS.get(g.get('marco', '1m'), 1)
+        if dist and g.get('roi_min') is not None and barras >= 1:  # tabla ROI
+            req = g['rr'] - (g['rr'] - g['roi_min']) * min(1, barras / g['max_barras'])
+            if (p['precio'] - t['entrada']) * sg >= req * dist:
+                try:
+                    motor.cerrar(cid, p['simbolo'], 100, 'roi')
+                except motor.ErrorOrden:
+                    pass
+                continue
+        if dist and g.get('trail_r'):  # trailing stop desde +trail_r R
+            k = p['trade_id']
+            mejor = _MEJOR.get(k, t['entrada'])
+            mejor = max(mejor, p['precio']) if sg > 0 else min(mejor, p['precio'])
+            _MEJOR[k] = mejor
+            if len(_MEJOR) > 20000:
+                _MEJOR.clear()
+            if (mejor - t['entrada']) * sg >= g['trail_r'] * dist:
+                nv = mejor - sg * dist * g.get('trail_frac', 0.8)
+                if p['stop'] is None or (nv - p['stop']) * sg > dist * 0.02:
+                    try:
+                        motor.mover_stop(cid, p['simbolo'], stop=nv)
+                    except motor.ErrorOrden:
+                        pass
+                    continue
         if g['be_en_r'] and t['stop_inicial'] and p['stop'] is not None:
             dist = abs(t['entrada'] - t['stop_inicial'])
             fav = (p['precio'] - t['entrada']) * (1 if p['cantidad'] > 0 else -1)
@@ -722,9 +886,11 @@ def diagnosticar(x, g):
     if x['mfe'] and x['mfe'] >= dist * 0.9:
         if not g['be_en_r']:
             causas.append(('devolvio', f"{x['simbolo']}: iba +{x['mfe'] / dist:.1f}R y acabó en pérdida. Solución: stop a breakeven en +1R.", {'be_en_r': 1.0}))
+        elif not g.get('trail_r'):
+            causas.append(('devolvio', f"{x['simbolo']}: devolvió la ganancia aun con breakeven. Solución: trailing stop desde +1R.", {'trail_r': 1.0}))
         else:
             nv = round(max(g['rr'] * 0.85, 1.0), 2)
-            causas.append(('devolvio', f"{x['simbolo']}: devolvió la ganancia aun con breakeven. Solución: objetivo de {g['rr']}R a {nv}R.", {'rr': nv}))
+            causas.append(('devolvio', f"{x['simbolo']}: devolvió la ganancia aun con breakeven y trailing. Solución: objetivo de {g['rr']}R a {nv}R.", {'rr': nv}))
     if ras['tendencia'] == -d and not g['filtro_tendencia']:
         causas.append(('contra_tendencia', f"{x['simbolo']}: entró contra la tendencia de la EMA50. Solución: solo a favor de la tendencia.", {'filtro_tendencia': True}))
     gan = [json.loads(y['rasgos'])['atr_pct'] for y in db.q("SELECT rasgos FROM ag_trades WHERE r > 0 AND COALESCE(causa,'')<>'sistema' ORDER BY trade_id DESC LIMIT 60")]
@@ -774,7 +940,8 @@ def aptitud(a):
 
 def _cruce(g1, g2, rnd):
     h = copy.deepcopy(g1)
-    for k in ('stop_atr', 'rr', 'filtro_tendencia', 'riesgo_pct', 'max_barras', 'be_en_r', 'min_ventaja', 'marco', 'entrada', 'retroceso', 'tramos'):
+    for k in ('stop_atr', 'rr', 'filtro_tendencia', 'riesgo_pct', 'max_barras', 'be_en_r', 'min_ventaja', 'marco', 'entrada', 'retroceso', 'tramos',
+              'enfriar', 'guardia', 'roi_min', 'trail_r', 'trail_frac', 'filtro_ia'):
         if rnd.random() < 0.5:
             h[k] = copy.deepcopy(g2.get(k, GENOMA_BASE[k]))
     return h
@@ -841,6 +1008,16 @@ def buscar_solucion(e, a, ctx):
     g = copy.deepcopy(actual)
     g['tramos'] = 1 if actual['tramos'] > 1 else 3
     cand.append(('mismo sistema ' + ('sin DCA' if g['tramos'] == 1 else 'comprando en 3 tramos (DCA)'), g))
+    g = copy.deepcopy(actual)
+    g['roi_min'] = None if actual['roi_min'] is not None else 0.4
+    cand.append(('mismo sistema ' + ('con objetivo fijo' if g['roi_min'] is None else 'con objetivo que baja con el tiempo (ROI)'), g))
+    g = copy.deepcopy(actual)
+    g['trail_r'] = 0.0 if actual['trail_r'] else 1.0
+    cand.append(('mismo sistema ' + ('sin trailing' if not g['trail_r'] else 'con trailing stop desde +1R'), g))
+    if ia.modelo().get('ok'):
+        g = copy.deepcopy(actual)
+        g['filtro_ia'] = 0.0 if actual['filtro_ia'] else 0.52
+        cand.append(('mismo sistema ' + ('sin filtro de IA' if not g['filtro_ia'] else 'con filtro de IA'), g))
     if actual['estrategia'] != 'rejilla':
         g = copy.deepcopy(actual)
         g.update(estrategia='rejilla', p=dict(ESTRATEGIAS['rejilla']), entrada='limite')
@@ -1045,5 +1222,7 @@ def informe(desde=None):
         'Sistemas que peor: ' + (', '.join(f"{k} {m:+.2f}R ({n})" for k, m, n in ranking[-3:]) if len(ranking) > 4 else '—') + '.',
         'Mejores agentes ahora: ' + (', '.join(f"{a['nombre']} {f:+.2f}R ({_g(a)['estrategia']} {_g(a)['marco']})" for f, a in mejores if f is not None) or '—') + '.',
         'Por qué se pierde (autopsias): ' + (', '.join(f"{x['tipo']} ×{x['n']}" for x in lec) or '—') + '.',
+        ia.resumen(),
+        'Mercados cripto (por volumen): ' + ', '.join(x.replace('-USD', '') for x in ((e.get('universo') or {}).get('cripto') or CRIPTO)) + '.',
         'Aprendizajes compartidos: ' + (' | '.join(x['texto'] for x in comp) or '—'),
     ])
