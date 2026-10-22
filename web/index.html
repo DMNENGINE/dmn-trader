@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DMN Trader</title>
+<link rel="stylesheet" href="estilo.css">
+<script src="vendor/lightweight-charts.js"></script>
+</head>
+<body>
+<header class="barra">
+  <div class="marca"><span class="logo">◆</span> DMN <b>TRADER</b> <span class="etq">SIMULADO</span></div>
+  <select id="selCuenta" title="Cuenta"></select>
+  <div class="kpis" id="kpis"></div>
+  <button id="btnAvisos" class="campana" title="Avisos">🔔<span id="nAvisos"></span></button>
+</header>
+<nav class="pestanas" id="pestanas">
+  <button data-p="mesa" class="on">Mesa</button>
+  <button data-p="diario">Diario</button>
+  <button data-p="stats">Estadísticas</button>
+  <button data-p="backtest">Backtest</button>
+  <button data-p="practica">Práctica</button>
+  <button data-p="escaner">Escáner</button>
+  <button data-p="ajustes">Ajustes</button>
+</nav>
+
+<main>
+<!-- MESA -->
+<section id="p-mesa" class="pag on">
+  <div class="mesa">
+    <aside class="panel vig">
+      <div class="cab">Vigilancia <input id="buscar" placeholder="Buscar / añadir…" autocomplete="off"></div>
+      <div id="resBuscar" class="sugerencias"></div>
+      <div id="listaVig"></div>
+    </aside>
+    <div class="panel grafico">
+      <div class="cab">
+        <b id="gSimbolo">—</b> <span id="gNombre" class="tenue"></span> <span id="gPrecio" class="grande"></span> <span id="gCambio"></span>
+        <span class="espacio"></span>
+        <span id="intervalos" class="segm"></span>
+        <span class="segm" id="capas"><button data-c="sma">Medias</button><button data-c="bb">Bollinger</button><button data-c="vwap">VWAP</button></span>
+      </div>
+      <div id="controlReplay" class="replay oculto">
+        <b>PRÁCTICA</b> <span id="rInfo" class="tenue"></span>
+        <button data-paso="1">▶ 1 vela</button><button data-paso="5">▶▶ 5</button><button data-paso="20">⏩ 20</button>
+        <button id="rAuto">⏯ Auto</button><select id="rVel"><option value="1500">lento</option><option value="700" selected>normal</option><option value="250">rápido</option></select>
+      </div>
+      <div id="chart" class="lienzo"></div>
+      <div id="chartRsi" class="lienzo-rsi"></div>
+    </div>
+    <aside class="panel ticket">
+      <div class="cab">Orden</div>
+      <div class="lado segm ancho"><button data-lado="buy" class="on compra">COMPRAR</button><button data-lado="sell" class="venta">VENDER</button></div>
+      <label>Tipo <select id="tTipo"><option value="mercado">Mercado</option><option value="limite">Límite</option><option value="stop">Stop</option><option value="stop_limite">Stop-límite</option><option value="trailing">Trailing stop</option></select></label>
+      <div class="fila2"><label>Cantidad <input id="tCant" type="number" step="any" min="0"></label><label>o importe <input id="tImporte" type="number" step="any" min="0"></label></div>
+      <div class="fila2"><label id="lLim">Límite <input id="tLim" type="number" step="any"></label><label id="lStop">Stop <input id="tStop" type="number" step="any"></label></div>
+      <label id="lTrail">Trailing % <input id="tTrail" type="number" step="any" value="3"></label>
+      <div class="fila2"><label>Stop-loss <input id="tSL" type="number" step="any"></label><label>Take-profit <input id="tTP" type="number" step="any"></label></div>
+      <div class="fila2"><button id="btnAtr" class="sec" title="Stop a 2×ATR y objetivo a 2R">SL/TP por ATR</button><button id="btnRiesgo" class="sec" title="Calcula la cantidad para arriesgar tu % máximo">Tamaño por riesgo</button></div>
+      <div id="tRiesgoInfo" class="info"></div>
+      <label>Setup <input id="tSetup" list="setups" placeholder="ruptura, pullback, reversión…"></label>
+      <datalist id="setups"><option>Ruptura</option><option>Pullback a la media</option><option>Reversión</option><option>Cruce de medias</option><option>Rebote en soporte</option><option>Noticia</option><option>Impulso</option></datalist>
+      <label>Por qué entro <input id="tNota" placeholder="tesis en una frase"></label>
+      <button id="btnEnviar" class="enviar compra">COMPRAR</button>
+      <div id="tMsg" class="msg"></div>
+      <div class="cab sub">Lectura técnica</div>
+      <div id="analisis" class="analisis tenue">—</div>
+    </aside>
+  </div>
+  <div class="panel abajo">
+    <div class="segm" id="subTablas"><button data-t="pos" class="on">Posiciones</button><button data-t="ord">Órdenes</button><button data-t="ejec">Ejecuciones</button></div>
+    <button class="sec peligro derecha" id="btnCerrarTodo">Cerrar todo</button>
+    <div id="tablaAbajo"></div>
+  </div>
+</section>
+
+<!-- DIARIO -->
+<section id="p-diario" class="pag">
+  <div class="panel"><div class="cab">Diario de operaciones <span class="tenue">— cada trade cerrado: anótalo. Así se aprende.</span></div><div id="tablaDiario"></div></div>
+</section>
+
+<!-- ESTADÍSTICAS -->
+<section id="p-stats" class="pag">
+  <div id="statsKpis" class="tiles"></div>
+  <div class="dos">
+    <div class="panel"><div class="cab">Curva de capital</div><div id="chartEquity" class="lienzo-med"></div></div>
+    <div class="panel"><div class="cab">¿Listo para dinero real?</div><div id="examen"></div></div>
+  </div>
+  <div class="tres">
+    <div class="panel"><div class="cab">Por setup</div><div id="porSetup"></div></div>
+    <div class="panel"><div class="cab">Por símbolo</div><div id="porSimbolo"></div></div>
+    <div class="panel"><div class="cab">Por día</div><div id="porDia"></div></div>
+  </div>
+</section>
+
+<!-- BACKTEST -->
+<section id="p-backtest" class="pag">
+  <div class="dos ancho-izq">
+    <div class="panel form">
+      <div class="cab">Estrategia</div>
+      <div class="fila2"><label>Símbolo <input id="bSim" value="SPY"></label><label>Intervalo <select id="bInt"><option>1d</option><option>1wk</option><option>60m</option><option>15m</option></select></label></div>
+      <label>Rango <select id="bRango"><option value="1y">1 año</option><option value="2y">2 años</option><option value="5y" selected>5 años</option><option value="10y">10 años</option><option value="max">Todo</option><option value="1mo">1 mes</option><option value="6mo">6 meses</option></select></label>
+      <label>Estrategia <select id="bEst"></select></label>
+      <div id="bDesc" class="tenue chico"></div>
+      <div id="bParams" class="fila2"></div>
+      <div class="cab sub">Ejecución y riesgo</div>
+      <div class="fila2"><label>Capital <input id="bCap" type="number" value="10000"></label><label>Comisión % <input id="bCom" type="number" step="any" value="0.05"></label></div>
+      <div class="fila2"><label>Deslizamiento % <input id="bSlip" type="number" step="any" value="0.02"></label><label>Tamaño <select id="bTam"><option value="todo">Todo el capital</option><option value="fraccion">% del capital</option><option value="riesgo">% de riesgo (con stop ATR)</option></select></label></div>
+      <div class="fila2"><label>Stop (×ATR) <input id="bStop" type="number" step="any" value="0"></label><label>Objetivo (×ATR) <input id="bObj" type="number" step="any" value="0"></label></div>
+      <div class="fila2"><label>Fracción % <input id="bFrac" type="number" value="50"></label><label>Riesgo % <input id="bRiesgo" type="number" step="any" value="1"></label></div>
+      <label class="check"><input id="bCortos" type="checkbox"> Permitir cortos</label>
+      <button id="btnBT" class="enviar">Ejecutar backtest</button>
+      <div class="cab sub">Optimizar (rejilla, 70 % entreno / 30 % prueba)</div>
+      <div id="bRangos" class="chico"></div>
+      <button id="btnOpt" class="sec ancho">Optimizar parámetros</button>
+      <div id="bMsg" class="msg"></div>
+    </div>
+    <div>
+      <div id="btKpis" class="tiles"></div>
+      <div class="panel"><div class="cab">Capital: estrategia vs comprar y mantener</div><div id="chartBT" class="lienzo-med"></div></div>
+      <div class="dos"><div class="panel"><div class="cab">Monte Carlo (500 órdenes al azar)</div><div id="btMC"></div></div><div class="panel"><div class="cab">Optimización</div><div id="btOpt" class="tenue">—</div></div></div>
+      <div class="panel"><div class="cab">Operaciones</div><div id="btTrades"></div></div>
+    </div>
+  </div>
+</section>
+
+<!-- PRÁCTICA -->
+<section id="p-practica" class="pag">
+  <div class="panel form estrecho">
+    <div class="cab">Nueva sesión de práctica (replay)</div>
+    <p class="tenue">Se carga un trozo del pasado y avanzas vela a vela sin ver el futuro. Operas igual que en la Mesa. Ideal para entrenar decisiones rápido: un año de mercado en una tarde.</p>
+    <div class="fila2"><label>Símbolo <input id="pSim" value="AAPL"></label><label>Intervalo <select id="pInt"><option>1d</option><option>60m</option><option>15m</option><option>5m</option><option>1wk</option></select></label></div>
+    <div class="fila2"><label>Rango <select id="pRango"><option value="2y">2 años</option><option value="5y">5 años</option><option value="1y">1 año</option><option value="6mo">6 meses</option><option value="1mo">1 mes</option><option value="5d">5 días</option></select></label><label>Capital <input id="pCap" type="number" value="10000"></label></div>
+    <label>Velas visibles al empezar <input id="pCal" type="number" value="120"></label>
+    <label class="check"><input id="pAzar" type="checkbox" checked> Empezar en un punto al azar (no sabes qué viene)</label>
+    <button id="btnPractica" class="enviar">Empezar práctica</button>
+    <div id="pMsg" class="msg"></div>
+  </div>
+  <div class="panel"><div class="cab">Sesiones de práctica</div><div id="listaPracticas"></div></div>
+</section>
+
+<!-- ESCÁNER -->
+<section id="p-escaner" class="pag">
+  <div class="panel"><div class="cab">Escáner de la lista de vigilancia <button id="btnEscanear" class="sec">Escanear ahora</button></div><div id="tablaEscaner" class="tenue">Pulsa «Escanear ahora».</div></div>
+  <div class="panel"><div class="cab">Alertas de precio</div>
+    <div class="fila4"><input id="aSim" placeholder="Símbolo"><select id="aCond"><option value="mayor">precio ≥</option><option value="menor">precio ≤</option><option value="cambio_pct">cambio día ≥ %</option></select><input id="aVal" type="number" step="any" placeholder="valor"><input id="aNota" placeholder="nota"><button id="btnAlerta" class="sec">Crear</button></div>
+    <div id="tablaAlertas"></div>
+  </div>
+</section>
+
+<!-- AJUSTES -->
+<section id="p-ajustes" class="pag">
+  <div class="dos">
+    <div class="panel form"><div class="cab">Reglas de riesgo de esta cuenta</div><div id="formCfg"></div><button id="btnCfg" class="enviar">Guardar reglas</button><div id="cfgMsg" class="msg"></div></div>
+    <div class="panel form"><div class="cab">Cuentas</div>
+      <div class="fila2"><label>Nombre <input id="nNombre" value="Cuenta 2"></label><label>Capital <input id="nCap" type="number" value="10000"></label></div>
+      <label>Moneda <select id="nMon"><option>USD</option><option>EUR</option></select></label>
+      <button id="btnNueva" class="sec ancho">Crear cuenta simulada</button>
+      <div class="cab sub">Esta cuenta</div>
+      <div class="fila2"><button id="btnReset" class="sec">Reiniciar (borra todo)</button><button id="btnBorrar" class="sec peligro">Eliminar cuenta</button></div>
+      <div class="cab sub">Avisos a Discord (webhook)</div>
+      <label>URL del webhook <input id="wUrl" placeholder="https://discord.com/api/webhooks/…"></label>
+      <button id="btnWebhook" class="sec ancho">Guardar webhook</button>
+      <div id="ajMsg" class="msg"></div>
+    </div>
+  </div>
+</section>
+</main>
+
+<div id="modal" class="modal oculto"><div class="caja"><div id="modalCuerpo"></div></div></div>
+<div id="avisosPanel" class="avisos oculto"></div>
+<script src="app.js"></script>
+</body>
+</html>
