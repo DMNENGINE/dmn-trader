@@ -534,10 +534,16 @@ def _gestionar(a, g):
                 motor.mover_stop(cid, p['simbolo'], stop=t['entrada'])
 
 
+SISTEMA = ('nuevo intento', 'enjambre parado', 'agente parado', 'sobra (tamaño del enjambre)')
+
+
 def _registrar_cerrados(e, a, it):
-    for t in db.q("""SELECT t.id, t.r, t.pnl, ag.estrategia FROM trades t JOIN ag_trades ag ON ag.trade_id=t.id
+    for t in db.q("""SELECT t.id, t.r, t.pnl, t.nota_cierre, ag.estrategia FROM trades t JOIN ag_trades ag ON ag.trade_id=t.id
                      WHERE t.estado='cerrado' AND ag.r IS NULL AND t.cuenta_id=?""", (a['cuenta_id'],)):
         r = t['r'] if t['r'] is not None else 0.0
+        if (t['nota_cierre'] or '') in SISTEMA:  # lo cerró el sistema (reinicio, parada…): no es una decisión del agente, no se aprende de él
+            db.ex("UPDATE ag_trades SET r=?, causa='sistema', revisado=1 WHERE trade_id=?", (r, t['id']))
+            continue
         db.ex('UPDATE ag_trades SET r=? WHERE trade_id=?', (r, t['id']))
         db.ex('UPDATE ag_intentos SET trades=trades+1, ganados=ganados+? WHERE id=?', (1 if t['pnl'] > 0 else 0, it['id']))
         e = estado()
@@ -597,7 +603,7 @@ def diagnosticar(x, g):
             causas.append(('devolvio', f"{x['simbolo']}: devolvió la ganancia aun con breakeven. Solución: objetivo de {g['rr']}R a {nv}R.", {'rr': nv}))
     if ras['tendencia'] == -d and not g['filtro_tendencia']:
         causas.append(('contra_tendencia', f"{x['simbolo']}: entró contra la tendencia de la EMA50. Solución: solo a favor de la tendencia.", {'filtro_tendencia': True}))
-    gan = [json.loads(y['rasgos'])['atr_pct'] for y in db.q('SELECT rasgos FROM ag_trades WHERE r > 0 ORDER BY trade_id DESC LIMIT 60')]
+    gan = [json.loads(y['rasgos'])['atr_pct'] for y in db.q("SELECT rasgos FROM ag_trades WHERE r > 0 AND COALESCE(causa,'')<>'sistema' ORDER BY trade_id DESC LIMIT 60")]
     if len(gan) >= 8:
         med = statistics.median(gan)
         if ras['atr_pct'] > med * 2.2:
@@ -616,24 +622,29 @@ def diagnosticar(x, g):
 
 def _patrones_globales(e):
     """Conocimiento COMPARTIDO: lo que pierde en todo el enjambre se bloquea para todos."""
-    filas = db.q('SELECT simbolo, rasgos, r FROM ag_trades WHERE r IS NOT NULL ORDER BY trade_id DESC LIMIT 1500')
+    filas = db.q("SELECT simbolo, rasgos, r, agente_id, abierto FROM ag_trades WHERE r IS NOT NULL AND COALESCE(causa,'')<>'sistema' ORDER BY trade_id DESC LIMIT 1500")
     por_s, por_h = {}, {}
     for f in filas:
-        por_s.setdefault(f['simbolo'], []).append(f['r'])
-        por_h.setdefault(json.loads(f['rasgos'])['hora'], []).append(f['r'])
+        por_s.setdefault(f['simbolo'], []).append(f)
+        por_h.setdefault(json.loads(f['rasgos'])['hora'], []).append(f)
     b = e.setdefault('bloqueos', {'simbolos': [], 'horas': []})
-    for s, rs in por_s.items():
-        if len(rs) >= 25 and statistics.fmean(rs) < -0.35 and s not in b['simbolos'] and len(b['simbolos']) < len(CRIPTO + ACCIONES) - 4:
-            b['simbolos'].append(s)
-            _leccion(None, None, None, 'compartida', f"Enjambre: {s} pierde en {len(rs)} operaciones de varios agentes ({statistics.fmean(rs):+.2f}R de media). Nadie lo opera más.", {'simbolo': s})
-    for h, rs in por_h.items():
-        if len(rs) >= 25 and statistics.fmean(rs) < -0.35 and h not in b['horas'] and len(b['horas']) < 8:
+    dias = lambda fs: len({time.strftime('%Y-%m-%d', time.gmtime(x['abierto'])) for x in fs})
+    horas = lambda fs: len({time.gmtime(x['abierto']).tm_hour for x in fs})
+    agentes_ = lambda fs: len({x['agente_id'] for x in fs})
+    for s_, fs in por_s.items():  # un símbolo: muchos trades de muchos agentes, repartidos en varias horas
+        rs = [x['r'] for x in fs]
+        if len(rs) >= 30 and agentes_(fs) >= 8 and horas(fs) >= 4 and statistics.fmean(rs) < -0.35 and s_ not in b['simbolos'] and len(b['simbolos']) < len(CRIPTO + ACCIONES) - 4:
+            b['simbolos'].append(s_)
+            _leccion(None, None, None, 'compartida', f"Enjambre: {s_} pierde en {len(rs)} operaciones de {agentes_(fs)} agentes a lo largo de {horas(fs)} horas ({statistics.fmean(rs):+.2f}R de media). Nadie lo opera más.", {'simbolo': s_})
+    for h, fs in por_h.items():  # una hora: hace falta verlo en al menos 3 días distintos
+        rs = [x['r'] for x in fs]
+        if len(rs) >= 30 and dias(fs) >= 3 and agentes_(fs) >= 8 and statistics.fmean(rs) < -0.35 and h not in b['horas'] and len(b['horas']) < 8:
             b['horas'].append(h)
-            _leccion(None, None, None, 'compartida', f"Enjambre: a las {h}:00 UTC se pierde de forma sistemática ({len(rs)} trades, {statistics.fmean(rs):+.2f}R). Nadie opera a esa hora.", {'hora': h})
+            _leccion(None, None, None, 'compartida', f"Enjambre: a las {h}:00 UTC se pierde en {dias(fs)} días distintos ({len(rs)} trades, {statistics.fmean(rs):+.2f}R). Nadie opera a esa hora.", {'hora': h})
 
 
 def aptitud(a):
-    rs = [x['r'] for x in db.q('SELECT r FROM ag_trades WHERE agente_id=? AND abierto>=? AND r IS NOT NULL', (a['id'], a['genoma_desde'] or 0))]
+    rs = [x['r'] for x in db.q("SELECT r FROM ag_trades WHERE agente_id=? AND abierto>=? AND r IS NOT NULL AND COALESCE(causa,'')<>'sistema'", (a['id'], a['genoma_desde'] or 0))]
     return (puntuar(rs) if len(rs) >= 5 else None), len(rs)
 
 
@@ -735,7 +746,7 @@ def _quiebra(e, a, it, eq, ctx):
 
 
 def _vista_agentes(lim=None):
-    stats = {r['agente_id']: r for r in db.q('SELECT agente_id, COUNT(*) n, SUM(r>0) g, AVG(r) m FROM ag_trades WHERE r IS NOT NULL GROUP BY agente_id')}
+    stats = {r['agente_id']: r for r in db.q("SELECT agente_id, COUNT(*) n, SUM(r>0) g, AVG(r) m FROM ag_trades WHERE r IS NOT NULL AND COALESCE(causa,'')<>'sistema' GROUP BY agente_id")}
     out = []
     for a in agentes():
         g = _g(a)
@@ -856,7 +867,7 @@ def informe(desde=None):
     preparar()
     e = estado() or {}
     desde = int(desde or e.get('sesion_inicio') or 0)
-    tr = db.q('SELECT ag.*, t.pnl FROM ag_trades ag JOIN trades t ON t.id=ag.trade_id WHERE ag.abierto>=? AND ag.r IS NOT NULL', (desde,))
+    tr = db.q("SELECT ag.*, t.pnl FROM ag_trades ag JOIN trades t ON t.id=ag.trade_id WHERE ag.abierto>=? AND ag.r IS NOT NULL AND COALESCE(ag.causa,'')<>'sistema'", (desde,))
     its = db.q('SELECT * FROM ag_intentos WHERE inicio>=?', (desde,))
     if not tr and not its:
         return 'El enjambre aún no ha operado en esta sesión.'
