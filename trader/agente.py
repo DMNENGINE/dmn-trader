@@ -313,6 +313,7 @@ def arrancar_hilo():
 
 
 ULTIMO_TICK = {'dur': 0, 'ts': 0}
+_FOTOS = {}
 
 
 def _bucle():
@@ -442,6 +443,9 @@ def paso_agente(e, a, ctx):
         db.ex('UPDATE ag_intentos SET max_equity=? WHERE id=?', (eq, it['id']))
     if eq > (a['max_equity'] or 0):
         _poner(a['id'], max_equity=eq)
+    if time.time() - _FOTOS.get(a['id'], 0) > 300:
+        _FOTOS[a['id']] = time.time()
+        motor.instantanea(cid)
     _registrar_cerrados(e, a, it)
     _autopsias(a)
     a = db.uno('SELECT * FROM ag_agentes WHERE id=?', (a['id'],))
@@ -747,6 +751,11 @@ def _quiebra(e, a, it, eq, ctx):
 
 def _vista_agentes(lim=None):
     stats = {r['agente_id']: r for r in db.q("SELECT agente_id, COUNT(*) n, SUM(r>0) g, AVG(r) m FROM ag_trades WHERE r IS NOT NULL AND COALESCE(causa,'')<>'sistema' GROUP BY agente_id")}
+    quie = {r['agente_id']: r['n'] for r in db.q("SELECT agente_id, COUNT(*) n FROM ag_intentos WHERE resultado='quiebra' GROUP BY agente_id")}
+    curvas = {}
+    for r in db.q('SELECT cuenta_id, valor FROM equity WHERE ts>=? ORDER BY ts, rowid', (int(time.time()) - 6 * 3600,)):
+        curvas.setdefault(r['cuenta_id'], []).append(r['valor'])
+    cap = (estado() or {}).get('capital') or 1.0
     out = []
     for a in agentes():
         g = _g(a)
@@ -754,12 +763,26 @@ def _vista_agentes(lim=None):
             eq = motor.resumen(a['cuenta_id'])['equity']
         except Exception:
             eq = None
-        st = stats.get(a['id'], {})
+        st, cv = stats.get(a['id'], {}), curvas.get(a['cuenta_id'], [])
+        paso = max(1, len(cv) // 30)
         out.append({'id': a['id'], 'nombre': a['nombre'], 'estado': a['estado'], 'ultimo': a['ultimo'], 'equity': round(eq, 4) if eq is not None else None,
-                    'max_equity': round(a['max_equity'] or 0, 4), 'generacion': a['generacion'], 'intentos': a['intentos'], 'metas': a['metas'],
+                    'pnl_pct': round((eq / cap - 1) * 100, 2) if eq is not None else None, 'max_equity': round(a['max_equity'] or 0, 4),
+                    'generacion': a['generacion'], 'intentos': a['intentos'], 'metas': a['metas'], 'quiebras': quie.get(a['id'], 0),
                     'trades': st.get('n', 0), 'ganados': st.get('g') or 0, 'r_medio': round(st['m'], 3) if st.get('m') is not None else None,
-                    'marco': g.get('marco'), 'estrategia': g['estrategia'], 'riesgo_pct': g['riesgo_pct'], 'tendencia': g['filtro_tendencia']})
+                    'marco': g.get('marco'), 'estrategia': g['estrategia'], 'riesgo_pct': g['riesgo_pct'], 'tendencia': g['filtro_tendencia'],
+                    'curva': [round(x, 4) for x in (cv[::paso] + ([cv[-1]] if cv and paso > 1 else []))][-31:] + ([round(eq, 4)] if eq is not None else [])})
     return out[:lim] if lim else out
+
+
+def precios():
+    out = []
+    for s_ in CRIPTO + ACCIONES:
+        try:
+            q = datos.cotizacion(s_)
+            out.append({'simbolo': s_, 'precio': q['precio'], 'cambio_pct': q['cambio_pct'], 'abierto': q['abierto']})
+        except Exception:
+            pass
+    return out
 
 
 def sincronizar(e):
@@ -841,7 +864,7 @@ def mapa():
         nodos.append({'nodo': n['nodo'], 'local': False, 'visto': n['visto'], 'en_linea': time.time() - n['visto'] < 300, **d})
     tot = {'agentes': sum(len(x.get('agentes') or []) for x in nodos), 'trades': sum((x.get('kpis') or {}).get('trades') or 0 for x in nodos),
            'metas': sum((x.get('kpis') or {}).get('metas') or 0 for x in nodos), 'quiebras': sum((x.get('kpis') or {}).get('quiebras') or 0 for x in nodos)}
-    v = {'nodos': nodos, 'total': tot, 'lecciones': lecciones(25), 'log': LOG[-30:]}
+    v = {'nodos': nodos, 'total': tot, 'lecciones': lecciones(25), 'log': LOG[-30:], 'precios': precios()}
     _cache_mapa.update(t=time.time(), v=v)
     return v
 
