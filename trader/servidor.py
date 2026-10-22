@@ -313,6 +313,11 @@ def r_enj_lec(q, b):
     return agente.lecciones(int(q.get('n', 50)))
 
 
+@ruta('GET', '/api/enjambre/noticias')
+def r_enj_not(q, b):
+    return agente.noticias(int(q.get('n') or 30))
+
+
 @ruta('GET', '/api/enjambre/informe')
 def r_enj_inf(q, b):
     return {'texto': agente.informe(q.get('desde'))}

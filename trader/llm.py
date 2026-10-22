@@ -3,7 +3,7 @@ import json, os, re, threading, time, urllib.request
 
 OLLAMA = os.environ.get('DMN_TRADER_OLLAMA', 'http://127.0.0.1:11434').rstrip('/')
 MODELO = os.environ.get('DMN_TRADER_LLM', 'gemma4:31b-cloud')
-MAX_HORA = int(os.environ.get('DMN_TRADER_LLM_MAX_HORA', '150'))
+MAX_HORA = int(os.environ.get('DMN_TRADER_LLM_MAX_HORA', '240'))
 _uso, _lock = [], threading.Lock()
 
 

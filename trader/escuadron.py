@@ -6,7 +6,7 @@
 - Jefe de mesa: cada 2 h lee el informe, escribe un análisis y propone cambios de genes; cada propuesta se prueba en el
   simulador con velas reales y solo se aplica si mejora."""
 import copy, json, statistics, threading, time, traceback
-from . import agente as A, datos, db, indicadores as ind, llm, motor, sentimiento
+from . import agente as A, analista, datos, db, indicadores as ind, llm, motor, sentimiento
 
 PERSONALIDADES = [
     ('Tendencias', 'Solo operas a favor de la tendencia clara de 15 minutos (EMA20 > EMA50 para comprar, al revés para vender). Paciente: mejor no operar que operar mal.'),
@@ -22,7 +22,7 @@ GEN_LLM = dict(A.GENOMA_BASE, estrategia='llm', marco='15m', max_barras=16, be_e
 GENES_JEFE = {'stop_atr': (0.6, 4.0), 'rr': (0.8, 5.0), 'min_ventaja': (1.0, 6.0), 'max_barras': (5, 120), 'be_en_r': (0.0, 2.0),
               'riesgo_pct': (3.0, 35.0), 'vol_max_pct': (0.05, 3.0), 'retroceso': (0.05, 1.5), 'tramos': (1, 3), 'roi_min': (0.0, 2.0),
               'trail_r': (0.0, 2.0), 'trail_frac': (0.3, 1.5), 'filtro_ia': (0.0, 0.65), 'enfriar': (0, 5), 'guardia': (0, 5),
-              'filtro_tendencia': (False, True), 'marco': tuple(A.MARCOS), 'entrada': ('mercado', 'limite'), 'estrategia': tuple(A.ESTRATEGIAS)}
+              'filtro_tendencia': (False, True), 'noticias': (0, 1), 'marco': tuple(A.MARCOS), 'entrada': ('mercado', 'limite'), 'estrategia': tuple(A.ESTRATEGIAS)}
 _ronda, _jefe = threading.Lock(), threading.Lock()
 _disp = [0, False]
 
@@ -93,6 +93,7 @@ def _prompt(e, a, g, filas):
         'El objetivo debe pagar con margen la comisión y el spread (columna coste). Como máximo UNA entrada nueva por turno; no hacer nada es válido. '
         f"Las posiciones se cierran solas por stop, objetivo, trailing desde +1R o a las {g['max_barras'] * 15 // 60} h.",
         f"Fear & Greed de cripto: {st['fng']['valor']} ({st['fng']['clase']})." if st.get('fng') else '',
+        _noticias(st),
         'Tus posiciones: ' + ('; '.join(f"{p['simbolo']} {'largo' if p['cantidad'] > 0 else 'corto'} desde {p['precio_medio']:.6g}, ahora {p['precio']:.6g}" for p in pos) or 'ninguna') + '.',
         'Tus últimas operaciones: ' + ('; '.join(f"{t['simbolo']} {t['direccion']} {t['r']:+.2f}R" + (f" ({t['causa']})" if t['causa'] else '') for t in ult) or 'ninguna aún') + '.',
         'Tus lecciones recientes: ' + (' | '.join(x['texto'][:160] for x in lec) or 'ninguna') + '.',
@@ -100,6 +101,18 @@ def _prompt(e, a, g, filas):
         'Responde SOLO con JSON: {"entrar": null o {"simbolo": "BTC-USD", "lado": "compra" o "venta", "stop_atr": 2, "rr": 2, "confianza": 0.0-1.0, '
         '"motivo": "una frase"}, "cerrar": ["SÍMBOLO"...], "pensamiento": "una frase sobre el mercado"}',
     ])
+
+
+def _noticias(st):
+    """Lo que el analista de noticias considera más importante ahora, para el prompt de los traders."""
+    no = [x for x in st.get('noticias') or [] if x.get('importancia', 0) >= .4][:8]
+    ev = analista.proximo_evento(st)
+    m = st.get('macro') or {}
+    if not no and not ev:
+        return ''
+    return '\n'.join([f"Analista de noticias: riesgo mercado {m.get('MERCADO', 0):+.2f}, cripto {m.get('CRIPTO', 0):+.2f}, acciones {m.get('ACCIONES', 0):+.2f}."]
+                     + [f"- hace {(time.time() - x['ts']) / 60:.0f} min [{', '.join(x['simbolos']) or '—'}] {x['resumen'] or x['titulo']} (impacto {x['impacto']:+.1f}, importancia {x['importancia']:.1f})" for x in no]
+                     + ([f"Próximo evento macro: {ev['titulo']} ({ev['impacto']}) a las {time.strftime('%H:%M', time.localtime(ev['ts']))}."] if ev else []))
 
 
 def decidir(e, a, filas, num):

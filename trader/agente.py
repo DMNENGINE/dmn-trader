@@ -3,7 +3,7 @@ Cada agente: opera con su genoma → autopsia de cada pérdida con su arreglo �
 El enjambre: comparte lo que aprende (símbolos/horas que pierden para todos), evoluciona cada 2 h (el 20 % peor se reemplaza por hijos
 del 10 % mejor) y, si hay varios equipos (Pi = central, PC = nodo), intercambia los mejores genomas cada 30 min (modelo de islas)."""
 import copy, json, math, os, random, socket, statistics, sys, threading, time, traceback
-from . import ia, sentimiento, datos, db, indicadores as ind, motor
+from . import analista, ia, sentimiento, datos, db, indicadores as ind, motor
 
 ESQUEMA = """
 CREATE TABLE IF NOT EXISTS ag_agentes (id INTEGER PRIMARY KEY, nombre TEXT, cuenta_id INTEGER, genoma TEXT, generacion INTEGER DEFAULT 0,
@@ -29,7 +29,8 @@ GENOMA_BASE = {'marco': '1m', 'estrategia': 'ema_cruce', 'p': dict(ESTRATEGIAS['
                'vol_min_pct': 0.0, 'vol_max_pct': 3.0, 'riesgo_pct': 20.0, 'max_barras': 30, 'be_en_r': 0.0, 'min_ventaja': 2.0,
                'cortos': True, 'horas_bloqueadas': [], 'simbolos_bloqueados': [],
                'entrada': 'mercado', 'retroceso': 0.3, 'espera': 3, 'tramos': 1,
-               'enfriar': 2, 'guardia': 3, 'roi_min': None, 'trail_r': 0.0, 'trail_frac': 0.8, 'filtro_ia': 0.0}
+               'enfriar': 2, 'guardia': 3, 'roi_min': None, 'trail_r': 0.0, 'trail_frac': 0.8, 'filtro_ia': 0.0, 'noticias': 0}
+# noticias = 1: no entra contra noticias fuertes del símbolo (nota ≤ -0,4 en su dirección) ni durante un evento macro de impacto alto.
 # protecciones (idea de freqtrade): `enfriar` velas sin volver al mismo símbolo tras cerrar; `guardia` pérdidas seguidas → pausa.
 # roi_min: el objetivo baja con el tiempo de rr a roi_min (en R) a lo largo de max_barras; None = objetivo fijo.
 # trail_r: desde +trail_r R el stop persigue al precio a trail_frac × la distancia del stop; 0 = sin trailing.
@@ -244,6 +245,8 @@ def _mutar(g, rnd, fuerte=False):
     g['trail_frac'] = round(min(max(g.get('trail_frac', 0.8) * rnd.uniform(1 - f, 1 + f), 0.3), 1.5), 2)
     if rnd.random() < 0.15:
         g['filtro_ia'] = 0.0 if g.get('filtro_ia') else round(rnd.uniform(0.45, 0.6), 2)
+    if rnd.random() < 0.15:
+        g['noticias'] = 0 if g.get('noticias') else 1
     return g
 
 
@@ -320,6 +323,7 @@ def genoma_inicial(i, rnd):
     g['roi_min'] = rnd.choice([None, None, 0.5])
     g['trail_r'] = rnd.choice([0.0, 0.0, 1.0])
     g['filtro_ia'] = rnd.choice([0.0, 0.0, 0.5, 0.55])
+    g['noticias'] = rnd.choice([0, 0, 1])
     return g
 
 
@@ -509,7 +513,7 @@ def _entrenar_ia():
 
 def _sentimiento(e):
     try:
-        sentimiento.actualizar(_universo(e))
+        sentimiento.actualizar(_universo(e), noticias=not analista.activo())
         log('📰 ' + sentimiento.resumen())
     except Exception:
         log('error en el sentimiento: ' + traceback.format_exc().splitlines()[-1])
@@ -570,6 +574,9 @@ def paso_enjambre(e):
         guardar(e)
         threading.Thread(target=_sentimiento, args=(e,), daemon=True).start()
     from . import escuadron
+    if escuadron.activo() and not analista.activo():  # el analista de noticias vive donde está el modelo de lenguaje
+        analista.arrancar(lambda: _universo(estado() or e))
+        log('📰 analista de noticias en marcha')
     if ahora_ - e.get('ultima_ronda_llm', 0) > escuadron.LLM_CADA and escuadron.activo():
         e['ultima_ronda_llm'] = ahora_
         guardar(e)
@@ -791,6 +798,9 @@ def paso_agente(e, a, ctx):
         sl, tp = p - d * dist, p + d * g['rr'] * dist
         rasgos = {'atr_pct': round(atr[-1] / p * 100, 4), 'tendencia': tend[-1], 'hora': hora, 'spread_pct': round(spread, 4),
                   'coste_pct': round(coste, 4), 'precio': p, 'dist': dist, 'entrada': g['entrada'], 'tramos': len(fr), **sentimiento.rasgos(sim, sent)}
+        if g.get('noticias') and (rasgos.get('sent', 0) * d <= -0.4 or rasgos.get('evento')):  # el analista avisa: noticias en contra o evento macro
+            db.ex('UPDATE ag_agentes SET descartes=descartes+1 WHERE id=?', (a['id'],))
+            continue
         if g.get('filtro_ia'):  # el modelo del enjambre opina: si ve pocas opciones de ganar, no entra
             pr = ia.probabilidad(rasgos, g, d)
             if pr is not None:
@@ -981,7 +991,7 @@ def aptitud(a):
 def _cruce(g1, g2, rnd):
     h = copy.deepcopy(g1)
     for k in ('stop_atr', 'rr', 'filtro_tendencia', 'riesgo_pct', 'max_barras', 'be_en_r', 'min_ventaja', 'marco', 'entrada', 'retroceso', 'tramos',
-              'enfriar', 'guardia', 'roi_min', 'trail_r', 'trail_frac', 'filtro_ia'):
+              'enfriar', 'guardia', 'roi_min', 'trail_r', 'trail_frac', 'filtro_ia', 'noticias'):
         if rnd.random() < 0.5:
             h[k] = copy.deepcopy(g2.get(k, GENOMA_BASE[k]))
     return h
@@ -1217,9 +1227,17 @@ def mapa():
         nodos.append({'nodo': n['nodo'], 'local': False, 'visto': n['visto'], 'en_linea': time.time() - n['visto'] < 300, **d})
     tot = {'agentes': sum(len(x.get('agentes') or []) for x in nodos), 'trades': sum((x.get('kpis') or {}).get('trades') or 0 for x in nodos),
            'metas': sum((x.get('kpis') or {}).get('metas') or 0 for x in nodos), 'quiebras': sum((x.get('kpis') or {}).get('quiebras') or 0 for x in nodos)}
-    v = {'nodos': nodos, 'total': tot, 'lecciones': lecciones(25), 'log': LOG[-30:], 'precios': precios()}
+    v = {'nodos': nodos, 'total': tot, 'lecciones': lecciones(25), 'log': LOG[-30:], 'precios': precios(), 'analista': noticias(15)}
     _cache_mapa.update(t=time.time(), v=v)
     return v
+
+
+def noticias(n=30):
+    """Lo último del analista de noticias (aquí o recibido del nodo que lo tiene)."""
+    st = sentimiento.actual()
+    ev = [x for x in st.get('eventos') or [] if x['ts'] > time.time() - 1800][:8]
+    return {'activo': bool(st.get('analista')), 'ts': st.get('ts'), 'macro': st.get('macro') or {}, 'fng': st.get('fng'), 'noticias': (st.get('noticias') or [])[:n],
+            'eventos': ev, 'simbolos': st.get('simbolos') or {}, 'resumen': analista.resumen(st), 'local': analista.activo(), 'estado': dict(analista.ESTADO)}
 
 
 def agente(aid):
@@ -1274,6 +1292,7 @@ def informe(desde=None):
         'Por qué se pierde (autopsias): ' + (', '.join(f"{x['tipo']} ×{x['n']}" for x in lec) or '—') + '.',
         ia.resumen(),
         sentimiento.resumen(),
+        analista.resumen(),
         _resumen_jefe(),
         'Mercados cripto (por volumen): ' + ', '.join(x.replace('-USD', '') for x in ((e.get('universo') or {}).get('cripto') or CRIPTO)) + '.',
         'Aprendizajes compartidos: ' + (' | '.join(x['texto'] for x in comp) or '—'),

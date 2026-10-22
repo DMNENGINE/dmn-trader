@@ -60,14 +60,15 @@ def actual():
     return db.ajuste(CLAVE, {}) or {}
 
 
-def actualizar(simbolos):
-    """Refresca Fear & Greed y, si hay modelo de lenguaje en este equipo, las noticias. Devuelve el estado guardado."""
+def actualizar(simbolos, noticias=True):
+    """Refresca Fear & Greed y, si hay modelo de lenguaje en este equipo, las noticias (salvo que ya lo haga el analista en
+    tiempo real, trader/analista.py). Devuelve el estado guardado."""
     st = actual()
     try:
         st['fng'] = fear_greed()
     except Exception:
         pass
-    if llm_disponible():
+    if noticias and llm_disponible():
         heads = {}
         for s in simbolos:
             try:
@@ -93,7 +94,8 @@ def recibir(otro):
         return
     st = actual()
     if otro['ts'] > st.get('ts', 0):
-        st.update(simbolos=otro.get('simbolos') or {}, ts=otro['ts'], modelo=otro.get('modelo'))
+        st.update(simbolos=otro.get('simbolos') or {}, ts=otro['ts'], modelo=otro.get('modelo'),
+                  **{k: otro[k] for k in ('macro', 'noticias', 'eventos', 'eventos_ts', 'analista') if k in otro})
         if not st.get('fng') and otro.get('fng'):
             st['fng'] = otro['fng']
         db.poner_ajuste(CLAVE, st)
@@ -108,6 +110,12 @@ def rasgos(simbolo, st=None):
     v = (st.get('simbolos') or {}).get(simbolo)
     if v and time.time() - v.get('ts', 0) < VIGENCIA:
         out['sent'] = v['s']
+    m = st.get('macro')
+    if m and time.time() - st.get('ts', 0) < VIGENCIA:
+        out['macro'] = m.get('MERCADO', 0)
+    ahora = time.time()
+    if any(e['impacto'] == 'High' and -1800 <= e['ts'] - ahora <= 900 for e in st.get('eventos') or []):
+        out['evento'] = 1                                   # evento macro fuerte en curso (de -15 a +30 min)
     return out
 
 

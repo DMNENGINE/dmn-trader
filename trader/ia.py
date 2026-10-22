@@ -20,7 +20,8 @@ def rasgos(ras, g, d):
          ras.get('coste_pct', 0.0), (ras.get('dist') or 0) / precio * 100, float(d), 1.0 if g.get('entrada') == 'limite' else 0.0,
          float(g.get('tramos', 1)), float(g.get('rr', 1.5)), float(g.get('stop_atr', 1.5)),
          (ras.get('coste_pct', 0.0) / ((ras.get('dist') or 1) / precio * 100)) if ras.get('dist') else 0.0,
-         ((ras['fng'] - 50) / 50) if ras.get('fng') is not None else 0.0, (ras.get('sent') or 0.0) * d]  # sentimiento: miedo/euforia y noticias a favor
+         ((ras['fng'] - 50) / 50) if ras.get('fng') is not None else 0.0, (ras.get('sent') or 0.0) * d,
+         (ras.get('macro') or 0.0) * d, float(ras.get('evento') or 0)]  # analista: riesgo de mercado a favor y evento macro en curso  # sentimiento: miedo/euforia y noticias a favor
     x += [1.0 if g.get('estrategia') == e else 0.0 for e in ESTRATEGIAS]
     x += [1.0 if g.get('marco') == m else 0.0 for m in MARCOS]
     return x
