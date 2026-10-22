@@ -4,10 +4,9 @@ Solo el nodo con ollama puntúa noticias (el PC); la Pi recibe las puntuaciones 
 import json, os, re, time, urllib.request
 import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
-from . import db
+from . import db, llm
 
-OLLAMA = os.environ.get('DMN_TRADER_OLLAMA', 'http://127.0.0.1:11434').rstrip('/')
-MODELO = os.environ.get('DMN_TRADER_LLM', 'gemma4:31b-cloud')
+MODELO = llm.MODELO
 CLAVE, VIGENCIA, HORAS = 'sentimiento', 3 * 3600, 12
 UA = 'Mozilla/5.0 (DMN Trader)'
 
@@ -38,18 +37,11 @@ def titulares(simbolo, horas=HORAS, maximo=6):
 
 
 def llm_disponible():
-    try:
-        return any(m['name'].startswith(MODELO.split(':')[0]) for m in json.loads(_get(OLLAMA + '/api/tags', 3))['models'])
-    except Exception:
-        return False
+    return llm.disponible()
 
 
 def _preguntar(texto):
-    cuerpo = {'model': MODELO, 'stream': False, 'format': 'json', 'options': {'temperature': 0},
-              'messages': [{'role': 'user', 'content': texto}]}
-    r = json.loads(_get(OLLAMA + '/api/chat', 120, json.dumps(cuerpo).encode()))['message']['content']
-    m = re.search(r'\{.*\}', r, re.S)
-    return json.loads(m.group(0)) if m else {}
+    return llm.preguntar(texto)
 
 
 def puntuar(por_simbolo):

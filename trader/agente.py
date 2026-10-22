@@ -281,6 +281,11 @@ def guardar(e):
     db.poner_ajuste('enjambre', e)
 
 
+def _llm(a):
+    """Trader del escuadrón LLM (trader/escuadron.py): decide gemma, no la evolución."""
+    return '"estrategia": "llm"' in (a['genoma'] or '')
+
+
 def _g(a):
     g = json.loads(a['genoma'])
     for k, v in GENOMA_BASE.items():
@@ -336,7 +341,7 @@ def iniciar(n=50, capital=1.0, meta=100.0, mercados=('cripto', 'acciones'), hast
     if e.get('activo') and _hilo and _hilo.is_alive():  # ya en marcha: solo cambia el tamaño, sin reiniciar a nadie
         e.update(n=n, hasta=hasta or e.get('hasta'))
         guardar(e)
-        vivos, rnd = agentes(), random.Random()
+        vivos, rnd = [a for a in agentes() if not _llm(a)], random.Random()
         for a in vivos[n:]:
             _retirar(a, 'sobra (tamaño del enjambre)')
         for i in range(len(vivos), n):
@@ -349,7 +354,7 @@ def iniciar(n=50, capital=1.0, meta=100.0, mercados=('cripto', 'acciones'), hast
               'bloqueos': e.get('bloqueos') or {'simbolos': [], 'horas': []}})
     guardar(e)
     rnd = random.Random()
-    vivos = agentes()
+    vivos = [a for a in agentes() if not _llm(a)]
     for a in vivos[n:]:
         _retirar(a, 'sobra (tamaño del enjambre)')
     for a in vivos[:n]:
@@ -484,6 +489,16 @@ def _refrescar_universo(e):
     return e
 
 
+def _jefe(e):
+    from . import escuadron
+    try:
+        j = escuadron.jefe(e)
+        if j:
+            log('🧑‍💼 ' + escuadron.resumen_jefe()[:300])
+    except Exception:
+        log('error del jefe de mesa: ' + traceback.format_exc().splitlines()[-1])
+
+
 def _entrenar_ia():
     try:
         ia.entrenar()
@@ -554,6 +569,15 @@ def paso_enjambre(e):
         e['ultimo_sent'] = ahora_
         guardar(e)
         threading.Thread(target=_sentimiento, args=(e,), daemon=True).start()
+    from . import escuadron
+    if ahora_ - e.get('ultima_ronda_llm', 0) > escuadron.LLM_CADA and escuadron.activo():
+        e['ultima_ronda_llm'] = ahora_
+        guardar(e)
+        threading.Thread(target=escuadron.ronda, args=(e,), daemon=True).start()
+    if ahora_ - e.get('ultimo_jefe', 0) > escuadron.JEFE_CADA and escuadron.activo():
+        e['ultimo_jefe'] = ahora_
+        guardar(e)
+        threading.Thread(target=_jefe, args=(e,), daemon=True).start()
     if ahora_ - e.get('ultima_ia', 0) > IA_CADA:
         e['ultima_ia'] = ahora_
         guardar(e)
@@ -727,6 +751,8 @@ def paso_agente(e, a, ctx):
         if not pos:
             _poner(a['id'], estado='en pausa', ultimo=pausa)
         return
+    if g['estrategia'] == 'llm':  # sus entradas las decide el modelo de lenguaje en escuadron.ronda()
+        return
     esperando = {o['simbolo'] for o in db.q("SELECT simbolo FROM ordenes WHERE cuenta_id=? AND estado='pendiente' AND reduce=0 AND origen='agente'", (cid,))}
     if len(pos) + len(esperando - {p['simbolo'] for p in pos}) >= CUENTA_CFG['max_posiciones']:
         return
@@ -870,7 +896,8 @@ def _autopsias(a):
         db.ex('UPDATE ag_trades SET causa=? WHERE trade_id=?', (causas[0][0], x['trade_id']))
         for tipo, texto, cambio in causas[:2]:
             _leccion(a['id'], x['intento'], x['trade_id'], tipo, f"{a['nombre']} · {texto}", cambio)
-            g.update(cambio)
+            if g['estrategia'] != 'llm':
+                g.update(cambio)
     _poner(a['id'], genoma=json.dumps(g))
 
 
@@ -963,7 +990,7 @@ def _cruce(g1, g2, rnd):
 def evolucionar(e):
     """Selección natural: el 20 % peor se reemplaza por hijos (mutación / cruce) del 10 % mejor."""
     rnd = random.Random()
-    vivos = agentes()
+    vivos = [a for a in agentes() if not _llm(a)]
     medidos = []
     for a in vivos:
         f, n = aptitud(a)
@@ -997,7 +1024,7 @@ def buscar_solucion(e, a, ctx):
     rnd = random.Random()
     actual = _g(a)
     cand = [('su genoma con las lecciones aplicadas', actual)]
-    vivos = [(aptitud(x)[0], x) for x in agentes() if x['id'] != a['id']]
+    vivos = [(aptitud(x)[0], x) for x in agentes() if x['id'] != a['id'] and not _llm(x)]
     vivos = [v for v in vivos if v[0] is not None]
     if vivos:
         mejor = max(vivos, key=lambda v: v[0])[1]
@@ -1062,7 +1089,10 @@ def _quiebra(e, a, it, eq, ctx):
     causas = db.q('SELECT tipo, COUNT(*) n FROM ag_lecciones WHERE intento=? AND agente_id=? GROUP BY tipo ORDER BY n DESC', (it['id'], a['id']))
     causa = ', '.join(f"{c['tipo']} ×{c['n']}" for c in causas[:3]) or 'sin autopsias aún'
     db.ex('UPDATE ag_intentos SET fin=?, final=?, resultado=?, causa=? WHERE id=?', (int(time.time()), eq, 'quiebra', causa, it['id']))
-    nuevo, inf = buscar_solucion(e, a, ctx)
+    if _llm(a):
+        nuevo, inf = _g(a), 'Sigue con su criterio: las lecciones de esta quiebra van en su próximo prompt.'
+    else:
+        nuevo, inf = buscar_solucion(e, a, ctx)
     _leccion(a['id'], it['id'], None, 'quiebra', f"💀 {a['nombre']} quebró (llegó a {it['max_equity']:.3f} $). Causas: {causa}. {inf}", {})
     _poner(a['id'], genoma_desde=int(time.time()), estado='quebrado')
     _nuevo_intento(e, db.uno('SELECT * FROM ag_agentes WHERE id=?', (a['id'],)), nuevo, 'tras quiebra')
@@ -1110,7 +1140,7 @@ def sincronizar(e):
     """Nodo → central: manda su estado (para Mission Control) y cada 30 min intercambia los mejores genomas (modelo de islas)."""
     import urllib.request
     migrar = time.time() - e.get('ultima_migracion', 0) > MIGRACION
-    top = sorted(((aptitud(a)[0], a) for a in agentes()), key=lambda x: -9 if x[0] is None else x[0], reverse=True)[:3]
+    top = sorted(((aptitud(a)[0], a) for a in agentes() if not _llm(a)), key=lambda x: -9 if x[0] is None else x[0], reverse=True)[:3]
     cuerpo = {'nodo': NODO, 'kpis': kpis(), 'agentes': _vista_agentes(), 'lecciones': lecciones(15),
               'migrantes': [{'genoma': _g(a), 'aptitud': f, 'nombre': a['nombre']} for f, a in top if f is not None] if migrar else [], 'pedir': migrar,
               'sentimiento': sentimiento.actual()}
@@ -1132,7 +1162,7 @@ def sincronizar(e):
 def recibir_migrantes(migs, de):
     if not migs:
         return
-    vivos = sorted(((aptitud(a)[0], a) for a in agentes()), key=lambda x: -9 if x[0] is None else x[0])
+    vivos = sorted(((aptitud(a)[0], a) for a in agentes() if not _llm(a)), key=lambda x: -9 if x[0] is None else x[0])
     e = estado()
     for m, (f, a) in zip(migs, vivos):
         if f is not None and m.get('aptitud') is not None and f >= m['aptitud']:
@@ -1151,7 +1181,7 @@ def recibir_nodo(c):
     if c.get('pedir'):
         if (estado() or {}).get('activo'):
             recibir_migrantes(c.get('migrantes') or [], c.get('nodo'))
-        top = sorted(((aptitud(a)[0], a) for a in agentes()), key=lambda x: -9 if x[0] is None else x[0], reverse=True)[:3]
+        top = sorted(((aptitud(a)[0], a) for a in agentes() if not _llm(a)), key=lambda x: -9 if x[0] is None else x[0], reverse=True)[:3]
         out['migrantes'] = [{'genoma': _g(a), 'aptitud': f, 'nombre': a['nombre']} for f, a in top if f is not None]
     return out
 
@@ -1209,6 +1239,11 @@ def lecciones(limite=50):
     return db.q("SELECT l.*, a.nombre FROM ag_lecciones l LEFT JOIN ag_agentes a ON a.id=l.agente_id WHERE l.tipo<>'ruido' ORDER BY l.id DESC LIMIT ?", (limite,))
 
 
+def _resumen_jefe():
+    from . import escuadron
+    return escuadron.resumen_jefe()
+
+
 def informe(desde=None):
     preparar()
     e = estado() or {}
@@ -1224,7 +1259,7 @@ def informe(desde=None):
         por.setdefault(f"{gt['estrategia']} {gt['marco']}", []).append(t['r'])
     ranking = sorted(((k, statistics.fmean(v), len(v)) for k, v in por.items() if len(v) >= 5), key=lambda x: -x[1])
     mejores = sorted(((aptitud(a)[0], a) for a in agentes()), key=lambda x: -9 if x[0] is None else x[0], reverse=True)[:3]
-    lec = db.q("SELECT tipo, COUNT(*) n FROM ag_lecciones WHERE ts>=? AND tipo NOT IN ('ruido','quiebra') GROUP BY tipo ORDER BY n DESC", (desde,))
+    lec = db.q("SELECT tipo, COUNT(*) n FROM ag_lecciones WHERE ts>=? AND tipo NOT IN ('ruido','quiebra','jefe') GROUP BY tipo ORDER BY n DESC", (desde,))
     comp = db.q("SELECT texto FROM ag_lecciones WHERE ts>=? AND tipo IN ('compartida','evolucion','meta','migracion') ORDER BY id DESC LIMIT 6", (desde,))
     mx = max(its, key=lambda i: i['max_equity'] or 0) if its else None
     nodos = db.q('SELECT nodo, visto FROM ag_nodos')
@@ -1239,6 +1274,7 @@ def informe(desde=None):
         'Por qué se pierde (autopsias): ' + (', '.join(f"{x['tipo']} ×{x['n']}" for x in lec) or '—') + '.',
         ia.resumen(),
         sentimiento.resumen(),
+        _resumen_jefe(),
         'Mercados cripto (por volumen): ' + ', '.join(x.replace('-USD', '') for x in ((e.get('universo') or {}).get('cripto') or CRIPTO)) + '.',
         'Aprendizajes compartidos: ' + (' | '.join(x['texto'] for x in comp) or '—'),
     ])
