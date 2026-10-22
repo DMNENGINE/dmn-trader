@@ -23,11 +23,15 @@ CUENTA_CFG = {'comision_por_tipo': {'CRYPTOCURRENCY': 0.1, 'EQUITY': 0.0, 'ETF':
               'perdida_diaria_max_pct': 0, 'max_posiciones': 3, 'apalancamiento': 1.0, 'exigir_stop': True, 'permitir_cortos': True}
 ESTRATEGIAS = {
     'ema_cruce': {'r': 9, 'l': 21}, 'rsi_rev': {'n': 7, 'bajo': 25, 'alto': 75}, 'ruptura': {'n': 20},
-    'bollinger': {'n': 20, 'k': 2.0}, 'impulso': {'n': 5, 'umbral': 0.25},
+    'bollinger': {'n': 20, 'k': 2.0}, 'impulso': {'n': 5, 'umbral': 0.25}, 'rejilla': {'n': 60, 'niveles': 5},
 }
 GENOMA_BASE = {'marco': '1m', 'estrategia': 'ema_cruce', 'p': dict(ESTRATEGIAS['ema_cruce']), 'stop_atr': 1.5, 'rr': 1.5, 'filtro_tendencia': False,
                'vol_min_pct': 0.0, 'vol_max_pct': 3.0, 'riesgo_pct': 20.0, 'max_barras': 30, 'be_en_r': 0.0, 'min_ventaja': 2.0,
-               'cortos': True, 'horas_bloqueadas': [], 'simbolos_bloqueados': []}
+               'cortos': True, 'horas_bloqueadas': [], 'simbolos_bloqueados': [],
+               'entrada': 'mercado', 'retroceso': 0.3, 'espera': 3, 'tramos': 1}
+# entrada 'limite': espera un retroceso de `retroceso` ATR durante `espera` velas (no paga spread ni deslizamiento al entrar).
+# tramos > 1 (DCA): el resto de la posición se compra escalonado entre la entrada y el stop, promediando el precio.
+DCA_HASTA = 0.6  # el último tramo va al 60 % del camino hacia el stop
 LOG = []
 _hilo = None
 _parar = threading.Event()
@@ -72,6 +76,14 @@ def senales(g, v):
         for i in range(k, n):
             ret = (c[i] / c[i - k] - 1) * 100
             s[i] = 1 if ret > p['umbral'] and c[i] > c[i - 1] else -1 if ret < -p['umbral'] and c[i] < c[i - 1] else 0
+    elif e == 'rejilla':  # rejilla (grid): en un rango lateral compra en el escalón de abajo y vende en el de arriba
+        k, nv, m = int(p['n']), max(int(p['niveles']), 3), ind.ema(c, 50)
+        for i in range(max(k, 10), n):
+            hi, lo = max(h[i - k:i]), min(l[i - k:i])
+            paso = (hi - lo) / nv
+            if not paso or m[i] is None or m[i - 10] is None or abs(m[i] - m[i - 10]) > paso:
+                continue  # sin rango o con tendencia: la rejilla no aplica
+            s[i] = 1 if lo < c[i] <= lo + paso else -1 if hi - paso <= c[i] < hi else 0
     atr = ind.atr(h, l, c, 14)
     e50 = ind.ema(c, 50)
     tend = [0] * n
@@ -99,9 +111,19 @@ def coste_pct(cfg, spread_pct=0.0, tipo=None):
     return 2 * (com + cfg['deslizamiento_pct']) + spread_pct
 
 
-def simular(g, series, coste):
-    """Prueba un genoma en velas reales recientes: entra en la apertura siguiente a la señal, stop/objetivo dentro de la vela
-    (si tocan los dos, cuenta el stop), salida por tiempo y breakeven. Devuelve la lista de resultados en R (netos de costes)."""
+def niveles_dca(g):
+    """Fracciones del camino entrada→stop donde se compra cada tramo (0 = la entrada)."""
+    tr = max(1, int(g.get('tramos', 1)))
+    return [DCA_HASTA * j / (tr - 1) for j in range(tr)] if tr > 1 else [0.0]
+
+
+def simular(g, series, coste, ahorro=0.0):
+    """Prueba un genoma en velas reales recientes: entra en la apertura siguiente a la señal (o en el límite si el precio
+    retrocede hasta él), stop/objetivo dentro de la vela (si tocan los dos, cuenta el stop), tramos DCA, salida por tiempo
+    y breakeven. `ahorro` = lo que no se paga al entrar con límite (deslizamiento + medio spread), en %.
+    Devuelve la lista de resultados en R (netos de costes) frente al riesgo planeado."""
+    lim, fr = g.get('entrada') == 'limite', niveles_dca(g)
+    peso = sum(1 - f for f in fr)
     rs = []
     for v in series:
         s, atr, _ = senales(g, v)
@@ -111,15 +133,29 @@ def simular(g, series, coste):
                 i += 1
                 continue
             d = s[i - 1]
-            ent = v[i]['o']
             dist = atr[i - 1] * g['stop_atr']
-            if g['rr'] * dist / ent * 100 < g['min_ventaja'] * coste or dist / ent * 100 < 2 * coste:
+            c0 = coste - ahorro if lim else coste
+            if lim:
+                L = v[i - 1]['c'] - d * g.get('retroceso', 0.3) * atr[i - 1]
+                k = next((j for j in range(i, min(i + int(g.get('espera', 3)), len(v) - 1)) if (v[j]['l'] <= L if d > 0 else v[j]['h'] >= L)), None)
+                if k is None:  # el precio no volvió: no hay operación
+                    i += 1
+                    continue
+                ent, i = (min(L, v[k]['o']) if d > 0 else max(L, v[k]['o'])), k
+            else:
+                ent = v[i]['o']
+            if g['rr'] * dist / ent * 100 < g['min_ventaja'] * c0 or dist / ent * 100 < 2 * c0:
                 i += 1
                 continue
             stop, obj, be_hecho = ent - d * dist, ent + d * g['rr'] * dist, False
+            lleno = [ent]  # precios de los tramos ya comprados
             salida, j = None, i
             while j < len(v) and j - i < g['max_barras']:
                 b = v[j]
+                for f in fr[len(lleno):]:  # tramos DCA (órdenes límite por debajo de la entrada)
+                    nv = ent - d * dist * f
+                    if (b['l'] <= nv) if d > 0 else (b['h'] >= nv):
+                        lleno.append(nv)
                 if (d > 0 and b['l'] <= stop) or (d < 0 and b['h'] >= stop):
                     salida = stop
                     break
@@ -132,7 +168,7 @@ def simular(g, series, coste):
             if salida is None:
                 j = min(j, len(v) - 1)
                 salida = v[j]['c']
-            r = (salida - ent) * d / dist - coste / 100 * ent / dist
+            r = sum((salida - x) * d for x in lleno) / (peso * dist) - (c0 + (len(lleno) - 1) * (coste - ahorro)) / 100 * ent / (peso * dist)
             rs.append(r)
             i = j + 1
     return rs
@@ -164,6 +200,13 @@ def _mutar(g, rnd, fuerte=False):
         g['filtro_tendencia'] = not g['filtro_tendencia']
     if rnd.random() < (0.4 if fuerte else 0.15):
         g['marco'] = rnd.choice(list(MARCOS))
+    if rnd.random() < 0.15:
+        g['entrada'] = 'limite' if g.get('entrada', 'mercado') == 'mercado' else 'mercado'
+    g['retroceso'] = round(min(max(g.get('retroceso', 0.3) * rnd.uniform(1 - f, 1 + f), 0.05), 1.5), 2)
+    if rnd.random() < 0.1:
+        g['espera'] = rnd.choice([2, 3, 5, 8])
+    if rnd.random() < 0.12:
+        g['tramos'] = rnd.choice([1, 1, 2, 3])
     return g
 
 
@@ -200,7 +243,10 @@ def guardar(e):
 
 
 def _g(a):
-    return json.loads(a['genoma'])
+    g = json.loads(a['genoma'])
+    for k, v in GENOMA_BASE.items():
+        g.setdefault(k, copy.deepcopy(v))
+    return g
 
 
 def agentes(activos=True):
@@ -225,6 +271,8 @@ def genoma_inicial(i, rnd):
     g['riesgo_pct'] = rnd.choice([5.0, 10.0, 20.0, 35.0])
     g['filtro_tendencia'] = rnd.random() < 0.5
     g['be_en_r'] = rnd.choice([0.0, 0.0, 1.0])
+    g['entrada'] = 'limite' if est == 'rejilla' or rnd.random() < 0.4 else 'mercado'
+    g['tramos'] = rnd.choice([1, 1, 2, 3])
     return g
 
 
@@ -277,6 +325,7 @@ def _retirar(a, motivo):
             motor.cerrar(a['cuenta_id'], p['simbolo'], 100, motivo)
         except Exception:
             pass
+    db.ex("UPDATE ordenes SET estado='cancelada', motivo=? WHERE cuenta_id=? AND estado IN ('pendiente','espera')", (motivo, a['cuenta_id']))
     it = _intento_actual(a['id'])
     if it:
         db.ex('UPDATE ag_intentos SET fin=?, final=?, resultado=? WHERE id=?', (int(time.time()), motor.resumen(a['cuenta_id'])['equity'], 'parado', it['id']))
@@ -295,6 +344,7 @@ def parar(motivo='parado por el usuario'):
                 motor.cerrar(a['cuenta_id'], p['simbolo'], 100, 'enjambre parado')
             except Exception:
                 pass
+        db.ex("UPDATE ordenes SET estado='cancelada', motivo='enjambre parado' WHERE cuenta_id=? AND estado IN ('pendiente','espera')", (a['cuenta_id'],))
         it = _intento_actual(a['id'])
         if it:
             db.ex('UPDATE ag_intentos SET fin=?, final=?, resultado=? WHERE id=?', (int(time.time()), motor.resumen(a['cuenta_id'])['equity'], 'parado', it['id']))
@@ -449,6 +499,51 @@ def _leccion(aid, intento, tid, tipo, texto, cambio):
     log('🧠 ' + texto[:200])
 
 
+_PEND = {}  # orden de entrada pendiente → datos para registrarla cuando se llene (si el proceso se reinicia, se cancelan)
+
+
+def _entradas(a, g, it):
+    """Revisa las órdenes de entrada pendientes: registra las que se llenaron (y pone sus tramos DCA), caduca las viejas."""
+    cid = a['cuenta_id']
+    con_pos = {p['simbolo'] for p in motor.posiciones(cid, False)}
+    mias = [oid for oid, i in _PEND.items() if i['cid'] == cid]
+    for o in db.q(f"SELECT * FROM ordenes WHERE cuenta_id=? AND reduce=0 AND padre_id IS NULL AND origen='agente' AND (estado='pendiente' OR id IN ({','.join('?' * len(mias)) or 'NULL'}))",
+                  (cid, *mias)):
+        info = _PEND.get(o['id'])
+        if o['estado'] == 'ejecutada' and info:
+            _PEND.pop(o['id'], None)
+            _al_llenar(a, info, o)
+        elif o['estado'] == 'cancelada':
+            _PEND.pop(o['id'], None)
+        elif o['estado'] == 'pendiente':
+            tramo = (o['nota'] or '').startswith('tramo')
+            vieja = time.time() - o['creada'] > g['espera'] * MARCOS.get(g['marco'], 1) * 60
+            if (tramo and o['simbolo'] not in con_pos) or (not tramo and (o['id'] not in _PEND or vieja)):
+                db.ex("UPDATE ordenes SET estado='cancelada', motivo=? WHERE id=? OR (padre_id=? AND estado='espera')",
+                      ('tramo sin posición' if tramo else 'entrada límite caducada', o['id'], o['id']))
+                _PEND.pop(o['id'], None)
+
+
+def _al_llenar(a, info, o):
+    cid, sim, d = a['cuenta_id'], info['sim'], info['d']
+    pz = db.uno('SELECT trade_id FROM posiciones WHERE cuenta_id=? AND simbolo=?', (cid, sim))
+    if not pz:
+        return
+    db.ex('UPDATE trades SET riesgo=? WHERE id=?', (info['riesgo'], pz['trade_id']))  # R frente al riesgo de TODOS los tramos
+    db.ex('INSERT OR IGNORE INTO ag_trades(trade_id,intento,simbolo,direccion,estrategia,genoma,rasgos,abierto,agente_id) VALUES(?,?,?,?,?,?,?,?,?)',
+          (pz['trade_id'], info['it'], sim, 'largo' if d > 0 else 'corto', info['g']['estrategia'], json.dumps(info['g']), json.dumps(info['rasgos']), int(time.time()), a['id']))
+    ent = o['precio_ejec']
+    for k, f in enumerate(niveles_dca(info['g'])[1:], 2):
+        try:
+            motor.enviar(cid, sim, 'buy' if d > 0 else 'sell', info['q'], 'limite', limite=ent - d * info['dist'] * f,
+                         nota=f"tramo {k} {a['nombre']}", setup=info['g']['estrategia'], origen='agente')
+        except motor.ErrorOrden as err:
+            log(f"{a['nombre']}: tramo rechazado {sim}: {err}")
+    txt = f"{'🟢' if d > 0 else '🔴'} {sim} {'largo' if d > 0 else 'corto'} @ {ent:.6g}" + (' (límite)' if o['tipo'] == 'limite' else '')
+    _poner(a['id'], estado='en posición', ultimo=txt)
+    log(f"{a['nombre']} {txt}")
+
+
 def paso_agente(e, a, ctx):
     cid, g = a['cuenta_id'], _g(a)
     it = _intento_actual(a['id'])
@@ -479,6 +574,7 @@ def paso_agente(e, a, ctx):
         _quiebra(e, a, it, eq, ctx)
         return
     _gestionar(a, g)
+    _entradas(a, g, it)
     pos = motor.posiciones(cid, False)
     if not pos and (a['descartes'] or 0) - (a['descartes_ref'] or 0) > 150:
         nuevo, inf = buscar_solucion(e, a, ctx)
@@ -489,12 +585,13 @@ def paso_agente(e, a, ctx):
         _poner(a['id'], estado='en posición', ultimo=' · '.join(f"{p['simbolo']} {'largo' if p['cantidad'] > 0 else 'corto'}" for p in pos))
     else:
         _poner(a['id'], estado='buscando')
-    if len(pos) >= CUENTA_CFG['max_posiciones']:
+    esperando = {o['simbolo'] for o in db.q("SELECT simbolo FROM ordenes WHERE cuenta_id=? AND estado='pendiente' AND reduce=0 AND origen='agente'", (cid,))}
+    if len(pos) + len(esperando - {p['simbolo'] for p in pos}) >= CUENTA_CFG['max_posiciones']:
         return
     hora = time.gmtime().tm_hour
     if hora in g['horas_bloqueadas'] or hora in e.get('bloqueos', {}).get('horas', []):
         return
-    abiertos = {p['simbolo'] for p in pos}
+    abiertos = {p['simbolo'] for p in pos} | esperando
     for sim in _universo(e, g):
         if sim in abiertos or sim not in ctx['q']:
             continue
@@ -505,36 +602,40 @@ def paso_agente(e, a, ctx):
         if not s[-1] or not atr[-1]:
             continue
         q, d = ctx['q'][sim], s[-1]
-        p = q['precio']
+        lim = g['entrada'] == 'limite'
         coste, spread = ctx['coste'][sim]
+        if lim:  # entra en el retroceso con orden límite: no paga deslizamiento ni spread al entrar
+            coste -= CUENTA_CFG['deslizamiento_pct'] + spread / 2
+        p = q['precio'] - d * g['retroceso'] * atr[-1] if lim else q['precio']
         dist = atr[-1] * g['stop_atr']
         # regla de profesional: el objetivo debe pagar los costes con margen, y los costes no pueden comerse más de la mitad del stop
         if g['rr'] * dist / p * 100 < g['min_ventaja'] * coste or dist / p * 100 < 2 * coste:
             db.ex('UPDATE ag_agentes SET descartes=descartes+1 WHERE id=?', (a['id'],))
             continue
         r = motor.resumen(cid)
-        libres = max(1, CUENTA_CFG['max_posiciones'] - len(motor.posiciones(cid, False)))
-        qty = min(r['equity'] * g['riesgo_pct'] / 100 / dist, r['poder_compra'] * 0.97 / libres / p)
+        fr = niveles_dca(g)
+        libres = max(1, CUENTA_CFG['max_posiciones'] - len(pos) - len(esperando))
+        total = min(r['equity'] * g['riesgo_pct'] / 100 / (dist * sum(1 - f for f in fr) / len(fr)), r['poder_compra'] * 0.97 / libres / p)
+        qty = total / len(fr)  # primer tramo; el resto, escalonado hacia el stop
         if qty * p < 0.0001:
             continue
         sl, tp = p - d * dist, p + d * g['rr'] * dist
         rasgos = {'atr_pct': round(atr[-1] / p * 100, 4), 'tendencia': tend[-1], 'hora': hora, 'spread_pct': round(spread, 4),
-                  'coste_pct': round(coste, 4), 'precio': p, 'dist': dist}
+                  'coste_pct': round(coste, 4), 'precio': p, 'dist': dist, 'entrada': g['entrada'], 'tramos': len(fr)}
         try:
-            o = motor.enviar(cid, sim, 'buy' if d > 0 else 'sell', qty, 'mercado', sl=sl, tp=tp, setup=g['estrategia'],
-                             nota=f"{a['nombre']} {g['estrategia']} {g['marco']}", origen='agente')
+            o = motor.enviar(cid, sim, 'buy' if d > 0 else 'sell', qty, 'limite' if lim else 'mercado', limite=p if lim else None, sl=sl, tp=tp,
+                             setup=g['estrategia'], nota=f"{a['nombre']} {g['estrategia']} {g['marco']}", origen='agente')
         except motor.ErrorOrden as err:
             log(f"{a['nombre']}: orden rechazada {sim}: {err}")
             continue
+        info = {'cid': cid, 'it': it['id'], 'sim': sim, 'd': d, 'g': g, 'rasgos': rasgos, 'q': qty, 'dist': dist, 'riesgo': qty * dist * sum(1 - f for f in fr)}
         if o['estado'] == 'ejecutada':
-            pz = db.uno('SELECT trade_id FROM posiciones WHERE cuenta_id=? AND simbolo=?', (cid, sim))
-            if pz:
-                db.ex('INSERT OR IGNORE INTO ag_trades(trade_id,intento,simbolo,direccion,estrategia,genoma,rasgos,abierto,agente_id) VALUES(?,?,?,?,?,?,?,?,?)',
-                      (pz['trade_id'], it['id'], sim, 'largo' if d > 0 else 'corto', g['estrategia'], json.dumps(g), json.dumps(rasgos), int(time.time()), a['id']))
-                txt = f"{'🟢' if d > 0 else '🔴'} {sim} {'largo' if d > 0 else 'corto'} @ {o['precio_ejec']:.6g}"
-                _poner(a['id'], estado='en posición', ultimo=txt)
-                log(f"{a['nombre']} {txt}")
-        if len(motor.posiciones(cid, False)) >= CUENTA_CFG['max_posiciones']:
+            _al_llenar(a, info, o)
+        else:
+            _PEND[o['id']] = info
+            esperando.add(sim)
+            _poner(a['id'], ultimo=f"⏳ {sim} límite @ {p:.6g}")
+        if len(motor.posiciones(cid, False)) + len(esperando) >= CUENTA_CFG['max_posiciones']:
             break
 
 
@@ -673,9 +774,9 @@ def aptitud(a):
 
 def _cruce(g1, g2, rnd):
     h = copy.deepcopy(g1)
-    for k in ('stop_atr', 'rr', 'filtro_tendencia', 'riesgo_pct', 'max_barras', 'be_en_r', 'min_ventaja', 'marco'):
+    for k in ('stop_atr', 'rr', 'filtro_tendencia', 'riesgo_pct', 'max_barras', 'be_en_r', 'min_ventaja', 'marco', 'entrada', 'retroceso', 'tramos'):
         if rnd.random() < 0.5:
-            h[k] = copy.deepcopy(g2[k])
+            h[k] = copy.deepcopy(g2.get(k, GENOMA_BASE[k]))
     return h
 
 
@@ -734,6 +835,16 @@ def buscar_solucion(e, a, ctx):
             g = copy.deepcopy(actual)
             g['marco'] = m
             cand.append((f'mismo sistema en velas de {m}', g))
+    g = copy.deepcopy(actual)
+    g['entrada'] = 'mercado' if actual['entrada'] == 'limite' else 'limite'
+    cand.append((f"mismo sistema entrando con {'orden a mercado' if g['entrada'] == 'mercado' else 'orden límite en el retroceso'}", g))
+    g = copy.deepcopy(actual)
+    g['tramos'] = 1 if actual['tramos'] > 1 else 3
+    cand.append(('mismo sistema ' + ('sin DCA' if g['tramos'] == 1 else 'comprando en 3 tramos (DCA)'), g))
+    if actual['estrategia'] != 'rejilla':
+        g = copy.deepcopy(actual)
+        g.update(estrategia='rejilla', p=dict(ESTRATEGIAS['rejilla']), entrada='limite')
+        cand.append(('rejilla (grid) en rango lateral', g))
     sims = [s for s in _universo(e, actual) if s in ctx['q']][:8]
     series = {}
     for m in MARCOS:
@@ -741,9 +852,10 @@ def buscar_solucion(e, a, ctx):
     if not sims:
         return _mutar(actual, rnd), 'Sin mercados abiertos para probar soluciones: sigo con una mutación.'
     coste = statistics.fmean(ctx['coste'][s][0] for s in sims)
+    ahorro = CUENTA_CFG['deslizamiento_pct'] + statistics.fmean(ctx['coste'][s][1] for s in sims) / 2
     res = []
     for nombre, g in cand:
-        rs = simular(g, [v for v in series.get(g.get('marco', '1m'), []) if v], coste)
+        rs = simular(g, [v for v in series.get(g.get('marco', '1m'), []) if v], coste, ahorro)
         res.append((puntuar(rs), nombre, g, len(rs), statistics.fmean(rs) if rs else 0))
     res.sort(key=lambda x: x[0], reverse=True)
     p, nombre, g, n, m = res[0]

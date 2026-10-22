@@ -279,7 +279,9 @@ def _enviar(cid, simbolo, lado, cantidad=None, tipo='mercado', limite=None, stop
             raise ErrorOrden('los cortos están desactivados en esta cuenta')
         if not pos and r['posiciones_abiertas'] >= cfg['max_posiciones']:
             raise ErrorOrden(f'máximo de {cfg["max_posiciones"]} posiciones abiertas')
-        if cfg['exigir_stop'] and not sl:
+        protegida = pos and (actual > 0) == (signo > 0) and db.uno(  # ampliar (DCA) una posición que ya tiene su stop puesto
+            "SELECT 1 FROM ordenes WHERE cuenta_id=? AND simbolo=? AND reduce=1 AND tipo IN ('stop','trailing') AND estado='pendiente'", (cid, simbolo))
+        if cfg['exigir_stop'] and not sl and not protegida:
             raise ErrorOrden('esta cuenta exige stop-loss en cada entrada (pon sl)')
         fx = _fx(c, b.get('moneda'))
         if sl:
@@ -495,6 +497,9 @@ def _procesar(cid, simbolos=None):
             continue  # en replay se ejecuta en la vela SIGUIENTE a la orden
         if not b.get('abierto', True):
             continue
+        if c['tipo'] != 'replay' and o['tipo'] != 'mercado' and b['t'] < o['creada']:
+            # la vela empezó antes que la orden: su máximo/mínimo pueden ser de antes, así que solo cuenta el precio actual
+            b = dict(b, o=b['c'], h=b['c'], l=b['c'])
         px = _precio_ejecucion(o, b, slip)
         if px is not None:
             _llenar(c, o, px, b['t'], b.get('moneda'), b.get('tipo_activo'))
