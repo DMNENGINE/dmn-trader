@@ -120,3 +120,31 @@ def pivotes(h, l, ventana=5, maximo=4):
         if l[i] == min(l[i - ventana:i + ventana + 1]):
             sop.append(l[i])
     return sop[-maximo:], res[-maximo:]
+
+
+def adx(h, l, c, n=14):
+    """ADX de Wilder: fuerza de la tendencia (0-100; > 25 tendencia, < 20 rango)."""
+    m = len(c)
+    out = [None] * m
+    if m < 2 * n + 1:
+        return out
+    tr, dp, dm = [0.0] * m, [0.0] * m, [0.0] * m
+    for i in range(1, m):
+        up, dn = h[i] - h[i - 1], l[i - 1] - l[i]
+        dp[i] = up if up > dn and up > 0 else 0.0
+        dm[i] = dn if dn > up and dn > 0 else 0.0
+        tr[i] = max(h[i] - l[i], abs(h[i] - c[i - 1]), abs(l[i] - c[i - 1]))
+    st, sp, sm = sum(tr[1:n + 1]), sum(dp[1:n + 1]), sum(dm[1:n + 1])
+    dx = []
+    for i in range(n, m):
+        if i > n:
+            st, sp, sm = st - st / n + tr[i], sp - sp / n + dp[i], sm - sm / n + dm[i]
+        pdi, mdi = (100 * sp / st, 100 * sm / st) if st else (0.0, 0.0)
+        dx.append(100 * abs(pdi - mdi) / (pdi + mdi) if pdi + mdi else 0.0)
+        if len(dx) == n:
+            a = sum(dx) / n
+            out[i] = a
+        elif len(dx) > n:
+            a = (a * (n - 1) + dx[-1]) / n
+            out[i] = a
+    return out

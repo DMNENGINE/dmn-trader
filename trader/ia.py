@@ -21,7 +21,10 @@ def rasgos(ras, g, d):
          float(g.get('tramos', 1)), float(g.get('rr', 1.5)), float(g.get('stop_atr', 1.5)),
          (ras.get('coste_pct', 0.0) / ((ras.get('dist') or 1) / precio * 100)) if ras.get('dist') else 0.0,
          ((ras['fng'] - 50) / 50) if ras.get('fng') is not None else 0.0, (ras.get('sent') or 0.0) * d,
-         (ras.get('macro') or 0.0) * d, float(ras.get('evento') or 0)]  # analista: riesgo de mercado a favor y evento macro en curso  # sentimiento: miedo/euforia y noticias a favor
+         (ras.get('macro') or 0.0) * d, float(ras.get('evento') or 0),
+         (ras.get('adx') or 0.0) / 50, (ras.get('libro') or 0.0) * d, max(min((ras.get('funding') or 0.0) * d * 1e4, 5), -5),
+         max(min((ras.get('oi_cambio') or 0.0) * d / 5, 3), -3), 1.0 if g.get('parcial_r') else 0.0, float(g.get('regimen') or 0),
+         float(g.get('confirmar_1h') or 0), float(g.get('flujo') or 0)]  # régimen (ADX), flujo (libro, funding, interés abierto) y genes de gestión  # analista: riesgo de mercado a favor y evento macro en curso  # sentimiento: miedo/euforia y noticias a favor
     x += [1.0 if g.get('estrategia') == e else 0.0 for e in ESTRATEGIAS]
     x += [1.0 if g.get('marco') == m else 0.0 for m in MARCOS]
     return x
@@ -58,8 +61,10 @@ def _logloss(ps, y):
     return -statistics.fmean(math.log(min(max(p, 1e-6), 1 - 1e-6)) if t else math.log(min(max(1 - p, 1e-6), 1 - 1e-6)) for p, t in zip(ps, y))
 
 
-def entrenar(filas=None, limite=4000):
-    """filas: [(rasgos_dict, genoma_dict, direccion, r)] de más antigua a más reciente. Devuelve el modelo (y lo guarda)."""
+def entrenar(filas=None, limite=4000, extra=None):
+    """filas: [(rasgos_dict, genoma_dict, direccion, r)] de más antigua a más reciente. Devuelve el modelo (y lo guarda).
+    extra: operaciones simuladas en semanas de velas reales: solo se usan para ENTRENAR; la validación sigue siendo
+    con las operaciones reales más recientes del enjambre (lo que de verdad importa)."""
     if filas is None:
         filas = []
         for t in db.q("SELECT rasgos, genoma, direccion, r FROM ag_trades WHERE r IS NOT NULL AND COALESCE(causa,'')<>'sistema' ORDER BY trade_id DESC LIMIT ?", (limite,))[::-1]:
@@ -70,10 +75,12 @@ def entrenar(filas=None, limite=4000):
     if len(filas) < MIN_TRADES:
         m = {'ok': False, 'n': len(filas), 'motivo': f'pocas operaciones para aprender ({len(filas)}/{MIN_TRADES})', 'ts': int(time.time())}
         return _guardar(m)
+    extra = [tuple(x) for x in (extra or [])]
+    filas = extra + filas
     X = [rasgos(r, g, d) for r, g, d, _ in filas]
     y = [1 if r > 0 else 0 for *_, r in filas]
     R = [r for *_, r in filas]
-    corte = int(len(X) * 0.75)  # valida con lo más reciente, que el modelo no vio
+    corte = len(extra) + int((len(X) - len(extra)) * 0.75)  # valida con lo más reciente del enjambre real, que el modelo no vio
     mu, sd = _norm(X[:corte])
     Z = [[(a - m) / s for a, m, s in zip(x, mu, sd)] for x in X]
     w = _entrenar(Z[:corte], y[:corte])
@@ -86,7 +93,7 @@ def entrenar(filas=None, limite=4000):
     ok = ll < llb * 0.995 and r_filtro is not None and r_filtro > r_todos and len(buenos) >= 15
     mu, sd = _norm(X)  # modelo final con todo
     w = _entrenar([[(a - m) / s for a, m, s in zip(x, mu, sd)] for x in X], y)
-    m = {'ok': ok, 'n': len(X), 'nf': len(X[0]), 'w': w, 'mu': mu, 'sd': sd, 'ts': int(time.time()), 'logloss': round(ll, 4), 'logloss_base': round(llb, 4),
+    m = {'ok': ok, 'n': len(X), 'n_sim': len(extra), 'nf': len(X[0]), 'w': w, 'mu': mu, 'sd': sd, 'ts': int(time.time()), 'logloss': round(ll, 4), 'logloss_base': round(llb, 4),
          'r_todos': round(r_todos, 3), 'r_filtrado': round(r_filtro, 3) if r_filtro is not None else None, 'aceptadas_pct': round(len(buenos) / len(test) * 100),
          'motivo': 'predice mejor que el azar en operaciones nuevas' if ok else 'aún no predice mejor que el azar: no filtra'}
     return _guardar(m)
@@ -122,6 +129,7 @@ def resumen():
         return 'Filtro de IA: aún sin entrenar.'
     if not m.get('w'):
         return f"Filtro de IA: {m.get('motivo')}."
-    return (f"Filtro de IA: entrenado con {m['n']} operaciones · {'ACTIVO' if m['ok'] else 'en pruebas'} ({m['motivo']}). "
+    return (f"Filtro de IA: entrenado con {m['n']} operaciones" + (f" ({m['n_sim']} simuladas en semanas de velas reales)" if m.get('n_sim') else '') +
+            f" · {'ACTIVO' if m['ok'] else 'en pruebas'} ({m['motivo']}). "
             f"En operaciones nuevas: todas {m['r_todos']:+.2f}R, las que aprueba {m['r_filtrado'] if m['r_filtrado'] is not None else '—'}R "
             f"({m['aceptadas_pct']} % aprobadas).")

@@ -15,7 +15,7 @@ def ok(cond, txt):
 
 # 1) rejilla en un rango lateral sintético: compra abajo, vende arriba
 v = [{'t': 1700000000 + 60 * i, 'o': 100 + 2 * math.sin(i / 6), 'h': 100.3 + 2 * math.sin(i / 6), 'l': 99.7 + 2 * math.sin(i / 6), 'c': 100 + 2 * math.sin((i + 1) / 6)} for i in range(300)]
-g = A._g({'genoma': json.dumps(dict(A.GENOMA_BASE, estrategia='rejilla', p=dict(A.ESTRATEGIAS['rejilla']), vol_max_pct=50))})
+g = A._g({'genoma': json.dumps(dict(A.GENOMA_BASE, regimen=0, parcial_r=0, estrategia='rejilla', p=dict(A.ESTRATEGIAS['rejilla']), vol_max_pct=50))})
 s, atr, _ = A.senales(g, v)
 largos = [v[i]['c'] for i in range(len(s)) if s[i] == 1]
 cortos = [v[i]['c'] for i in range(len(s)) if s[i] == -1]
@@ -24,7 +24,7 @@ tend = [{'t': 1700000000 + 60 * i, 'o': 100 + i * 0.5, 'h': 100.4 + i * 0.5, 'l'
 ok(not any(A.senales(g, tend)[0]), 'rejilla: en tendencia fuerte no opera')
 
 # 2) simulador: límite ahorra costes; DCA cuenta R frente al riesgo de todos los tramos
-base = dict(A.GENOMA_BASE, estrategia='rejilla', p=dict(A.ESTRATEGIAS['rejilla']), vol_max_pct=50, min_ventaja=0.1, rr=1.0, stop_atr=3)
+base = dict(A.GENOMA_BASE, regimen=0, parcial_r=0, estrategia='rejilla', p=dict(A.ESTRATEGIAS['rejilla']), vol_max_pct=50, min_ventaja=0.1, rr=1.0, stop_atr=3)
 m = A.simular(dict(base), [v], 0.2)
 l = A.simular(dict(base, entrada='limite', retroceso=0.1), [v], 0.2, 0.1)
 d3 = A.simular(dict(base, tramos=3), [v], 0.2, 0.1)
@@ -41,7 +41,7 @@ ahorro = A.CUENTA_CFG['deslizamiento_pct'] + 0.005
 for est in A.ESTRATEGIAS:
     fila = []
     for nombre, extra in (('mercado', {}), ('límite', {'entrada': 'limite'}), ('DCA×3', {'tramos': 3})):
-        gg = dict(A.GENOMA_BASE, estrategia=est, p=dict(A.ESTRATEGIAS[est]), marco='5m', **extra)
+        gg = dict(A.GENOMA_BASE, regimen=0, parcial_r=0, estrategia=est, p=dict(A.ESTRATEGIAS[est]), marco='5m', **extra)
         rs = A.simular(gg, reales, coste, ahorro)
         fila.append(f'{nombre} {len(rs):3d}/{media(rs):+.2f}R')
     print(f'  {est:10s} ' + ' · '.join(fila))
@@ -91,6 +91,6 @@ ok(all(db.uno('SELECT estado FROM ordenes WHERE id=?', (x['id'],))['estado'] == 
 viejo = {k: v for k, v in A.GENOMA_BASE.items() if k not in ('entrada', 'retroceso', 'espera', 'tramos')}
 gv = A._g({'genoma': json.dumps(viejo)})
 import random
-ok(gv['entrada'] == 'mercado' and A._cruce(viejo, gv, random.Random(1)) and A._mutar(gv, random.Random(2)), 'genoma antiguo: valores por defecto, cruce y mutación OK')
+ok(gv['entrada'] == 'limite' and A._cruce(viejo, gv, random.Random(1)) and A._mutar(gv, random.Random(2)), 'genoma antiguo: valores por defecto, cruce y mutación OK')
 print('\nFALLOS:', fallos if fallos else 'ninguno')
 sys.exit(1 if fallos else 0)

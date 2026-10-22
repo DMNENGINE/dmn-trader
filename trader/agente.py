@@ -2,8 +2,8 @@
 Cada agente: opera con su genoma → autopsia de cada pérdida con su arreglo → si quiebra, prueba soluciones en datos reales recientes.
 El enjambre: comparte lo que aprende (símbolos/horas que pierden para todos), evoluciona cada 2 h (el 20 % peor se reemplaza por hijos
 del 10 % mejor) y, si hay varios equipos (Pi = central, PC = nodo), intercambia los mejores genomas cada 30 min (modelo de islas)."""
-import copy, json, math, os, random, socket, statistics, sys, threading, time, traceback
-from . import analista, ia, sentimiento, datos, db, indicadores as ind, motor
+import bisect, copy, json, math, os, random, socket, statistics, sys, threading, time, traceback
+from . import analista, flujo, ia, sentimiento, datos, db, indicadores as ind, motor
 
 ESQUEMA = """
 CREATE TABLE IF NOT EXISTS ag_agentes (id INTEGER PRIMARY KEY, nombre TEXT, cuenta_id INTEGER, genoma TEXT, generacion INTEGER DEFAULT 0,
@@ -28,8 +28,15 @@ ESTRATEGIAS = {
 GENOMA_BASE = {'marco': '1m', 'estrategia': 'ema_cruce', 'p': dict(ESTRATEGIAS['ema_cruce']), 'stop_atr': 1.5, 'rr': 1.5, 'filtro_tendencia': False,
                'vol_min_pct': 0.0, 'vol_max_pct': 3.0, 'riesgo_pct': 20.0, 'max_barras': 30, 'be_en_r': 0.0, 'min_ventaja': 2.0,
                'cortos': True, 'horas_bloqueadas': [], 'simbolos_bloqueados': [],
-               'entrada': 'mercado', 'retroceso': 0.3, 'espera': 3, 'tramos': 1,
-               'enfriar': 2, 'guardia': 3, 'roi_min': None, 'trail_r': 0.0, 'trail_frac': 0.8, 'filtro_ia': 0.0, 'noticias': 0}
+               'entrada': 'limite', 'retroceso': 0.3, 'espera': 3, 'tramos': 1,
+               'enfriar': 2, 'guardia': 3, 'roi_min': None, 'trail_r': 0.0, 'trail_frac': 0.8, 'filtro_ia': 0.0, 'noticias': 0,
+               'parcial_r': 1.0, 'parcial_frac': 0.5, 'sin_avance': 0, 'regimen': 1, 'confirmar_1h': 0, 'flujo': 0, 'veto_llm': 0}
+# parcial_r: en +parcial_r R cierra parcial_frac de la posición y sube el stop a la entrada (no devolver lo ganado); 0 = no.
+# sin_avance: si en N velas no ha ido ni +0,3R a favor, cierra (stop por tiempo); 0 = no.
+# regimen = 1: los sistemas de tendencia solo operan con ADX ≥ 20, los de rango con ADX ≤ 25 y nadie con volatilidad disparada.
+# confirmar_1h = 1: la señal solo vale si la tendencia de 1 h (EMA20) va en la misma dirección.
+# flujo = 1: no entra contra el libro de órdenes ni con funding extremo a su favor (todos apostando lo mismo).
+# veto_llm = 1: antes de entrar, el comité de veto (gemma, en el PC) revisa la operación con las noticias y dice sí o no.
 # noticias = 1: no entra contra noticias fuertes del símbolo (nota ≤ -0,4 en su dirección) ni durante un evento macro de impacto alto.
 # protecciones (idea de freqtrade): `enfriar` velas sin volver al mismo símbolo tras cerrar; `guardia` pérdidas seguidas → pausa.
 # roi_min: el objetivo baja con el tiempo de rr a roi_min (en R) a lo largo de max_barras; None = objetivo fijo.
@@ -38,6 +45,11 @@ GENOMA_BASE = {'marco': '1m', 'estrategia': 'ema_cruce', 'p': dict(ESTRATEGIAS['
 POOL_CRIPTO = CRIPTO + ['LTC-USD', 'BCH-USD', 'DOT-USD', 'UNI-USD', 'AAVE-USD', 'NEAR-USD', 'SUI-USD', 'SHIB-USD', 'APT-USD', 'ARB-USD',
                         'OP-USD', 'HBAR-USD', 'XLM-USD', 'ATOM-USD', 'FIL-USD', 'ETC-USD', 'PEPE-USD']
 N_CRIPTO, SPREAD_MAX, UNIVERSO_CADA, IA_CADA, SENT_CADA = 12, 0.15, 3600, 1800, 1800
+MIN_VENTAJA_MIN = 3.0  # regla dura: el objetivo debe pagar al menos 3 veces comisión + spread (sea cual sea el gen min_ventaja)
+MAX_CORR = 2           # como mucho 2 posiciones cripto en la misma dirección (se mueven casi todas con BTC)
+REG_TEND, REG_RANGO = ('ema_cruce', 'ruptura', 'impulso'), ('bollinger', 'rsi_rev', 'rejilla')
+IA_HIST_CADA = 6 * 3600
+RANGO_HIST = {'1m': '5d', '5m': '20d', '15m': '40d'}
 # entrada 'limite': espera un retroceso de `retroceso` ATR durante `espera` velas (no paga spread ni deslizamiento al entrar).
 # tramos > 1 (DCA): el resto de la posición se compra escalonado entre la entrada y el stop, promediando el precio.
 DCA_HASTA = 0.6  # el último tramo va al 60 % del camino hacia el stop
@@ -54,8 +66,20 @@ def log(t):
 # ---------------- señales (compartidas por el agente en vivo y por el simulador de soluciones) ----------------
 
 
-def senales(g, v):
+def senales(g, v, v1h=None):
     """Lista de señales (1, -1, 0) por vela cerrada según el genoma, con filtros aplicados. También devuelve ATR y tendencia."""
+    return _senales(g, v, v1h)[:3]
+
+
+def tendencia_1h(v1h):
+    """[(hora de cierre, tendencia)] de las velas de 1 h: +1 si cierra sobre la EMA20 y esta sube, -1 al revés."""
+    c = [b['c'] for b in v1h]
+    m = ind.ema(c, 20)
+    return [(b['t'] + 3600, (1 if c[k] > m[k] > m[k - 3] else -1 if c[k] < m[k] < m[k - 3] else 0) if k >= 3 and None not in (m[k], m[k - 3]) else 0)
+            for k, b in enumerate(v1h)]
+
+
+def _senales(g, v, v1h=None):
     c, h, l = [b['c'] for b in v], [b['h'] for b in v], [b['l'] for b in v]
     p, e = g['p'], g['estrategia']
     n = len(c)
@@ -94,6 +118,12 @@ def senales(g, v):
                 continue  # sin rango o con tendencia: la rejilla no aplica
             s[i] = 1 if lo < c[i] <= lo + paso else -1 if hi - paso <= c[i] < hi else 0
     atr = ind.atr(h, l, c, 14)
+    ad = ind.adx(h, l, c, 14)
+    lenta, al = [None] * n, None  # ATR medio lento: si el actual lo dobla, el mercado está en caos
+    for i in range(n):
+        if atr[i]:
+            al = atr[i] if al is None else al + (atr[i] - al) * 2 / 101
+            lenta[i] = al
     e50 = ind.ema(c, 50)
     tend = [0] * n
     for i in range(5, n):
@@ -110,9 +140,20 @@ def senales(g, v):
                 s[i] = 0
             elif time.gmtime(v[i]['t']).tm_hour in g['horas_bloqueadas']:
                 s[i] = 0
+            elif g.get('regimen') and (ad[i] is None or atr[i] > 1.8 * lenta[i] or (e in REG_TEND and ad[i] < 20) or (e in REG_RANGO and ad[i] > 25)):
+                s[i] = 0
         elif s[i]:
             s[i] = 0
-    return s, atr, tend
+    if g.get('confirmar_1h'):
+        th = tendencia_1h(v1h) if v1h else []
+        cierres = [x[0] for x in th]
+        seg = MARCOS.get(g.get('marco'), 1) * 60
+        for i in range(n):
+            if s[i]:
+                k = bisect.bisect_right(cierres, v[i]['t'] + seg) - 1  # la última hora ya cerrada cuando cierra esta vela
+                if k < 0 or th[k][1] != s[i]:
+                    s[i] = 0
+    return s, atr, tend, ad
 
 
 def coste_pct(cfg, spread_pct=0.0, tipo=None):
@@ -126,18 +167,21 @@ def niveles_dca(g):
     return [DCA_HASTA * j / (tr - 1) for j in range(tr)] if tr > 1 else [0.0]
 
 
-def simular(g, series, coste, ahorro=0.0):
+def simular(g, series, coste, ahorro=0.0, altas=None, ventana=(0.0, 1.0), muestras=None):
     """Prueba un genoma en velas reales recientes: entra en la apertura siguiente a la señal (o en el límite si el precio
     retrocede hasta él), stop/objetivo dentro de la vela (si tocan los dos, cuenta el stop), tramos DCA, salida por tiempo
     y breakeven. `ahorro` = lo que no se paga al entrar con límite (deslizamiento + medio spread), en %.
-    Devuelve la lista de resultados en R (netos de costes) frente al riesgo planeado."""
+    Devuelve la lista de resultados en R (netos de costes) frente al riesgo planeado.
+    altas: velas de 1 h de cada serie (para confirmar_1h); ventana: tramo de la serie (fracciones) donde se permiten entradas;
+    muestras: si es una lista, se le añade (rasgos, dirección, R) de cada operación (datos para entrenar la IA)."""
     lim, fr = g.get('entrada') == 'limite', niveles_dca(g)
     peso = sum(1 - f for f in fr)
+    pr_r, pf, sa = g.get('parcial_r') or 0, g.get('parcial_frac', 0.5), int(g.get('sin_avance') or 0)
     rs = []
-    for v in series:
-        s, atr, tend = senales(g, v)
-        i = 1
-        while i < len(v) - 1:
+    for k_, v in enumerate(series):
+        s, atr, tend, ad = _senales(g, v, altas[k_] if altas else None)
+        i, fin = max(1, int(ventana[0] * len(v))), min(len(v) - 1, int(ventana[1] * len(v)))
+        while i < fin:
             if not s[i - 1] or not atr[i - 1]:
                 i += 1
                 continue
@@ -153,18 +197,19 @@ def simular(g, series, coste, ahorro=0.0):
                 ent, i = (min(L, v[k]['o']) if d > 0 else max(L, v[k]['o'])), k
             else:
                 ent = v[i]['o']
-            if g['rr'] * dist / ent * 100 < g['min_ventaja'] * c0 or dist / ent * 100 < 2 * c0:
+            if g['rr'] * dist / ent * 100 < max(g['min_ventaja'], MIN_VENTAJA_MIN) * c0 or dist / ent * 100 < 2 * c0:
                 i += 1
                 continue
+            ras = {'atr_pct': atr[i - 1] / v[i - 1]['c'] * 100, 'tendencia': tend[i - 1], 'hora': time.gmtime(v[i]['t']).tm_hour,
+                   'coste_pct': c0, 'dist': dist, 'precio': ent, 'adx': ad[i - 1]}
             if g.get('filtro_ia'):
-                pr = ia.probabilidad({'atr_pct': atr[i - 1] / v[i - 1]['c'] * 100, 'tendencia': tend[i - 1], 'hora': time.gmtime(v[i]['t']).tm_hour,
-                                      'coste_pct': c0, 'dist': dist, 'precio': ent}, g, d)
+                pr = ia.probabilidad(ras, g, d)
                 if pr is not None and pr < g['filtro_ia']:
                     i += 1
                     continue
             stop, obj, be_hecho, mejor = ent - d * dist, ent + d * g['rr'] * dist, False, ent
             lleno = [ent]  # precios de los tramos ya comprados
-            salida, j = None, i
+            salida, j, parc, mfav = None, i, None, 0.0
             while j < len(v) and j - i < g['max_barras']:
                 b = v[j]
                 for f in fr[len(lleno):]:  # tramos DCA (órdenes límite por debajo de la entrada)
@@ -174,6 +219,11 @@ def simular(g, series, coste, ahorro=0.0):
                 if (d > 0 and b['l'] <= stop) or (d < 0 and b['h'] >= stop):
                     salida = stop
                     break
+                fav = b['h'] - ent if d > 0 else ent - b['l']
+                mfav = max(mfav, fav)
+                if pr_r and parc is None and fav >= pr_r * dist:  # toma parcial y stop a la entrada
+                    parc = ent + d * pr_r * dist
+                    stop = max(stop, ent) if d > 0 else min(stop, ent)
                 if (d > 0 and b['h'] >= obj) or (d < 0 and b['l'] <= obj):
                     salida = obj
                     break
@@ -189,22 +239,40 @@ def simular(g, series, coste, ahorro=0.0):
                     if (b['c'] - ent) * d >= req * dist:
                         salida = b['c']
                         break
+                if sa and j - i + 1 >= sa and parc is None and mfav < 0.3 * dist:  # stop por tiempo: no arranca
+                    salida = b['c']
+                    break
                 j += 1
             if salida is None:
                 j = min(j, len(v) - 1)
                 salida = v[j]['c']
-            r = sum((salida - x) * d for x in lleno) / (peso * dist) - (c0 + (len(lleno) - 1) * (coste - ahorro)) / 100 * ent / (peso * dist)
+            bruto = sum((salida - x) * d for x in lleno)
+            if parc is not None:
+                bruto = pf * sum((parc - x) * d for x in lleno) + (1 - pf) * bruto
+            r = bruto / (peso * dist) - (c0 + (len(lleno) - 1) * (coste - ahorro)) / 100 * ent / (peso * dist)
             rs.append(r)
+            if muestras is not None:
+                muestras.append((ras, d, r))
             i = j + 1 + int(g.get('enfriar', 0))
     return rs
 
 
-def puntuar(rs):
+def puntuar(rs, minimo=5):
     """Esperanza en R penalizada si hay pocos trades (para no premiar la suerte)."""
-    if len(rs) < 5:
+    if len(rs) < minimo:
         return -9.0
     m = statistics.fmean(rs)
     return m - 0.5 * (statistics.pstdev(rs) / math.sqrt(len(rs)))
+
+
+def evaluar(g, series, coste, ahorro=0.0, altas=None):
+    """Walk-forward: puntúa en el 60 % antiguo y en el 40 % reciente por separado y se queda con el peor de los dos.
+    Un sistema solo puntúa bien si gana en los dos tramos (no basta con que haya tenido suerte en uno)."""
+    a = simular(g, series, coste, ahorro, altas, (0.0, 0.6))
+    b = simular(g, series, coste, ahorro, altas, (0.6, 1.0))
+    if len(a) < 3 or len(b) < 3:
+        return -9.0, a + b
+    return min(puntuar(a, 3), puntuar(b, 3)), a + b
 
 # ---------------- arranque / parada ----------------
 
@@ -225,8 +293,8 @@ def _mutar(g, rnd, fuerte=False):
         g['filtro_tendencia'] = not g['filtro_tendencia']
     if rnd.random() < (0.4 if fuerte else 0.15):
         g['marco'] = rnd.choice(list(MARCOS))
-    if rnd.random() < 0.15:
-        g['entrada'] = 'limite' if g.get('entrada', 'mercado') == 'mercado' else 'mercado'
+    if rnd.random() < 0.15:  # sesgo hacia la orden límite: paga menos costes
+        g['entrada'] = 'mercado' if g.get('entrada') == 'limite' and rnd.random() < 0.3 else 'limite'
     g['retroceso'] = round(min(max(g.get('retroceso', 0.3) * rnd.uniform(1 - f, 1 + f), 0.05), 1.5), 2)
     if rnd.random() < 0.1:
         g['espera'] = rnd.choice([2, 3, 5, 8])
@@ -247,6 +315,16 @@ def _mutar(g, rnd, fuerte=False):
         g['filtro_ia'] = 0.0 if g.get('filtro_ia') else round(rnd.uniform(0.45, 0.6), 2)
     if rnd.random() < 0.15:
         g['noticias'] = 0 if g.get('noticias') else 1
+    if rnd.random() < 0.12:
+        g['parcial_r'] = 0.0 if g.get('parcial_r') else round(rnd.uniform(0.7, 1.5), 2)
+    elif g.get('parcial_r'):
+        g['parcial_r'] = round(min(max(g['parcial_r'] * rnd.uniform(1 - f, 1 + f), 0.5), 2.0), 2)
+    g['parcial_frac'] = round(min(max(g.get('parcial_frac', 0.5) * rnd.uniform(1 - f, 1 + f), 0.25), 0.75), 2)
+    if rnd.random() < 0.1:
+        g['sin_avance'] = rnd.choice([0, 0, 4, 6, 10])
+    for k, pr in (('regimen', 0.1), ('confirmar_1h', 0.12), ('flujo', 0.12), ('veto_llm', 0.08)):
+        if rnd.random() < pr:
+            g[k] = 0 if g.get(k) else 1
     return g
 
 
@@ -318,12 +396,17 @@ def genoma_inicial(i, rnd):
     g['riesgo_pct'] = rnd.choice([5.0, 10.0, 20.0, 35.0])
     g['filtro_tendencia'] = rnd.random() < 0.5
     g['be_en_r'] = rnd.choice([0.0, 0.0, 1.0])
-    g['entrada'] = 'limite' if est == 'rejilla' or rnd.random() < 0.4 else 'mercado'
+    g['entrada'] = 'limite' if est == 'rejilla' or rnd.random() < 0.8 else 'mercado'
     g['tramos'] = rnd.choice([1, 1, 2, 3])
     g['roi_min'] = rnd.choice([None, None, 0.5])
     g['trail_r'] = rnd.choice([0.0, 0.0, 1.0])
     g['filtro_ia'] = rnd.choice([0.0, 0.0, 0.5, 0.55])
     g['noticias'] = rnd.choice([0, 0, 1])
+    g['parcial_r'] = rnd.choice([1.0, 1.0, 0.0])
+    g['sin_avance'] = rnd.choice([0, 0, 6])
+    g['regimen'] = rnd.choice([1, 1, 0])
+    g['confirmar_1h'], g['flujo'] = rnd.choice([0, 1]), rnd.choice([0, 1])
+    g['veto_llm'] = rnd.choice([0, 0, 0, 1])
     return g
 
 
@@ -503,9 +586,48 @@ def _jefe(e):
         log('error del jefe de mesa: ' + traceback.format_exc().splitlines()[-1])
 
 
+def muestras_historicas(e, maximo=None):
+    """Operaciones simuladas de los mejores sistemas vivos en semanas de velas reales (Yahoo): miles de ejemplos para la IA."""
+    maximo = maximo or (3000 if NODO == 'pi' else 6000)
+    rnd = random.Random()
+    vivos = sorted(((aptitud(a)[0], a) for a in agentes() if not _llm(a)), key=lambda x: -9 if x[0] is None else x[0], reverse=True)
+    gens, vistos = [], set()
+    for f, a in vivos:
+        g = _g(a)
+        k = json.dumps({x: g.get(x) for x in ('estrategia', 'marco', 'p', 'stop_atr', 'rr')}, sort_keys=True)
+        if k not in vistos:
+            vistos.add(k)
+            gens.append(dict(g, filtro_ia=0.0))
+        if len(gens) >= 16:
+            break
+    sims = ((e.get('universo') or {}).get('cripto') or CRIPTO)[:6] + (ACCIONES[:3] if 'acciones' in e.get('mercados', []) else [])
+    filas, cache = [], {}
+    for g in gens:
+        for s in rnd.sample(sims, min(3, len(sims))):
+            try:
+                if (s, g['marco']) not in cache:
+                    cache[(s, g['marco'])] = datos.velas(s, g['marco'], rango=RANGO_HIST[g['marco']])[:-1]
+                if (s, '60m') not in cache:
+                    cache[(s, '60m')] = datos.velas(s, '60m', rango='60d')
+            except Exception:
+                continue
+            cr = s.endswith('-USD')
+            coste = coste_pct(CUENTA_CFG, 0.02 if cr else 0.01, 'CRYPTOCURRENCY' if cr else 'EQUITY')
+            mu = []
+            simular(g, [cache[(s, g['marco'])]], coste, CUENTA_CFG['deslizamiento_pct'] + 0.01, [cache[(s, '60m')]], muestras=mu)
+            filas += [(dict(ras, coste_pct=round(ras['coste_pct'], 4)), g, d, round(r, 3)) for ras, d, r in mu]
+    rnd.shuffle(filas)
+    return filas[:maximo]
+
+
 def _entrenar_ia():
     try:
-        ia.entrenar()
+        h = db.ajuste('ia_hist', None)
+        if not h or time.time() - h.get('ts', 0) > IA_HIST_CADA:
+            h = {'ts': int(time.time()), 'filas': muestras_historicas(estado() or {})}
+            db.poner_ajuste('ia_hist', h)
+            log(f"🤖 {len(h['filas'])} operaciones simuladas en semanas de velas reales para entrenar la IA")
+        ia.entrenar(extra=h['filas'])
         log('🤖 ' + ia.resumen())
     except Exception:
         log('error entrenando la IA: ' + traceback.format_exc().splitlines()[-1])
@@ -520,7 +642,7 @@ def _sentimiento(e):
 
 
 def contexto(e, marcos):
-    ctx = {'q': {}, 'v': {}, 'coste': {}, 'sen': {}}
+    ctx = {'q': {}, 'v': {}, 'coste': {}, 'sen': {}, 'h': {}}
     cfg = dict(CUENTA_CFG, **{'comision_pct': CUENTA_CFG['comision_pct']})
     for s in _universo(e):
         try:
@@ -537,20 +659,53 @@ def contexto(e, marcos):
                 ctx['v'][(s, m)] = datos.velas(s, m)[:-1]
             except Exception:
                 pass
+        x = _H1.get(s)
+        if not x or time.time() - x[0] > 300:
+            try:
+                x = _H1[s] = (time.time(), datos.velas(s, '60m'))
+            except Exception:
+                pass
+        if x:
+            ctx['h'][s] = x[1]
     return ctx
 
 
+_H1 = {}
+
+
 def _senales_cache(ctx, g, s):
-    clave = (json.dumps({k: g[k] for k in ('marco', 'estrategia', 'p', 'vol_min_pct', 'vol_max_pct', 'filtro_tendencia', 'cortos', 'horas_bloqueadas')}, sort_keys=True), s)
+    clave = (json.dumps({k: g.get(k) for k in ('marco', 'estrategia', 'p', 'vol_min_pct', 'vol_max_pct', 'filtro_tendencia', 'cortos', 'horas_bloqueadas',
+                                                'regimen', 'confirmar_1h')}, sort_keys=True), s)
     if clave not in ctx['sen']:
         v = ctx['v'].get((s, g['marco']))
-        ctx['sen'][clave] = (senales(g, v), v) if v and len(v) >= 60 else (None, v)
+        ctx['sen'][clave] = (_senales(g, v, ctx['h'].get(s)), v) if v and len(v) >= 60 else (None, v)
     return ctx['sen'][clave]
 
 # ---------------- un tick de todo el enjambre ----------------
 
 
+def _migrar_v2(e):
+    """Una vez: las mejoras de costes pasan a todos (orden límite, toma parcial, régimen) y se reparten al azar las nuevas
+    (confirmación de 1 h, flujo, veto, stop por tiempo) para que la evolución decida con datos cuáles sirven."""
+    rnd = random.Random()
+    for a in agentes():
+        if _llm(a):
+            continue
+        g = _g(a)
+        g['entrada'] = 'limite'
+        g['confirmar_1h'], g['flujo'] = int(rnd.random() < 0.35), int(rnd.random() < 0.35)
+        g['veto_llm'], g['sin_avance'] = int(rnd.random() < 0.15), (6 if rnd.random() < 0.2 else 0)
+        _poner(a['id'], genoma=json.dumps(g))
+    e['mejoras_v2'] = 1
+    guardar(e)
+    _leccion(None, None, None, 'evolucion', 'Mejoras: todos entran con orden límite, objetivo ≥ 3× costes, toma parcial en +1R con stop a la entrada, '
+             'filtro de régimen (ADX), máximo 2 apuestas cripto iguales, y a prueba confirmación de 1 h, flujo del libro/funding, comité de veto y stop por tiempo.', {})
+
+
 def paso_enjambre(e):
+    if not e.get('mejoras_v2'):
+        _migrar_v2(e)
+        e = estado()
     e = _refrescar_universo(e)
     vivos = agentes()
     marcos = {_g(a).get('marco', '1m') for a in vivos} or {'5m'}
@@ -573,7 +728,11 @@ def paso_enjambre(e):
         e['ultimo_sent'] = ahora_
         guardar(e)
         threading.Thread(target=_sentimiento, args=(e,), daemon=True).start()
-    from . import escuadron
+    from . import alpaca, escuadron
+    if ahora_ - e.get('ultimo_espejo', 0) > 60 and alpaca.configurado():
+        e['ultimo_espejo'] = ahora_
+        guardar(e)
+        threading.Thread(target=alpaca.espejo, daemon=True).start()
     if escuadron.activo() and not analista.activo():  # el analista de noticias vive donde está el modelo de lenguaje
         analista.arrancar(lambda: _universo(estado() or e))
         log('📰 analista de noticias en marcha')
@@ -760,7 +919,10 @@ def paso_agente(e, a, ctx):
         return
     if g['estrategia'] == 'llm':  # sus entradas las decide el modelo de lenguaje en escuadron.ronda()
         return
-    esperando = {o['simbolo'] for o in db.q("SELECT simbolo FROM ordenes WHERE cuenta_id=? AND estado='pendiente' AND reduce=0 AND origen='agente'", (cid,))}
+    pend = db.q("SELECT simbolo, lado FROM ordenes WHERE cuenta_id=? AND estado='pendiente' AND reduce=0 AND origen='agente'", (cid,))
+    esperando = {o['simbolo'] for o in pend} | {k[1] for k in _VETO if k[0] == a['id']}
+    dirs = [1 if p_['cantidad'] > 0 else -1 for p_ in pos if p_['simbolo'].endswith('-USD')] + \
+           [1 if o['lado'] == 'buy' else -1 for o in pend if o['simbolo'].endswith('-USD') and o['simbolo'] not in {p_['simbolo'] for p_ in pos}]
     if len(pos) + len(esperando - {p['simbolo'] for p in pos}) >= CUENTA_CFG['max_posiciones']:
         return
     hora = time.gmtime().tm_hour
@@ -774,10 +936,12 @@ def paso_agente(e, a, ctx):
         (s_atr, v) = _senales_cache(ctx, g, sim)
         if not s_atr:
             continue
-        s, atr, tend = s_atr
+        s, atr, tend, ad = s_atr
         if not s[-1] or not atr[-1]:
             continue
         q, d = ctx['q'][sim], s[-1]
+        if sim.endswith('-USD') and dirs.count(d) >= MAX_CORR:  # ya hay 2 apuestas cripto iguales: la tercera sería la misma apuesta
+            continue
         lim = g['entrada'] == 'limite'
         coste, spread = ctx['coste'][sim]
         if lim:  # entra en el retroceso con orden límite: no paga deslizamiento ni spread al entrar
@@ -785,7 +949,7 @@ def paso_agente(e, a, ctx):
         p = q['precio'] - d * g['retroceso'] * atr[-1] if lim else q['precio']
         dist = atr[-1] * g['stop_atr']
         # regla de profesional: el objetivo debe pagar los costes con margen, y los costes no pueden comerse más de la mitad del stop
-        if g['rr'] * dist / p * 100 < g['min_ventaja'] * coste or dist / p * 100 < 2 * coste:
+        if g['rr'] * dist / p * 100 < max(g['min_ventaja'], MIN_VENTAJA_MIN) * coste or dist / p * 100 < 2 * coste:
             db.ex('UPDATE ag_agentes SET descartes=descartes+1 WHERE id=?', (a['id'],))
             continue
         r = motor.resumen(cid)
@@ -797,8 +961,12 @@ def paso_agente(e, a, ctx):
             continue
         sl, tp = p - d * dist, p + d * g['rr'] * dist
         rasgos = {'atr_pct': round(atr[-1] / p * 100, 4), 'tendencia': tend[-1], 'hora': hora, 'spread_pct': round(spread, 4),
-                  'coste_pct': round(coste, 4), 'precio': p, 'dist': dist, 'entrada': g['entrada'], 'tramos': len(fr), **sentimiento.rasgos(sim, sent)}
+                  'coste_pct': round(coste, 4), 'precio': p, 'dist': dist, 'entrada': g['entrada'], 'tramos': len(fr),
+                  'adx': round(ad[-1], 1) if ad[-1] else None, **sentimiento.rasgos(sim, sent), **flujo.rasgos(sim)}
         if g.get('noticias') and (rasgos.get('sent', 0) * d <= -0.4 or rasgos.get('evento')):  # el analista avisa: noticias en contra o evento macro
+            db.ex('UPDATE ag_agentes SET descartes=descartes+1 WHERE id=?', (a['id'],))
+            continue
+        if g.get('flujo') and flujo.en_contra(rasgos, d):  # el libro empuja en contra o todo el mundo ya está en ese lado
             db.ex('UPDATE ag_agentes SET descartes=descartes+1 WHERE id=?', (a['id'],))
             continue
         if g.get('filtro_ia'):  # el modelo del enjambre opina: si ve pocas opciones de ganar, no entra
@@ -808,21 +976,39 @@ def paso_agente(e, a, ctx):
                 if pr < g['filtro_ia']:
                     db.ex('UPDATE ag_agentes SET descartes=descartes+1 WHERE id=?', (a['id'],))
                     continue
-        try:
-            o = motor.enviar(cid, sim, 'buy' if d > 0 else 'sell', qty, 'limite' if lim else 'mercado', limite=p if lim else None, sl=sl, tp=tp,
-                             setup=g['estrategia'], nota=f"{a['nombre']} {g['estrategia']} {g['marco']}", origen='agente')
-        except motor.ErrorOrden as err:
-            log(f"{a['nombre']}: orden rechazada {sim}: {err}")
-            continue
-        info = {'cid': cid, 'it': it['id'], 'sim': sim, 'd': d, 'g': g, 'rasgos': rasgos, 'q': qty, 'dist': dist, 'riesgo': qty * dist * sum(1 - f for f in fr)}
-        if o['estado'] == 'ejecutada':
-            _al_llenar(a, info, o)
-        else:
-            _PEND[o['id']] = info
+        info = {'cid': cid, 'it': it['id'], 'sim': sim, 'd': d, 'g': g, 'rasgos': rasgos, 'q': qty, 'dist': dist, 'riesgo': qty * dist * sum(1 - f for f in fr),
+                'p': p, 'lim': lim, 'sl': sl, 'tp': tp, 'atr': atr[-1], 'ref': q['precio']}
+        from . import escuadron
+        if g.get('veto_llm') and escuadron.activo():  # la decide el comité de veto (escuadron.vetar) en el próximo minuto
+            _VETO[(a['id'], sim)] = dict(info, ts=time.time(), aid=a['id'])
             esperando.add(sim)
-            _poner(a['id'], ultimo=f"⏳ {sim} límite @ {p:.6g}")
+            _poner(a['id'], ultimo=f"⚖ {sim}: esperando al comité de veto")
+        elif _enviar_entrada(a, info):
+            esperando.add(sim)
+        if sim.endswith('-USD') and sim in esperando:
+            dirs.append(d)
         if len(motor.posiciones(cid, False)) + len(esperando) >= CUENTA_CFG['max_posiciones']:
             break
+
+
+_VETO = {}  # (agente, símbolo) → entrada pendiente del comité de veto
+
+
+def _enviar_entrada(a, info):
+    """Envía la orden de entrada (mercado o límite) con su stop y objetivo. True si queda en marcha."""
+    g, sim, d, p = info['g'], info['sim'], info['d'], info['p']
+    try:
+        o = motor.enviar(info['cid'], sim, 'buy' if d > 0 else 'sell', info['q'], 'limite' if info['lim'] else 'mercado', limite=p if info['lim'] else None,
+                         sl=info['sl'], tp=info['tp'], setup=g['estrategia'], nota=f"{a['nombre']} {g['estrategia']} {g['marco']}", origen='agente')
+    except motor.ErrorOrden as err:
+        log(f"{a['nombre']}: orden rechazada {sim}: {err}")
+        return False
+    if o['estado'] == 'ejecutada':
+        _al_llenar(a, info, o)
+    else:
+        _PEND[o['id']] = info
+        _poner(a['id'], ultimo=f"⏳ {sim} límite @ {p:.6g}")
+    return True
 
 
 def _gestionar(a, g):
@@ -849,6 +1035,21 @@ def _gestionar(a, g):
                 except motor.ErrorOrden:
                     pass
                 continue
+        fav = (p['precio'] - t['entrada']) * sg
+        if dist and g.get('parcial_r') and not (t['salida_cant'] or 0) and fav >= g['parcial_r'] * dist:  # toma parcial + stop a la entrada
+            try:
+                motor.cerrar(cid, p['simbolo'], g.get('parcial_frac', 0.5) * 100, 'parcial')
+                if p['stop'] is None or (t['entrada'] - p['stop']) * sg > 0:
+                    motor.mover_stop(cid, p['simbolo'], stop=t['entrada'])
+            except motor.ErrorOrden:
+                pass
+            continue
+        if dist and g.get('sin_avance') and barras >= g['sin_avance'] and not (t['salida_cant'] or 0) and (t['mfe'] or 0) < 0.3 * dist:
+            try:
+                motor.cerrar(cid, p['simbolo'], 100, 'sin avance')
+            except motor.ErrorOrden:
+                pass
+            continue
         if dist and g.get('trail_r'):  # trailing stop desde +trail_r R
             k = p['trade_id']
             mejor = _MEJOR.get(k, t['entrada'])
@@ -991,7 +1192,8 @@ def aptitud(a):
 def _cruce(g1, g2, rnd):
     h = copy.deepcopy(g1)
     for k in ('stop_atr', 'rr', 'filtro_tendencia', 'riesgo_pct', 'max_barras', 'be_en_r', 'min_ventaja', 'marco', 'entrada', 'retroceso', 'tramos',
-              'enfriar', 'guardia', 'roi_min', 'trail_r', 'trail_frac', 'filtro_ia', 'noticias'):
+              'enfriar', 'guardia', 'roi_min', 'trail_r', 'trail_frac', 'filtro_ia', 'noticias', 'parcial_r', 'parcial_frac', 'sin_avance',
+              'regimen', 'confirmar_1h', 'flujo', 'veto_llm'):
         if rnd.random() < 0.5:
             h[k] = copy.deepcopy(g2.get(k, GENOMA_BASE[k]))
     return h
@@ -1072,18 +1274,24 @@ def buscar_solucion(e, a, ctx):
         g = copy.deepcopy(actual)
         g.update(estrategia='rejilla', p=dict(ESTRATEGIAS['rejilla']), entrada='limite')
         cand.append(('rejilla (grid) en rango lateral', g))
+    for k, nombre in (('confirmar_1h', 'confirmando con la tendencia de 1 h'), ('regimen', 'operando solo en su régimen (ADX)'), ('parcial_r', 'con toma parcial en +1R')):
+        g = copy.deepcopy(actual)
+        g[k] = 0 if actual.get(k) else 1
+        cand.append(('mismo sistema ' + (nombre if g[k] else 'sin ' + nombre.split(' ', 1)[1]), g))
     sims = [s for s in _universo(e, actual) if s in ctx['q']][:8]
     series = {}
     for m in MARCOS:
         series[m] = [ctx['v'].get((s, m)) or datos.velas(s, m)[:-1] for s in sims] if sims else []
+    altas = [ctx['h'].get(s) for s in sims]
     if not sims:
         return _mutar(actual, rnd), 'Sin mercados abiertos para probar soluciones: sigo con una mutación.'
     coste = statistics.fmean(ctx['coste'][s][0] for s in sims)
     ahorro = CUENTA_CFG['deslizamiento_pct'] + statistics.fmean(ctx['coste'][s][1] for s in sims) / 2
     res = []
     for nombre, g in cand:
-        rs = simular(g, [v for v in series.get(g.get('marco', '1m'), []) if v], coste, ahorro)
-        res.append((puntuar(rs), nombre, g, len(rs), statistics.fmean(rs) if rs else 0))
+        par = [(v, h) for v, h in zip(series.get(g.get('marco', '1m'), []), altas) if v]
+        pt, rs = evaluar(g, [x[0] for x in par], coste, ahorro, [x[1] for x in par])
+        res.append((pt, nombre, g, len(rs), statistics.fmean(rs) if rs else 0))
     res.sort(key=lambda x: x[0], reverse=True)
     p, nombre, g, n, m = res[0]
     g = copy.deepcopy(g)
@@ -1092,7 +1300,7 @@ def buscar_solucion(e, a, ctx):
         g['riesgo_pct'] = max(round(g['riesgo_pct'] * 0.7, 1), 3.0)
         extra = f' Nada sale positivo en datos recientes: arriesgo menos ({g["riesgo_pct"]} %).'
     tabla = '; '.join(f"{x[1]}: {x[4]:+.2f}R/{x[3]}" for x in res[:3])
-    return g, f"Probé {len(res)} soluciones en {len(sims)} mercados reales. Elegida: {nombre} ({m:+.2f}R por trade en {n}). Top: {tabla}.{extra}"
+    return g, f"Probé {len(res)} soluciones en {len(sims)} mercados reales (cada una debe ganar en el tramo antiguo Y en el reciente). Elegida: {nombre} ({m:+.2f}R por trade en {n}). Top: {tabla}.{extra}"
 
 
 def _quiebra(e, a, it, eq, ctx):
@@ -1262,6 +1470,23 @@ def _resumen_jefe():
     return escuadron.resumen_jefe()
 
 
+def _resumen_mejoras(tr):
+    """Cómo van los genes nuevos: R medio con y sin cada uno (en las operaciones de la sesión)."""
+    out = []
+    for k, nombre in (('confirmar_1h', 'confirmación 1 h'), ('flujo', 'flujo'), ('veto_llm', 'veto'), ('regimen', 'régimen'), ('sin_avance', 'stop por tiempo')):
+        si = [t['r'] for t in tr if json.loads(t['genoma']).get(k)]
+        no = [t['r'] for t in tr if not json.loads(t['genoma']).get(k)]
+        if len(si) >= 5 and len(no) >= 5:
+            out.append(f"{nombre} {statistics.fmean(si):+.2f}R ({len(si)}) vs sin {statistics.fmean(no):+.2f}R")
+    from . import escuadron
+    return 'Genes nuevos: ' + (', '.join(out) or 'aún sin datos suficientes') + '. ' + escuadron.resumen_veto()
+
+
+def _resumen_alpaca():
+    from . import alpaca
+    return alpaca.resumen() if alpaca.configurado() else 'Alpaca (paper): sin conectar.'
+
+
 def informe(desde=None):
     preparar()
     e = estado() or {}
@@ -1291,9 +1516,12 @@ def informe(desde=None):
         'Mejores agentes ahora: ' + (', '.join(f"{a['nombre']} {f:+.2f}R ({_g(a)['estrategia']} {_g(a)['marco']})" for f, a in mejores if f is not None) or '—') + '.',
         'Por qué se pierde (autopsias): ' + (', '.join(f"{x['tipo']} ×{x['n']}" for x in lec) or '—') + '.',
         ia.resumen(),
+        _resumen_mejoras(tr),
+        flujo.resumen(),
         sentimiento.resumen(),
         analista.resumen(),
         _resumen_jefe(),
+        _resumen_alpaca(),
         'Mercados cripto (por volumen): ' + ', '.join(x.replace('-USD', '') for x in ((e.get('universo') or {}).get('cripto') or CRIPTO)) + '.',
         'Aprendizajes compartidos: ' + (' | '.join(x['texto'] for x in comp) or '—'),
     ])

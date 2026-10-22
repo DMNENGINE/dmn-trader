@@ -13,6 +13,7 @@ def ok(cond, txt):
         fallos.append(txt)
 
 
+E.N_LLM = 6  # la prueba sigue cubriendo a los traders LLM aunque ahora estén retirados (N_LLM = 0)
 ok(E.activo(), f'modelo disponible ({llm.MODELO})')
 c = E._limpiar({'rr': 99, 'marco': '4h', 'estrategia': 'rejilla', 'foo': 1, 'tramos': 2.6, 'filtro_tendencia': True, 'roi_min': None})
 ok(c.get('rr') == 5.0 and 'marco' not in c and c.get('estrategia') == 'rejilla' and 'p' in c and 'foo' not in c and c.get('tramos') == 3

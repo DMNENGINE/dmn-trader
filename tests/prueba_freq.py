@@ -26,7 +26,7 @@ def paseo(n=400, semilla=1, deriva=0.0):
 # 1) lookahead-analysis: la señal de la vela k no puede cambiar al añadir velas futuras
 reales = [datos.velas('BTC-USD', '5m')[:-1], paseo(), paseo(semilla=5)]
 for est in A.ESTRATEGIAS:
-    g = A._g({'genoma': json.dumps(dict(A.GENOMA_BASE, estrategia=est, p=dict(A.ESTRATEGIAS[est]), vol_max_pct=50, filtro_tendencia=True))})
+    g = A._g({'genoma': json.dumps(dict(A.GENOMA_BASE, regimen=0, parcial_r=0, estrategia=est, p=dict(A.ESTRATEGIAS[est]), vol_max_pct=50, filtro_tendencia=True))})
     malas = 0
     for v in reales:
         s, atr, tend = A.senales(g, v)
@@ -38,7 +38,7 @@ for est in A.ESTRATEGIAS:
 # 2) simulador: ROI decreciente y trailing
 pre = [{'t': 1700000000 + 60 * i, 'o': 100, 'h': 100.05, 'l': 99.95, 'c': 100 + 0.01 * (i % 2)} for i in range(60)]
 pre.append({'t': 1700000000 + 3600, 'o': 100, 'h': 100.55, 'l': 100, 'c': 100.5})  # impulso: señal de compra
-g = dict(A.GENOMA_BASE, estrategia='impulso', p={'n': 1, 'umbral': 0.3}, vol_max_pct=50, min_ventaja=0.1, rr=2, stop_atr=3, max_barras=40, cortos=False)
+g = dict(A.GENOMA_BASE, regimen=0, parcial_r=0, entrada='mercado', estrategia='impulso', p={'n': 1, 'umbral': 0.3}, vol_max_pct=50, min_ventaja=0.1, rr=2, stop_atr=3, max_barras=40, cortos=False)
 dist = A.senales(g, pre)[1][-1] * 3
 camino = [100.5 + dist * (k / 20 if k <= 20 else 1 - (k - 20) / 10) for k in range(0, 46)]  # sube a +1R y cae a -1,5R
 serie = pre + [{'t': pre[-1]['t'] + 60 * (k + 1), 'o': camino[k - 1] if k else 100.5, 'h': max(camino[k], camino[k - 1] if k else 100.5) + dist * 0.01,
@@ -49,7 +49,7 @@ tr = A.simular(dict(g, trail_r=0.8, trail_frac=0.6), [serie], 0.05)
 print(f'  objetivo fijo {[round(x, 2) for x in sin]} · ROI {[round(x, 2) for x in roi]} · trailing {[round(x, 2) for x in tr]}')
 ok(sin and roi and tr and sin[0] < -0.9 and roi[0] > 0.5 and tr[0] > 0.2, 'ROI y trailing guardan la ganancia que el objetivo fijo devuelve')
 v = paseo(1500, 3)
-g2 = dict(A.GENOMA_BASE, estrategia='impulso', p={'n': 2, 'umbral': 0.0}, vol_max_pct=50, min_ventaja=0.1, max_barras=5)
+g2 = dict(A.GENOMA_BASE, regimen=0, parcial_r=0, estrategia='impulso', p={'n': 2, 'umbral': 0.0}, vol_max_pct=50, min_ventaja=0.1, max_barras=5)
 ok(len(A.simular(dict(g2, enfriar=5), [v], 0.01)) < len(A.simular(dict(g2, enfriar=0), [v], 0.01)), 'enfriamiento: menos reentradas seguidas')
 
 # 3) IA: aprende una regla real y no se activa con ruido
@@ -57,7 +57,7 @@ def filas(regla, n=900, semilla=2):
     rnd, out = random.Random(semilla), []
     for _ in range(n):
         ras = {'atr_pct': rnd.uniform(0.02, 0.3), 'tendencia': rnd.choice([-1, 0, 1]), 'hora': rnd.randrange(24), 'coste_pct': 0.22, 'dist': rnd.uniform(0.5, 2), 'precio': 100}
-        gg = dict(A.GENOMA_BASE, estrategia=rnd.choice(list(A.ESTRATEGIAS)), marco=rnd.choice(list(A.MARCOS)))
+        gg = dict(A.GENOMA_BASE, regimen=0, parcial_r=0, estrategia=rnd.choice(list(A.ESTRATEGIAS)), marco=rnd.choice(list(A.MARCOS)))
         d = rnd.choice([1, -1])
         gana = regla(ras, d, rnd)
         out.append((ras, gg, d, rnd.uniform(0.3, 1.5) if gana else -1.0))
