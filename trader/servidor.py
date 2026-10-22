@@ -268,46 +268,59 @@ def r_ajustes_set(q, b):
             db.poner_ajuste(k, b[k])
     return r_ajustes(q, b)
 
-# ---------- agente autónomo (el reto) ----------
+# ---------- enjambre de agentes autónomos (el reto) ----------
 
 
-@ruta('GET', '/api/agente')
-def r_agente(q, b):
-    return agente.resumen()
-
-
-@ruta('POST', '/api/agente/iniciar')
-def r_agente_ini(q, b):
-    hasta = b.get('hasta')
-    if isinstance(hasta, str) and ':' in hasta:  # "07:00" → próxima vez que sean esas horas (hora local del servidor)
+def _hasta(hasta):
+    if isinstance(hasta, str) and ':' in hasta:  # "07:00" → la próxima vez que sean esas horas (hora local del servidor)
         hh, mm = map(int, hasta.split(':'))
         t = time.localtime()
         fin = time.mktime((t.tm_year, t.tm_mon, t.tm_mday, hh, mm, 0, 0, 0, -1))
-        hasta = fin + 86400 if fin <= time.time() else fin
-    elif hasta and float(hasta) < 1000:  # horas desde ahora
-        hasta = time.time() + float(hasta) * 3600
-    return agente.iniciar(float(b.get('capital', 1)), float(b.get('meta', 100)), b.get('mercados') or ['cripto', 'acciones'],
-                          int(hasta) if hasta else None, b.get('simbolos'))
+        return int(fin + 86400 if fin <= time.time() else fin)
+    if hasta and float(hasta) < 1000:  # horas desde ahora
+        return int(time.time() + float(hasta) * 3600)
+    return int(hasta) if hasta else None
 
 
-@ruta('POST', '/api/agente/parar')
-def r_agente_parar(q, b):
+@ruta('GET', '/api/enjambre')
+def r_enj(q, b):
+    return agente.resumen()
+
+
+@ruta('GET', '/api/enjambre/mapa')
+def r_enj_mapa(q, b):
+    return agente.mapa()
+
+
+@ruta('POST', '/api/enjambre/iniciar')
+def r_enj_ini(q, b):
+    return agente.iniciar(int(b.get('agentes', 50)), float(b.get('capital', 1)), float(b.get('meta', 100)),
+                          b.get('mercados') or ['cripto', 'acciones'], _hasta(b.get('hasta')))
+
+
+@ruta('POST', '/api/enjambre/parar')
+def r_enj_parar(q, b):
     return agente.parar()
 
 
-@ruta('GET', '/api/agente/lecciones')
-def r_agente_lec(q, b):
+@ruta('GET', r'/api/enjambre/agente/(?P<aid>\d+)')
+def r_enj_ag(q, b, aid):
+    return agente.agente(int(aid))
+
+
+@ruta('GET', '/api/enjambre/lecciones')
+def r_enj_lec(q, b):
     return agente.lecciones(int(q.get('n', 50)))
 
 
-@ruta('GET', '/api/agente/intentos')
-def r_agente_int(q, b):
-    return agente.intentos(int(q.get('n', 50)))
-
-
-@ruta('GET', '/api/agente/informe')
-def r_agente_inf(q, b):
+@ruta('GET', '/api/enjambre/informe')
+def r_enj_inf(q, b):
     return {'texto': agente.informe(q.get('desde'))}
+
+
+@ruta('POST', '/api/enjambre/nodo')
+def r_enj_nodo(q, b):
+    return agente.recibir_nodo(b)
 
 
 # ---------- hilo de fondo ----------

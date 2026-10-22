@@ -16,7 +16,7 @@
 </header>
 <nav class="pestanas" id="pestanas">
   <button data-p="mesa" class="on">Mesa</button>
-  <button data-p="agente">🤖 APOLO</button>
+  <button data-p="agente">🤖 Enjambre</button>
   <button data-p="diario">Diario</button>
   <button data-p="stats">Estadísticas</button>
   <button data-p="backtest">Backtest</button>
@@ -75,25 +75,25 @@
   </div>
 </section>
 
-<!-- AGENTE -->
+<!-- ENJAMBRE -->
 <section id="p-agente" class="pag">
   <div id="agKpis" class="tiles"></div>
   <div class="dos">
-    <div class="panel form"><div class="cab">El reto de APOLO <span id="agEstado" class="tenue"></span></div>
-      <p class="tenue chico">APOLO opera solo con microoperaciones simuladas. Cada vez que pierde hace la autopsia (por qué), aplica un arreglo y, si quiebra, prueba soluciones en datos reales recientes antes de volver a empezar.</p>
-      <div class="fila2"><label>Empieza con ($) <input id="agCap" type="number" step="any" value="1"></label><label>Meta ($) <input id="agMeta" type="number" step="any" value="100"></label></div>
-      <div class="fila2"><label>Hasta (hora, vacío = sin fin) <input id="agHasta" placeholder="07:00"></label><label>Mercados <select id="agMerc"><option value="cripto,acciones">Cripto + acciones</option><option value="cripto">Solo cripto</option><option value="acciones">Solo acciones</option></select></label></div>
-      <div class="fila2"><button id="agIniciar" class="enviar">▶ Empezar el reto</button><button id="agParar" class="enviar venta">⏹ Parar</button></div>
+    <div class="panel form"><div class="cab">Enjambre de APOLO <span id="agEstado" class="tenue"></span></div>
+      <p class="tenue chico">Muchos agentes operan solos con microoperaciones simuladas. Cada pérdida pasa una autopsia con su arreglo; al quebrar, cada agente prueba soluciones en datos reales; cada 2 h el 20 % peor se reemplaza por hijos de los mejores; lo que pierde para todos se bloquea para todos.</p>
+      <div class="fila2"><label>Agentes <input id="agN" type="number" value="50" min="1" max="2000"></label><label>Mercados <select id="agMerc"><option value="cripto,acciones">Cripto + acciones</option><option value="cripto">Solo cripto</option><option value="acciones">Solo acciones</option></select></label></div>
+      <div class="fila2"><label>Cada uno empieza con ($) <input id="agCap" type="number" step="any" value="1"></label><label>Meta ($) <input id="agMeta" type="number" step="any" value="100"></label></div>
+      <label>Hasta (hora, vacío = sin fin) <input id="agHasta" placeholder="07:00"></label>
+      <div class="fila2"><button id="agIniciar" class="enviar">▶ Empezar / redimensionar</button><button id="agParar" class="enviar venta">⏹ Parar</button></div>
       <div id="agMsg" class="msg"></div>
-      <div class="cab sub">Genoma actual (cómo opera ahora)</div><div id="agGenoma" class="chico"></div>
     </div>
-    <div class="panel"><div class="cab">Capital del intento</div><div id="chartAg" class="lienzo-med"></div></div>
+    <div class="panel"><div class="cab">Informe de la sesión</div><div id="agInforme" class="chico mono"></div></div>
   </div>
+  <div class="panel"><div class="cab">Agentes <span id="agNodos" class="tenue chico"></span></div><div id="agTabla" class="tabla-scroll"></div></div>
   <div class="dos">
-    <div class="panel"><div class="cab">🧠 Lecciones (por qué perdió y qué cambió)</div><div id="agLec" class="chico"></div></div>
+    <div class="panel"><div class="cab">🧠 Lecciones</div><div id="agLec" class="chico"></div></div>
     <div class="panel"><div class="cab">Actividad en vivo</div><div id="agLog" class="chico mono"></div></div>
   </div>
-  <div class="panel"><div class="cab">Intentos</div><div id="agInt"></div></div>
 </section>
 
 <!-- DIARIO -->

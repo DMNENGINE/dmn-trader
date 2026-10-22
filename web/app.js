@@ -328,31 +328,27 @@ $('#btnBorrar').onclick = async () => { if (E.cuentas.length < 2) return msg('#a
   await api(`/cuentas/${E.cuenta.id}`, 'DELETE'); localStorage.removeItem('dmn.cuenta'); await cargarCuentas(); await cambiarCuenta(); msg('#ajMsg', 'Cuenta eliminada.', true); };
 $('#btnWebhook').onclick = async () => { try { await api('/ajustes', 'POST', { webhook: $('#wUrl').value.trim() }); msg('#ajMsg', 'Webhook guardado: los avisos (stops, alertas, bloqueos) llegarán ahí.', true); } catch (e) { msg('#ajMsg', e.message); } };
 
-// ---------- agente (el reto) ----------
-let gAg;
+// ---------- enjambre ----------
 async function cargarAgente() {
   try {
-    const [a, lec, its] = await Promise.all([api('/agente'), api('/agente/lecciones?n=40'), api('/agente/intentos?n=30')]);
-    const it = a.intento || {}; const t = (x, y) => `<div class="tile"><small>${x}</small><b>${y}</b></div>`;
-    $('#agEstado').innerHTML = a.activo ? '<span class="verde">● operando</span>' : '<span class="tenue">○ parado</span>';
-    $('#agKpis').innerHTML = [t('Capital ahora', a.equity != null ? n(a.equity, 4) + ' $' : '—'), t('Meta', a.meta ? n(a.meta, 0) + ' $' : '—'), t('Intento', it.id ? '#' + it.id : '—'),
-      t('Máx. este intento', it.max_equity != null ? n(it.max_equity, 4) + ' $' : '—'), t('Intentos', a.intentos), t('Metas logradas', a.metas_logradas),
-      t('Operaciones', a.trades), t('Acierto', a.trades ? n(a.ganados / a.trades * 100, 0) + '%' : '—'), t('R medio', a.r_medio != null ? sg(a.r_medio) : '—'), t('Descartadas por costes', a.descartes_coste)].join('');
-    const g = a.genoma; $('#agGenoma').innerHTML = g ? `Velas de <b>${g.marco}</b> · estrategia <b>${g.estrategia}</b> ${esc(JSON.stringify(g.p))} · stop ${g.stop_atr} ATR · objetivo ${g.rr}R · riesgo ${g.riesgo_pct}% · ` +
-      `${g.filtro_tendencia ? 'solo a favor de tendencia' : 'sin filtro de tendencia'} · volatilidad ${g.vol_min_pct}–${g.vol_max_pct}% · máx ${g.max_barras} velas · breakeven ${g.be_en_r ? 'a ' + g.be_en_r + 'R' : 'no'} · ventaja mínima ${g.min_ventaja}× costes` +
-      (g.simbolos_bloqueados.length ? ` · evita ${g.simbolos_bloqueados.join(', ')}` : '') + (g.horas_bloqueadas.length ? ` · no opera a las ${g.horas_bloqueadas.join(', ')} h UTC` : '') : '—';
-    $('#agLec').innerHTML = lec.map(l => `<div class="lec">${esc(l.texto)}<br><small>${fecha(l.ts)} · ${l.tipo}${l.intento ? ' · intento #' + l.intento : ''}</small></div>`).join('') || '<span class="tenue">Aún sin lecciones.</span>';
-    $('#agLog').textContent = (a.log || []).slice().reverse().join('\n') || 'Sin actividad.';
-    $('#agInt').innerHTML = tabla([['#', x => x.id], ['Inicio', x => fecha(x.inicio)], ['Fin', x => fecha(x.fin)], ['Máximo', x => n(x.max_equity, 4)], ['Final', x => x.final != null ? n(x.final, 4) : '—'],
-      ['Trades', x => `${x.trades} (${x.ganados} ✔)`], ['Resultado', x => x.resultado || '<span class="verde">en curso</span>'], ['Causa', x => `<span class="chico">${esc(x.causa || '')}</span>`]], its);
-    if (a.cuenta_id) { const eq = await api(`/cuentas/${a.cuenta_id}/equity`);
-      if (!gAg) { gAg = LW.createChart($('#chartAg'), { ...temaG, autoSize: true }); gAg.s = gAg.addAreaSeries({ lineColor: '#22c55e', topColor: '#22c55e33', bottomColor: '#22c55e00', lineWidth: 2 }); }
-      const desde = it.inicio || 0, vis = new Set(); gAg.s.setData(eq.filter(p => p.ts >= desde && !vis.has(p.ts) && vis.add(p.ts)).map(p => ({ time: p.ts, value: p.valor }))); gAg.timeScale().fitContent(); }
+    const [m, inf] = await Promise.all([api('/enjambre/mapa'), api('/enjambre/informe')]);
+    const loc = m.nodos.find(x => x.local) || m.nodos[0], k = loc.kpis, t = (x, y) => `<div class="tile"><small>${x}</small><b>${y}</b></div>`;
+    $('#agEstado').innerHTML = k.activo ? `<span class="verde">● ${k.agentes} agentes operando</span> · ciclo ${k.tick_s}s` : '<span class="tenue">○ parado</span>';
+    $('#agKpis').innerHTML = [t('Agentes (todos los nodos)', m.total.agentes), t('Generación', k.generacion), t('Operaciones', m.total.trades), t('Acierto', k.trades ? n(k.ganados / k.trades * 100, 0) + '%' : '—'),
+      t('R medio', k.r_medio != null ? sg(k.r_medio) : '—'), t('Quiebras', m.total.quiebras), t('Metas 🏆', m.total.metas), t('Mejor capital', n(k.max_equity, 3) + ' $')].join('');
+    $('#agNodos').textContent = m.nodos.map(x => `${x.nodo}: ${(x.agentes || []).length}${x.local ? ' (aquí)' : x.en_linea ? ' (en línea)' : ' (desconectado)'}`).join(' · ');
+    const todos = m.nodos.flatMap(x => (x.agentes || []).map(a => ({ ...a, nodo: x.nodo }))).sort((a, b) => (b.r_medio ?? -9) - (a.r_medio ?? -9));
+    $('#agTabla').innerHTML = tabla([['Agente', a => `<b>${esc(a.nombre)}</b>`], ['Nodo', a => a.nodo], ['Gen', a => a.generacion], ['Sistema', a => `${a.estrategia} · ${a.marco}${a.tendencia ? ' · tend' : ''} · ${a.riesgo_pct}%`],
+      ['Capital', a => n(a.equity, 4)], ['Máximo', a => n(a.max_equity, 3)], ['Trades', a => `${a.trades} (${a.ganados}✔)`], ['R medio', a => a.r_medio != null ? sg(a.r_medio) : '—'],
+      ['Intentos', a => a.intentos], ['🏆', a => a.metas || ''], ['Estado', a => esc(a.estado)], ['Último', a => `<span class="chico">${esc(a.ultimo || '')}</span>`]], todos);
+    $('#agInforme').textContent = inf.texto;
+    $('#agLec').innerHTML = m.lecciones.map(l => `<div class="lec">${esc(l.texto)}<br><small>${fecha(l.ts)} · ${l.tipo}</small></div>`).join('') || '<span class="tenue">Aún sin lecciones.</span>';
+    $('#agLog').textContent = (m.log || []).slice().reverse().join('\n') || 'Sin actividad.';
   } catch (e) { msg('#agMsg', e.message); }
 }
-$('#agIniciar').onclick = async () => { try { await api('/agente/iniciar', 'POST', { capital: +$('#agCap').value, meta: +$('#agMeta').value, hasta: $('#agHasta').value || null, mercados: $('#agMerc').value.split(',') });
-  msg('#agMsg', 'APOLO está operando. Vuelve por la mañana a ver qué aprendió.', true); cargarAgente(); } catch (e) { msg('#agMsg', e.message); } };
-$('#agParar').onclick = async () => { try { await api('/agente/parar', 'POST'); msg('#agMsg', 'Parado.', true); cargarAgente(); } catch (e) { msg('#agMsg', e.message); } };
+$('#agIniciar').onclick = async () => { try { await api('/enjambre/iniciar', 'POST', { agentes: +$('#agN').value, capital: +$('#agCap').value, meta: +$('#agMeta').value, hasta: $('#agHasta').value || null, mercados: $('#agMerc').value.split(',') });
+  msg('#agMsg', 'El enjambre está operando.', true); cargarAgente(); } catch (e) { msg('#agMsg', e.message); } };
+$('#agParar').onclick = async () => { try { await api('/enjambre/parar', 'POST'); msg('#agMsg', 'Parado.', true); cargarAgente(); } catch (e) { msg('#agMsg', e.message); } };
 setInterval(() => { if (!document.hidden && E.pag === 'agente') cargarAgente(); }, 10000);
 
 // ---------- navegación ----------

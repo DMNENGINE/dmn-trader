@@ -1,17 +1,20 @@
-"""Agente autónomo de APOLO: el «reto» (p. ej. 1 $ → 100 $) con microoperaciones simuladas en velas de 1 minuto.
-Ciclo: opera con su «genoma» (estrategia + parámetros + filtros) → cada operación perdida pasa una AUTOPSIA (¿por qué?)
-→ cada causa trae un ARREGLO concreto → si quiebra, busca la solución: genera candidatos (arreglos, mutaciones, el mejor
-histórico) y los PRUEBA en datos recientes reales antes de elegir con cuál empieza el siguiente intento.
-Todo queda escrito (lecciones, intentos, genomas) para que APOLO lo cuente y lo use."""
-import copy, json, math, random, statistics, threading, time, traceback
+"""Enjambre de agentes autónomos de APOLO: N agentes, cada uno con su cuenta de microoperaciones simuladas (p. ej. 1 $ → 100 $).
+Cada agente: opera con su genoma → autopsia de cada pérdida con su arreglo → si quiebra, prueba soluciones en datos reales recientes.
+El enjambre: comparte lo que aprende (símbolos/horas que pierden para todos), evoluciona cada 2 h (el 20 % peor se reemplaza por hijos
+del 10 % mejor) y, si hay varios equipos (Pi = central, PC = nodo), intercambia los mejores genomas cada 30 min (modelo de islas)."""
+import copy, json, math, os, random, socket, statistics, sys, threading, time, traceback
 from . import datos, db, indicadores as ind, motor
 
 ESQUEMA = """
+CREATE TABLE IF NOT EXISTS ag_agentes (id INTEGER PRIMARY KEY, nombre TEXT, cuenta_id INTEGER, genoma TEXT, generacion INTEGER DEFAULT 0,
+  padre INTEGER, creado INTEGER, activo INTEGER DEFAULT 1, estado TEXT DEFAULT 'buscando', ultimo TEXT, descartes INTEGER DEFAULT 0,
+  descartes_ref INTEGER DEFAULT 0, genoma_desde INTEGER, intentos INTEGER DEFAULT 0, metas INTEGER DEFAULT 0, max_equity REAL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS ag_intentos (id INTEGER PRIMARY KEY, inicio INTEGER, fin INTEGER, capital REAL, meta REAL, max_equity REAL,
   final REAL, trades INTEGER DEFAULT 0, ganados INTEGER DEFAULT 0, resultado TEXT, causa TEXT, genoma TEXT);
 CREATE TABLE IF NOT EXISTS ag_trades (trade_id INTEGER PRIMARY KEY, intento INTEGER, simbolo TEXT, direccion TEXT, estrategia TEXT,
   genoma TEXT, rasgos TEXT, abierto INTEGER, revisado INTEGER DEFAULT 0, r REAL, causa TEXT);
 CREATE TABLE IF NOT EXISTS ag_lecciones (id INTEGER PRIMARY KEY, ts INTEGER, intento INTEGER, trade_id INTEGER, tipo TEXT, texto TEXT, cambio TEXT);
+CREATE TABLE IF NOT EXISTS ag_nodos (nodo TEXT PRIMARY KEY, visto INTEGER, datos TEXT);
 """
 CRIPTO = ['BTC-USD', 'ETH-USD', 'SOL-USD', 'XRP-USD', 'DOGE-USD', 'AVAX-USD', 'LINK-USD', 'ADA-USD']
 ACCIONES = ['SPY', 'QQQ', 'TSLA', 'NVDA', 'AAPL', 'AMD', 'META', 'AMZN']
@@ -34,17 +37,6 @@ def log(t):
     LOG.append(f"{time.strftime('%H:%M:%S')} {t}")
     del LOG[:-200]
 
-
-def preparar():
-    db.con().executescript(ESQUEMA)
-
-
-def estado():
-    return db.ajuste('agente', None)
-
-
-def guardar(e):
-    db.poner_ajuste('agente', e)
 
 # ---------------- señales (compartidas por el agente en vivo y por el simulador de soluciones) ----------------
 
@@ -156,331 +148,6 @@ def puntuar(rs):
 # ---------------- arranque / parada ----------------
 
 
-def iniciar(capital=1.0, meta=100.0, mercados=('cripto', 'acciones'), hasta=None, simbolos=None):
-    preparar()
-    e = estado() or {}
-    if e.get('activo'):
-        raise motor.ErrorOrden('el agente ya está en marcha')
-    cid = e.get('cuenta_id')
-    if not cid or not db.uno('SELECT 1 x FROM cuentas WHERE id=?', (cid,)):
-        cid = motor.crear_cuenta('APOLO · Reto', capital, 'USD', CUENTA_CFG)['id']
-    motor.configurar(cid, CUENTA_CFG)
-    g = e.get('genoma') or mejor_genoma() or copy.deepcopy(GENOMA_BASE)
-    e = {'activo': True, 'cuenta_id': cid, 'capital': float(capital), 'meta': float(meta), 'mercados': list(mercados),
-         'simbolos': simbolos or {'cripto': CRIPTO, 'acciones': ACCIONES}, 'hasta': hasta, 'genoma': g,
-         'bandido': e.get('bandido') or {k: [1, 1] for k in ESTRATEGIAS}, 'sesion_inicio': int(time.time()),
-         'metas_logradas': e.get('metas_logradas', 0), 'descartes_coste': 0}
-    guardar(e)
-    _nuevo_intento(e, g, 'inicio')
-    arrancar_hilo()
-    return resumen()
-
-
-def parar(motivo='parado por el usuario'):
-    e = estado()
-    if not e:
-        return None
-    e['activo'] = False
-    guardar(e)
-    for p in motor.posiciones(e['cuenta_id'], False):
-        try:
-            motor.cerrar(e['cuenta_id'], p['simbolo'], 100, 'agente parado')
-        except Exception:
-            pass
-    it = db.uno('SELECT * FROM ag_intentos WHERE fin IS NULL ORDER BY id DESC LIMIT 1')
-    if it:
-        eq = motor.resumen(e['cuenta_id'])['equity']
-        db.ex('UPDATE ag_intentos SET fin=?, final=?, resultado=? WHERE id=?', (int(time.time()), eq, 'parado', it['id']))
-    log('⏹ ' + motivo)
-    return resumen()
-
-
-def arrancar_hilo():
-    global _hilo
-    if _hilo and _hilo.is_alive():
-        return
-    _parar.clear()
-    _hilo = threading.Thread(target=_bucle, daemon=True, name='agente')
-    _hilo.start()
-
-
-def _bucle():
-    while not _parar.is_set():
-        try:
-            e = estado()
-            if not e or not e.get('activo'):
-                return
-            if e.get('hasta') and time.time() >= e['hasta']:
-                parar('hora de fin alcanzada')
-                return
-            paso(e)
-        except Exception:
-            log('error: ' + traceback.format_exc().splitlines()[-1])
-            traceback.print_exc()
-        _parar.wait(20)
-
-# ---------------- un paso del agente ----------------
-
-
-def _intento_actual():
-    return db.uno('SELECT * FROM ag_intentos WHERE fin IS NULL ORDER BY id DESC LIMIT 1')
-
-
-def _nuevo_intento(e, g, motivo):
-    cid = e['cuenta_id']
-    for p in motor.posiciones(cid, False):
-        try:
-            motor.cerrar(cid, p['simbolo'], 100, 'nuevo intento')
-        except Exception:
-            pass
-    db.ex("UPDATE ordenes SET estado='cancelada', motivo='nuevo intento' WHERE cuenta_id=? AND estado IN ('pendiente','espera')", (cid,))
-    db.ex('UPDATE cuentas SET efectivo=?, capital_inicial=? WHERE id=?', (e['capital'], e['capital'], cid))
-    iid = db.ex('INSERT INTO ag_intentos(inicio,capital,meta,max_equity,genoma) VALUES(?,?,?,?,?)',
-                (int(time.time()), e['capital'], e['meta'], e['capital'], json.dumps(g)))
-    motor.instantanea(cid)
-    e['genoma'] = g
-    guardar(e)
-    log(f"▶ intento #{iid} ({motivo}) con {g['estrategia']} {g['p']} stop {g['stop_atr']}ATR rr {g['rr']}")
-    return iid
-
-
-def _universo(e):
-    sims = []
-    if 'cripto' in e['mercados']:
-        sims += e['simbolos'].get('cripto', CRIPTO)
-    if 'acciones' in e['mercados']:
-        sims += e['simbolos'].get('acciones', ACCIONES)
-    return [s for s in sims if s not in e['genoma'].get('simbolos_bloqueados', [])]
-
-
-def paso(e):
-    cid, g = e['cuenta_id'], e['genoma']
-    it = _intento_actual()
-    if not it:
-        it = db.uno('SELECT * FROM ag_intentos WHERE id=?', (_nuevo_intento(e, g, 'sin intento abierto'),))
-    motor.procesar(cid)
-    r = motor.resumen(cid)
-    eq = r['equity']
-    if eq > it['max_equity']:
-        db.ex('UPDATE ag_intentos SET max_equity=? WHERE id=?', (eq, it['id']))
-    _registrar_cerrados(e, it)
-    autopsias(e)
-    # ¿meta o quiebra?
-    if eq >= e['meta']:
-        db.ex('UPDATE ag_intentos SET fin=?, final=?, resultado=?, causa=? WHERE id=?', (int(time.time()), eq, 'meta', '¡meta alcanzada!', it['id']))
-        e['metas_logradas'] = e.get('metas_logradas', 0) + 1
-        motor.avisar(motor._fila(cid), f"🏆 APOLO convirtió {e['capital']} $ en {eq:.2f} $ (intento #{it['id']}). Vuelve a empezar para ver si lo repite.")
-        _nuevo_intento(e, g, 'meta alcanzada: comprobar que no fue suerte')
-        return
-    if eq < e['capital'] * 0.1:
-        quiebra(e, it, eq)
-        return
-    _gestionar(e, r)
-    pos = motor.posiciones(cid, False)
-    if not pos and e.get('descartes_coste', 0) - e.get('descartes_ref', 0) > 300:
-        # mucho tiempo sin encontrar operaciones que paguen los costes: buscar otra forma de operar sin esperar a quebrar
-        e['descartes_ref'] = e['descartes_coste']
-        nuevo, inf = buscar_solucion(e)
-        e['genoma'] = nuevo
-        guardar(e)
-        _leccion(e, it['id'], None, 'inactivo', f"Llevo mucho rato sin operaciones que cubran comisión + spread con mi forma de operar. {inf}", {'genoma': 'cambiado'})
-        return
-    if len(pos) >= CUENTA_CFG['max_posiciones']:
-        return
-    abiertos = {p['simbolo'] for p in pos}
-    pendientes = {o['simbolo'] for o in motor.ordenes(cid, 'pendiente') if not o['reduce']}
-    hora = time.gmtime().tm_hour
-    if hora in g['horas_bloqueadas']:
-        return
-    for sim in _universo(e):
-        if sim in abiertos or sim in pendientes:
-            continue
-        try:
-            q = datos.cotizacion(sim)
-            if not q['abierto']:
-                continue
-            v = datos.velas(sim, g.get('marco', '1m'))[:-1]  # solo velas cerradas
-        except Exception:
-            continue
-        if len(v) < 60:
-            continue
-        s, atr, tend = senales(g, v)
-        if not s[-1] or not atr[-1]:
-            continue
-        d, p = s[-1], q['precio']
-        spread = ((q['ask'] - q['bid']) / p * 100) if q.get('ask') and q.get('bid') else 0.0
-        coste = coste_pct(motor._fila(cid)['config'], spread, q['tipo'])
-        dist = atr[-1] * g['stop_atr']
-        if g['rr'] * dist / p * 100 < g['min_ventaja'] * coste:
-            e['descartes_coste'] = e.get('descartes_coste', 0) + 1
-            guardar(e)
-            continue
-        equity = motor.resumen(cid)['equity']
-        efectivo = motor._fila(cid)['efectivo']
-        libres = max(1, CUENTA_CFG['max_posiciones'] - len(motor.posiciones(cid, False)))
-        qty = min(equity * g['riesgo_pct'] / 100 / dist, min(efectivo, equity) * 0.97 / libres / p)
-        if qty * p < 0.0001:
-            continue
-        sl, tp = p - d * dist, p + d * g['rr'] * dist
-        rasgos = {'atr_pct': round(atr[-1] / p * 100, 4), 'tendencia': tend[-1], 'hora': hora, 'spread_pct': round(spread, 4),
-                  'coste_pct': round(coste, 4), 'precio': p, 'dist': dist}
-        try:
-            o = motor.enviar(cid, sim, 'buy' if d > 0 else 'sell', qty, 'mercado', sl=sl, tp=tp, setup=g['estrategia'],
-                             nota=f"{g['estrategia']} {'largo' if d > 0 else 'corto'} · ATR {rasgos['atr_pct']}% · tendencia {tend[-1]:+d}", origen='agente')
-        except motor.ErrorOrden as err:
-            log(f'orden rechazada {sim}: {err}')
-            continue
-        if o['estado'] == 'ejecutada':
-            pz = db.uno('SELECT trade_id FROM posiciones WHERE cuenta_id=? AND simbolo=?', (cid, sim))
-            if pz:
-                db.ex('INSERT OR IGNORE INTO ag_trades(trade_id,intento,simbolo,direccion,estrategia,genoma,rasgos,abierto) VALUES(?,?,?,?,?,?,?,?)',
-                      (pz['trade_id'], it['id'], sim, 'largo' if d > 0 else 'corto', g['estrategia'], json.dumps(g), json.dumps(rasgos), int(time.time())))
-                log(f"{'🟢' if d > 0 else '🔴'} {sim} {'largo' if d > 0 else 'corto'} {qty:.6g} @ {o['precio_ejec']:.6g} (SL {sl:.6g} TP {tp:.6g})")
-        if len(motor.posiciones(cid, False)) >= CUENTA_CFG['max_posiciones']:
-            break
-
-
-def _gestionar(e, r):
-    """Salida por tiempo y stop a breakeven."""
-    cid, g = e['cuenta_id'], e['genoma']
-    for p in motor.posiciones(cid):
-        t = db.uno('SELECT * FROM trades WHERE id=?', (p['trade_id'],))
-        if not t:
-            continue
-        if (time.time() - t['abierto']) / 60 >= g['max_barras'] * MARCOS.get(g.get('marco', '1m'), 1):
-            try:
-                motor.cerrar(cid, p['simbolo'], 100, 'tiempo')
-                log(f"⏱ {p['simbolo']} cerrado por tiempo")
-            except motor.ErrorOrden:
-                pass
-            continue
-        if g['be_en_r'] and t['stop_inicial'] and p['stop'] is not None:
-            dist = abs(t['entrada'] - t['stop_inicial'])
-            fav = (p['precio'] - t['entrada']) * (1 if p['cantidad'] > 0 else -1)
-            if dist and fav >= g['be_en_r'] * dist and abs(p['stop'] - t['entrada']) > dist * 0.05:
-                motor.mover_stop(cid, p['simbolo'], stop=t['entrada'])
-                log(f"🛡 {p['simbolo']} stop a breakeven")
-
-
-def _registrar_cerrados(e, it):
-    for t in db.q("""SELECT t.id, t.r, t.pnl FROM trades t JOIN ag_trades a ON a.trade_id=t.id
-                     WHERE t.estado='cerrado' AND a.r IS NULL AND t.cuenta_id=?""", (e['cuenta_id'],)):
-        r = t['r'] if t['r'] is not None else 0.0
-        db.ex('UPDATE ag_trades SET r=? WHERE trade_id=?', (r, t['id']))
-        db.ex('UPDATE ag_intentos SET trades=trades+1, ganados=ganados+? WHERE id=?', (1 if t['pnl'] > 0 else 0, it['id']))
-        est = db.uno('SELECT estrategia FROM ag_trades WHERE trade_id=?', (t['id'],))['estrategia']
-        b = e['bandido'].setdefault(est, [1, 1])
-        b[0 if t['pnl'] > 0 else 1] += 1
-        log(f"{'✅' if t['pnl'] > 0 else '❌'} trade #{t['id']} {r:+.2f}R ({t['pnl']:+.4f} $)")
-    guardar(e)
-
-# ---------------- autopsia: por qué se perdió y qué cambiar ----------------
-
-
-def _leccion(e, intento, tid, tipo, texto, cambio):
-    db.ex('INSERT INTO ag_lecciones(ts,intento,trade_id,tipo,texto,cambio) VALUES(?,?,?,?,?,?)',
-          (int(time.time()), intento, tid, tipo, texto, json.dumps(cambio, ensure_ascii=False)))
-    log('🧠 ' + texto)
-
-
-def _aplicar(g, cambio):
-    for k, v in cambio.items():
-        g[k] = v
-    return g
-
-
-def autopsias(e):
-    """Revisa los trades cerrados hace ≥ 15 min (para ver qué hizo el precio DESPUÉS de la salida)."""
-    g = e['genoma']
-    pend = db.q("""SELECT a.*, t.entrada, t.salida, t.stop_inicial, t.objetivo, t.mfe, t.mae, t.pnl, t.comisiones, t.cerrado, t.nota_cierre, t.cantidad
-                   FROM ag_trades a JOIN trades t ON t.id=a.trade_id WHERE a.revisado=0 AND t.estado='cerrado' AND t.cerrado < ?""", (int(time.time()) - 900,))
-    for a in pend:
-        db.ex('UPDATE ag_trades SET revisado=1 WHERE trade_id=?', (a['trade_id'],))
-        if a['pnl'] > 0:
-            continue
-        ras = json.loads(a['rasgos'])
-        gt = json.loads(a['genoma'])
-        d = 1 if a['direccion'] == 'largo' else -1
-        dist = abs(a['entrada'] - (a['stop_inicial'] or a['entrada'])) or ras['dist']
-        bruto = (a['salida'] - a['entrada']) * d * a['cantidad']
-        causas = []
-        # 1) los costes se comieron la operación
-        if a['comisiones'] > 0 and (bruto > -a['comisiones'] * 0.5 or ras['coste_pct'] > 0.35 * dist / a['entrada'] * 100):
-            nv = round(min(g['min_ventaja'] + 0.5, 6), 2)
-            sig = {'1m': '5m', '5m': '15m'}.get(g.get('marco', '1m'))
-            if g['min_ventaja'] >= 3 and sig:
-                causas.append(('costes', f"{a['simbolo']}: otra vez los costes ({ras['coste_pct']:.3f} %) se comen la ganancia en velas de {g.get('marco', '1m')}. "
-                               f"Solución: subir a velas de {sig}, donde cada movimiento es más grande que la comisión.", {'marco': sig, 'min_ventaja': 2.0}))
-            else:
-                causas.append(('costes', f"{a['simbolo']}: la comisión y el spread ({ras['coste_pct']:.3f} %) se comieron la operación; el movimiento esperado era demasiado pequeño. "
-                           f"Solución: exigir que el objetivo sea {nv}× los costes (antes {g['min_ventaja']}×).", {'min_ventaja': nv}))
-        # 2) el precio tocó el stop y luego fue al objetivo → stop dentro del ruido
-        despues = []
-        try:
-            despues = [b for b in datos.velas(a['simbolo'], gt.get('marco', '1m')) if b['t'] > a['cerrado']][:30]
-        except Exception:
-            pass
-        salio_stop = a['stop_inicial'] and abs(a['salida'] - a['stop_inicial']) <= dist * 0.3
-        if salio_stop and a['objetivo'] and despues and any((b['h'] >= a['objetivo']) if d > 0 else (b['l'] <= a['objetivo']) for b in despues):
-            nv = round(min(g['stop_atr'] * 1.2, 4.0), 2)
-            causas.append(('stop_ajustado', f"{a['simbolo']}: el stop saltó y DESPUÉS el precio llegó al objetivo: el stop estaba dentro del ruido normal. "
-                           f"Solución: stop más holgado, de {g['stop_atr']} a {nv} ATR (con menos tamaño para arriesgar lo mismo).", {'stop_atr': nv}))
-        # 3) fue ganando ≥1R y acabó perdiendo
-        if a['mfe'] and a['mfe'] >= dist * 0.9:
-            if not g['be_en_r']:
-                causas.append(('devolvio', f"{a['simbolo']}: llegó a ir ganando {a['mfe'] / dist:.1f}R y terminó en pérdida. Solución: mover el stop a breakeven al llegar a +1R.", {'be_en_r': 1.0}))
-            else:
-                nv = round(max(g['rr'] * 0.85, 1.0), 2)
-                causas.append(('devolvio', f"{a['simbolo']}: devolvió la ganancia aun con breakeven; el objetivo está lejos. Solución: objetivo de {g['rr']}R a {nv}R.", {'rr': nv}))
-        # 4) contra la tendencia
-        if ras['tendencia'] == -d:
-            if not g['filtro_tendencia']:
-                causas.append(('contra_tendencia', f"{a['simbolo']}: entró {'largo' if d > 0 else 'corto'} contra la tendencia de la EMA50. Solución: solo operar a favor de la tendencia.", {'filtro_tendencia': True}))
-        # 5) volatilidad fuera de lo normal
-        ganadores = [json.loads(x['rasgos'])['atr_pct'] for x in db.q('SELECT rasgos FROM ag_trades WHERE r > 0 ORDER BY trade_id DESC LIMIT 40')]
-        if len(ganadores) >= 5:
-            med = statistics.median(ganadores)
-            if ras['atr_pct'] > med * 2.2:
-                nv = round(max(med * 2, 0.02), 4)
-                causas.append(('volatilidad', f"{a['simbolo']}: entró con volatilidad extrema (ATR {ras['atr_pct']} % vs {med:.3f} % habitual en las ganadoras). Solución: no operar por encima de {nv} %.", {'vol_max_pct': nv}))
-            elif ras['atr_pct'] < med * 0.4:
-                nv = round(ras['atr_pct'] * 1.1, 4)
-                causas.append(('sin_movimiento', f"{a['simbolo']}: mercado demasiado quieto (ATR {ras['atr_pct']} %), no hay recorrido. Solución: volatilidad mínima {nv} %.", {'vol_min_pct': nv}))
-        # 6) salida por tiempo
-        if (a['nota_cierre'] or '') == 'tiempo' and not causas:
-            nv = max(int(g['max_barras'] * 0.75), 5)
-            causas.append(('sin_continuidad', f"{a['simbolo']}: la señal no tuvo continuidad y salió por tiempo. Solución: salir antes ({nv} min) si no arranca.", {'max_barras': nv}))
-        if not causas:
-            causas.append(('ruido', f"{a['simbolo']}: pérdida normal sin causa clara (la estrategia {gt['estrategia']} falla a veces). No cambio nada por un solo trade.", {}))
-        db.ex('UPDATE ag_trades SET causa=? WHERE trade_id=?', (causas[0][0], a['trade_id']))
-        for tipo, texto, cambio in causas[:2]:
-            _leccion(e, a['intento'], a['trade_id'], tipo, texto, cambio)
-            if cambio:
-                e['genoma'] = _aplicar(e['genoma'], cambio)
-        _patrones(e)
-        guardar(e)
-
-
-def _patrones(e):
-    """Patrones con suficientes datos: horas y símbolos que pierden de forma sistemática → se bloquean."""
-    g = e['genoma']
-    filas = db.q('SELECT simbolo, rasgos, r FROM ag_trades WHERE r IS NOT NULL ORDER BY trade_id DESC LIMIT 400')
-    por_sim, por_hora = {}, {}
-    for f in filas:
-        por_sim.setdefault(f['simbolo'], []).append(f['r'])
-        por_hora.setdefault(json.loads(f['rasgos'])['hora'], []).append(f['r'])
-    for s, rs in por_sim.items():
-        if len(rs) >= 10 and statistics.fmean(rs) < -0.3 and s not in g['simbolos_bloqueados']:
-            g['simbolos_bloqueados'].append(s)
-            _leccion(e, None, None, 'simbolo', f"{s} pierde de forma sistemática ({len(rs)} trades, {statistics.fmean(rs):+.2f}R de media). Lo dejo de operar.", {'simbolos_bloqueados': g['simbolos_bloqueados']})
-    for h, rs in por_hora.items():
-        if len(rs) >= 10 and statistics.fmean(rs) < -0.3 and h not in g['horas_bloqueadas']:
-            g['horas_bloqueadas'].append(h)
-            _leccion(e, None, None, 'hora', f"A las {h}:00 UTC pierdo de forma sistemática ({len(rs)} trades, {statistics.fmean(rs):+.2f}R). Dejo de operar a esa hora.", {'horas_bloqueadas': g['horas_bloqueadas']})
-
-# ---------------- quiebra: buscar la solución ----------------
-
-
 def _mutar(g, rnd, fuerte=False):
     g = copy.deepcopy(g)
     f = 0.35 if fuerte else 0.15
@@ -500,135 +167,718 @@ def _mutar(g, rnd, fuerte=False):
     return g
 
 
-def mejor_genoma():
-    """El genoma con mejor esperanza real (≥ 10 trades) de todos los intentos."""
-    mejor, puntos = None, -9
-    for it in db.q('SELECT genoma FROM ag_intentos WHERE genoma IS NOT NULL') if db.uno("SELECT name FROM sqlite_master WHERE name='ag_trades'") else []:
-        rs = [x['r'] for x in db.q('SELECT r FROM ag_trades WHERE genoma=? AND r IS NOT NULL', (it['genoma'],))]
-        p = puntuar(rs) if len(rs) >= 10 else -9
-        if p > puntos:
-            mejor, puntos = json.loads(it['genoma']), p
-    return mejor
+
+# ======================= ENJAMBRE =======================
+NOMBRES = ['Lince', 'Halcón', 'Lobo', 'Cobra', 'Tiburón', 'Pantera', 'Zorro', 'Búho', 'Águila', 'Toro', 'Oso', 'Puma', 'Cuervo', 'Mantis',
+           'Escorpión', 'Orca', 'Jaguar', 'Coyote', 'Hiena', 'Cóndor', 'Barracuda', 'Mamba', 'Tigre', 'León', 'Bisonte', 'Pulpo', 'Dragón', 'Fénix',
+           'Kraken', 'Grifo', 'Víbora', 'Gato', 'Murciélago', 'Rinoceronte', 'Avispa', 'Raya']
+NODO = os.environ.get('DMN_TRADER_NODO') or ('pi' if sys.platform.startswith('linux') else socket.gethostname().lower())
+CENTRAL = os.environ.get('DMN_TRADER_CENTRAL', '').rstrip('/')
+CENTRAL_TOKEN = os.environ.get('DMN_TRADER_CENTRAL_TOKEN', '')
+TICK, EVOLUCION, PATRONES, SINCRONIA, MIGRACION = 20, 7200, 600, 60, 1800
 
 
-def quiebra(e, it, eq):
-    cid = e['cuenta_id']
-    causas = db.q('SELECT tipo, COUNT(*) n FROM ag_lecciones WHERE intento=? GROUP BY tipo ORDER BY n DESC', (it['id'],))
-    causa = ', '.join(f"{c['tipo']} ×{c['n']}" for c in causas[:3]) or 'sin autopsias aún'
-    db.ex('UPDATE ag_intentos SET fin=?, final=?, resultado=?, causa=? WHERE id=?', (int(time.time()), eq, 'quiebra', causa, it['id']))
-    log(f"💀 intento #{it['id']} quebró ({eq:.4f} $, máx {it['max_equity']:.4f} $). Causas: {causa}")
-    nuevo, informe = buscar_solucion(e)
-    _leccion(e, it['id'], None, 'quiebra', f"Intento #{it['id']} perdió todo (llegó a {it['max_equity']:.3f} $). Causas principales: {causa}. {informe}", {})
-    motor.avisar(motor._fila(cid), f"💀 Intento #{it['id']} quebró. {informe}")
-    _nuevo_intento(e, nuevo, 'tras quiebra')
+def preparar():
+    c = db.con()
+    c.executescript(ESQUEMA)
+    for t in ('ag_intentos', 'ag_trades', 'ag_lecciones'):
+        cols = {r[1] for r in c.execute(f'PRAGMA table_info({t})')}
+        if 'agente_id' not in cols:
+            c.execute(f'ALTER TABLE {t} ADD COLUMN agente_id INTEGER')
+    viejo = db.ajuste('agente')
+    if viejo and viejo.get('cuenta_id'):  # el agente único de la v1 se retira (sus datos se quedan)
+        db.ex('UPDATE cuentas SET archivada=1 WHERE id=?', (viejo['cuenta_id'],))
+        db.ex("DELETE FROM ajustes WHERE clave='agente'")
 
 
-def buscar_solucion(e):
-    """Genera candidatos y los prueba en las últimas ~5 h de velas de 1 min reales (Coinbase/Yahoo). Se queda con el mejor."""
+def estado():
+    return db.ajuste('enjambre', None)
+
+
+def guardar(e):
+    db.poner_ajuste('enjambre', e)
+
+
+def _g(a):
+    return json.loads(a['genoma'])
+
+
+def agentes(activos=True):
+    return db.q('SELECT * FROM ag_agentes' + (' WHERE activo=1' if activos else '') + ' ORDER BY id')
+
+
+def _poner(aid, **k):
+    db.ex(f"UPDATE ag_agentes SET {', '.join(f'{x}=?' for x in k)} WHERE id=?", (*k.values(), aid))
+
+
+def _nombre(aid, rnd=random):
+    return f"{rnd.choice(NOMBRES)}-{aid:03d}"
+
+
+def genoma_inicial(i, rnd):
+    g = copy.deepcopy(GENOMA_BASE)
+    est = list(ESTRATEGIAS)[i % len(ESTRATEGIAS)]
+    g['estrategia'], g['p'] = est, dict(ESTRATEGIAS[est])
+    g['marco'] = ['5m', '15m', '1m'][(i // len(ESTRATEGIAS)) % 3]
+    g = _mutar(g, rnd, fuerte=i >= 15)
+    g['marco'] = ['5m', '15m', '1m'][(i // len(ESTRATEGIAS)) % 3]
+    g['riesgo_pct'] = rnd.choice([5.0, 10.0, 20.0, 35.0])
+    g['filtro_tendencia'] = rnd.random() < 0.5
+    g['be_en_r'] = rnd.choice([0.0, 0.0, 1.0])
+    return g
+
+
+def crear_agente(e, genoma, padre=None, generacion=0):
+    cid = motor.crear_cuenta('agente', e['capital'], 'USD', CUENTA_CFG, tipo='agente')['id']
+    db.ex('UPDATE cuentas SET archivada=1 WHERE id=?', (cid,))
+    aid = db.ex('INSERT INTO ag_agentes(nombre,cuenta_id,genoma,generacion,padre,creado,genoma_desde) VALUES(?,?,?,?,?,?,?)',
+                ('?', cid, json.dumps(genoma), generacion, padre, int(time.time()), int(time.time())))
+    _poner(aid, nombre=_nombre(aid))
+    a = db.uno('SELECT * FROM ag_agentes WHERE id=?', (aid,))
+    _nuevo_intento(e, a, genoma, 'nace')
+    return a
+
+
+def iniciar(n=50, capital=1.0, meta=100.0, mercados=('cripto', 'acciones'), hasta=None):
+    preparar()
+    e = estado() or {}
+    n = max(1, min(int(n), 2000))
+    if e.get('activo') and _hilo and _hilo.is_alive():  # ya en marcha: solo cambia el tamaño, sin reiniciar a nadie
+        e.update(n=n, hasta=hasta or e.get('hasta'))
+        guardar(e)
+        vivos, rnd = agentes(), random.Random()
+        for a in vivos[n:]:
+            _retirar(a, 'sobra (tamaño del enjambre)')
+        for i in range(len(vivos), n):
+            crear_agente(e, genoma_inicial(i, rnd))
+        log(f'↔ enjambre: {len(vivos)} → {n} agentes')
+        return resumen()
+    e.update({'activo': True, 'n': n, 'capital': float(capital), 'meta': float(meta), 'mercados': list(mercados), 'hasta': hasta,
+              'sesion_inicio': int(time.time()), 'ultima_evolucion': time.time(), 'ultimos_patrones': time.time(),
+              'generacion': e.get('generacion', 0), 'bandido': e.get('bandido') or {k: [1, 1] for k in ESTRATEGIAS},
+              'bloqueos': e.get('bloqueos') or {'simbolos': [], 'horas': []}})
+    guardar(e)
     rnd = random.Random()
-    actual = e['genoma']
-    cand = [('genoma actual con las lecciones aplicadas', actual)]
-    hist = mejor_genoma()
-    if hist:
-        cand.append(('el mejor genoma de la historia', hist))
-    for k in range(4):
-        cand.append((f'mutación {k + 1} del actual', _mutar(actual, rnd, k >= 2)))
-    b = e['bandido']
-    for _ in range(3):  # estrategias elegidas por muestreo de Thompson (más éxito → más probable)
-        est = max(ESTRATEGIAS, key=lambda s: rnd.betavariate(*b.get(s, [1, 1])))
-        g = copy.deepcopy(actual)
-        g['estrategia'], g['p'] = est, dict(ESTRATEGIAS[est])
-        cand.append((f'cambiar a {est}', _mutar(g, rnd)))
-    for m in MARCOS:  # el mismo genoma en otros marcos temporales
-        if m != actual.get('marco', '1m'):
-            g = copy.deepcopy(actual)
-            g['marco'] = m
-            cand.append((f'mismo sistema en velas de {m}', g))
-    cfg = motor._fila(e['cuenta_id'])['config']
-    datos_m, costes = {}, []
-    for s in _universo(e)[:8]:
+    vivos = agentes()
+    for a in vivos[n:]:
+        _retirar(a, 'sobra (tamaño del enjambre)')
+    for a in vivos[:n]:
+        _nuevo_intento(e, a, _g(a), 'nueva sesión')
+    for i in range(len(vivos), n):
+        crear_agente(e, genoma_inicial(i, rnd))
+    log(f'▶ enjambre de {n} agentes en el nodo {NODO}: {capital} $ → meta {meta} $')
+    arrancar_hilo()
+    return resumen()
+
+
+def _retirar(a, motivo):
+    for p in motor.posiciones(a['cuenta_id'], False):
+        try:
+            motor.cerrar(a['cuenta_id'], p['simbolo'], 100, motivo)
+        except Exception:
+            pass
+    it = _intento_actual(a['id'])
+    if it:
+        db.ex('UPDATE ag_intentos SET fin=?, final=?, resultado=? WHERE id=?', (int(time.time()), motor.resumen(a['cuenta_id'])['equity'], 'parado', it['id']))
+    _poner(a['id'], activo=0, estado='retirado', ultimo=motivo)
+
+
+def parar(motivo='parado por el usuario'):
+    e = estado()
+    if not e:
+        return None
+    e['activo'] = False
+    guardar(e)
+    for a in agentes():
+        for p in motor.posiciones(a['cuenta_id'], False):
+            try:
+                motor.cerrar(a['cuenta_id'], p['simbolo'], 100, 'enjambre parado')
+            except Exception:
+                pass
+        it = _intento_actual(a['id'])
+        if it:
+            db.ex('UPDATE ag_intentos SET fin=?, final=?, resultado=? WHERE id=?', (int(time.time()), motor.resumen(a['cuenta_id'])['equity'], 'parado', it['id']))
+        _poner(a['id'], estado='parado')
+    log('⏹ ' + motivo)
+    return resumen()
+
+
+def arrancar_hilo():
+    global _hilo
+    if _hilo and _hilo.is_alive():
+        return
+    _parar.clear()
+    _hilo = threading.Thread(target=_bucle, daemon=True, name='enjambre')
+    _hilo.start()
+
+
+ULTIMO_TICK = {'dur': 0, 'ts': 0}
+
+
+def _bucle():
+    while not _parar.is_set():
+        t0 = time.time()
+        try:
+            e = estado()
+            if not e or not e.get('activo'):
+                return
+            if e.get('hasta') and time.time() >= e['hasta']:
+                parar('hora de fin alcanzada')
+                return
+            paso_enjambre(e)
+        except Exception:
+            log('error: ' + traceback.format_exc().splitlines()[-1])
+            traceback.print_exc()
+        ULTIMO_TICK.update(dur=round(time.time() - t0, 2), ts=int(time.time()))
+        _parar.wait(max(2, TICK - (time.time() - t0)))
+
+# ---------------- datos compartidos del tick ----------------
+
+
+def _universo(e, g=None):
+    sims = []
+    if 'cripto' in e['mercados']:
+        sims += CRIPTO
+    if 'acciones' in e['mercados']:
+        sims += ACCIONES
+    bloq = set(e.get('bloqueos', {}).get('simbolos', [])) | set((g or {}).get('simbolos_bloqueados', []))
+    return [s for s in sims if s not in bloq]
+
+
+def contexto(e, marcos):
+    ctx = {'q': {}, 'v': {}, 'coste': {}, 'sen': {}}
+    cfg = dict(CUENTA_CFG, **{'comision_pct': CUENTA_CFG['comision_pct']})
+    for s in _universo(e):
         try:
             q = datos.cotizacion(s)
         except Exception:
             continue
         if not q['abierto']:
             continue
-        sp = ((q['ask'] - q['bid']) / q['precio'] * 100) if q.get('ask') and q.get('bid') else 0.01
-        costes.append(coste_pct(cfg, sp, q['tipo']))
-        for m in MARCOS:
+        ctx['q'][s] = q
+        sp = ((q['ask'] - q['bid']) / q['precio'] * 100) if q.get('ask') and q.get('bid') else 0.0
+        ctx['coste'][s] = (coste_pct(cfg, sp, q['tipo']), sp)
+        for m in marcos:
             try:
-                datos_m.setdefault(m, []).append(datos.velas(s, m)[:-1])
+                ctx['v'][(s, m)] = datos.velas(s, m)[:-1]
             except Exception:
                 pass
-    if not datos_m:
-        return _mutar(actual, rnd), 'Sin datos para probar soluciones: sigo con una mutación.'
-    coste = statistics.fmean(costes) if costes else coste_pct(cfg, 0.01)
+    return ctx
+
+
+def _senales_cache(ctx, g, s):
+    clave = (json.dumps({k: g[k] for k in ('marco', 'estrategia', 'p', 'vol_min_pct', 'vol_max_pct', 'filtro_tendencia', 'cortos', 'horas_bloqueadas')}, sort_keys=True), s)
+    if clave not in ctx['sen']:
+        v = ctx['v'].get((s, g['marco']))
+        ctx['sen'][clave] = (senales(g, v), v) if v and len(v) >= 60 else (None, v)
+    return ctx['sen'][clave]
+
+# ---------------- un tick de todo el enjambre ----------------
+
+
+def paso_enjambre(e):
+    vivos = agentes()
+    marcos = {_g(a).get('marco', '1m') for a in vivos} or {'5m'}
+    ctx = contexto(e, marcos)
+    for a in vivos:
+        try:
+            paso_agente(e, a, ctx)
+        except Exception:
+            log(f"error en {a['nombre']}: " + traceback.format_exc().splitlines()[-1])
+    ahora_ = time.time()
+    e = estado()
+    if ahora_ - e.get('ultimos_patrones', 0) > PATRONES:
+        e['ultimos_patrones'] = ahora_
+        _patrones_globales(e)
+        guardar(e)
+    if ahora_ - e.get('ultima_evolucion', 0) > EVOLUCION:
+        e['ultima_evolucion'] = ahora_
+        evolucionar(e)
+    if CENTRAL and ahora_ - e.get('ultima_sincronia', 0) > SINCRONIA:
+        e['ultima_sincronia'] = ahora_
+        guardar(e)
+        sincronizar(e)
+
+
+def _intento_actual(aid):
+    return db.uno('SELECT * FROM ag_intentos WHERE fin IS NULL AND agente_id=? ORDER BY id DESC LIMIT 1', (aid,))
+
+
+def _nuevo_intento(e, a, g, motivo):
+    cid = a['cuenta_id']
+    for p in motor.posiciones(cid, False):
+        try:
+            motor.cerrar(cid, p['simbolo'], 100, 'nuevo intento')
+        except Exception:
+            pass
+    db.ex("UPDATE ordenes SET estado='cancelada', motivo='nuevo intento' WHERE cuenta_id=? AND estado IN ('pendiente','espera')", (cid,))
+    viejo = _intento_actual(a['id'])
+    if viejo:
+        db.ex('UPDATE ag_intentos SET fin=?, final=?, resultado=COALESCE(resultado,?) WHERE id=?',
+              (int(time.time()), motor.resumen(cid)['equity'], 'reiniciado', viejo['id']))
+    db.ex('UPDATE cuentas SET efectivo=?, capital_inicial=? WHERE id=?', (e['capital'], e['capital'], cid))
+    iid = db.ex('INSERT INTO ag_intentos(inicio,capital,meta,max_equity,genoma,agente_id) VALUES(?,?,?,?,?,?)',
+                (int(time.time()), e['capital'], e['meta'], e['capital'], json.dumps(g), a['id']))
+    motor.instantanea(cid)
+    _poner(a['id'], genoma=json.dumps(g), intentos=(a.get('intentos') or 0) + 1, estado='buscando', ultimo=f'intento #{iid} ({motivo})')
+    return iid
+
+
+def _leccion(aid, intento, tid, tipo, texto, cambio):
+    db.ex('INSERT INTO ag_lecciones(ts,intento,trade_id,tipo,texto,cambio,agente_id) VALUES(?,?,?,?,?,?,?)',
+          (int(time.time()), intento, tid, tipo, texto, json.dumps(cambio, ensure_ascii=False), aid))
+    log('🧠 ' + texto[:200])
+
+
+def paso_agente(e, a, ctx):
+    cid, g = a['cuenta_id'], _g(a)
+    it = _intento_actual(a['id'])
+    if not it:
+        _nuevo_intento(e, a, g, 'sin intento abierto')
+        return
+    motor.procesar(cid)
+    eq = motor.resumen(cid)['equity']
+    if eq > it['max_equity']:
+        db.ex('UPDATE ag_intentos SET max_equity=? WHERE id=?', (eq, it['id']))
+    if eq > (a['max_equity'] or 0):
+        _poner(a['id'], max_equity=eq)
+    _registrar_cerrados(e, a, it)
+    _autopsias(a)
+    a = db.uno('SELECT * FROM ag_agentes WHERE id=?', (a['id'],))
+    g = _g(a)
+    if eq >= e['meta']:
+        db.ex('UPDATE ag_intentos SET fin=?, final=?, resultado=?, causa=? WHERE id=?', (int(time.time()), eq, 'meta', '¡meta alcanzada!', it['id']))
+        _poner(a['id'], metas=(a['metas'] or 0) + 1)
+        _leccion(a['id'], it['id'], None, 'meta', f"🏆 {a['nombre']} convirtió {e['capital']} $ en {eq:.2f} $ con {g['estrategia']} en velas de {g['marco']}.", {})
+        motor.avisar(motor._fila(cid), f"🏆 {a['nombre']} convirtió {e['capital']} $ en {eq:.2f} $ (intento #{it['id']}).")
+        _nuevo_intento(e, a, g, 'meta alcanzada: ¿lo repite?')
+        return
+    if eq < e['capital'] * 0.1:
+        _quiebra(e, a, it, eq, ctx)
+        return
+    _gestionar(a, g)
+    pos = motor.posiciones(cid, False)
+    if not pos and (a['descartes'] or 0) - (a['descartes_ref'] or 0) > 150:
+        nuevo, inf = buscar_solucion(e, a, ctx)
+        _poner(a['id'], genoma=json.dumps(nuevo), descartes_ref=a['descartes'], genoma_desde=int(time.time()))
+        _leccion(a['id'], it['id'], None, 'inactivo', f"{a['nombre']}: mucho rato sin operaciones que paguen comisión + spread. {inf}", {})
+        return
+    if pos:
+        _poner(a['id'], estado='en posición', ultimo=' · '.join(f"{p['simbolo']} {'largo' if p['cantidad'] > 0 else 'corto'}" for p in pos))
+    else:
+        _poner(a['id'], estado='buscando')
+    if len(pos) >= CUENTA_CFG['max_posiciones']:
+        return
+    hora = time.gmtime().tm_hour
+    if hora in g['horas_bloqueadas'] or hora in e.get('bloqueos', {}).get('horas', []):
+        return
+    abiertos = {p['simbolo'] for p in pos}
+    for sim in _universo(e, g):
+        if sim in abiertos or sim not in ctx['q']:
+            continue
+        (s_atr, v) = _senales_cache(ctx, g, sim)
+        if not s_atr:
+            continue
+        s, atr, tend = s_atr
+        if not s[-1] or not atr[-1]:
+            continue
+        q, d = ctx['q'][sim], s[-1]
+        p = q['precio']
+        coste, spread = ctx['coste'][sim]
+        dist = atr[-1] * g['stop_atr']
+        if g['rr'] * dist / p * 100 < g['min_ventaja'] * coste:
+            db.ex('UPDATE ag_agentes SET descartes=descartes+1 WHERE id=?', (a['id'],))
+            continue
+        r = motor.resumen(cid)
+        libres = max(1, CUENTA_CFG['max_posiciones'] - len(motor.posiciones(cid, False)))
+        qty = min(r['equity'] * g['riesgo_pct'] / 100 / dist, r['poder_compra'] * 0.97 / libres / p)
+        if qty * p < 0.0001:
+            continue
+        sl, tp = p - d * dist, p + d * g['rr'] * dist
+        rasgos = {'atr_pct': round(atr[-1] / p * 100, 4), 'tendencia': tend[-1], 'hora': hora, 'spread_pct': round(spread, 4),
+                  'coste_pct': round(coste, 4), 'precio': p, 'dist': dist}
+        try:
+            o = motor.enviar(cid, sim, 'buy' if d > 0 else 'sell', qty, 'mercado', sl=sl, tp=tp, setup=g['estrategia'],
+                             nota=f"{a['nombre']} {g['estrategia']} {g['marco']}", origen='agente')
+        except motor.ErrorOrden as err:
+            log(f"{a['nombre']}: orden rechazada {sim}: {err}")
+            continue
+        if o['estado'] == 'ejecutada':
+            pz = db.uno('SELECT trade_id FROM posiciones WHERE cuenta_id=? AND simbolo=?', (cid, sim))
+            if pz:
+                db.ex('INSERT OR IGNORE INTO ag_trades(trade_id,intento,simbolo,direccion,estrategia,genoma,rasgos,abierto,agente_id) VALUES(?,?,?,?,?,?,?,?,?)',
+                      (pz['trade_id'], it['id'], sim, 'largo' if d > 0 else 'corto', g['estrategia'], json.dumps(g), json.dumps(rasgos), int(time.time()), a['id']))
+                txt = f"{'🟢' if d > 0 else '🔴'} {sim} {'largo' if d > 0 else 'corto'} @ {o['precio_ejec']:.6g}"
+                _poner(a['id'], estado='en posición', ultimo=txt)
+                log(f"{a['nombre']} {txt}")
+        if len(motor.posiciones(cid, False)) >= CUENTA_CFG['max_posiciones']:
+            break
+
+
+def _gestionar(a, g):
+    cid = a['cuenta_id']
+    for p in motor.posiciones(cid):
+        t = db.uno('SELECT * FROM trades WHERE id=?', (p['trade_id'],))
+        if not t:
+            continue
+        if (time.time() - t['abierto']) / 60 >= g['max_barras'] * MARCOS.get(g.get('marco', '1m'), 1):
+            try:
+                motor.cerrar(cid, p['simbolo'], 100, 'tiempo')
+            except motor.ErrorOrden:
+                pass
+            continue
+        if g['be_en_r'] and t['stop_inicial'] and p['stop'] is not None:
+            dist = abs(t['entrada'] - t['stop_inicial'])
+            fav = (p['precio'] - t['entrada']) * (1 if p['cantidad'] > 0 else -1)
+            if dist and fav >= g['be_en_r'] * dist and abs(p['stop'] - t['entrada']) > dist * 0.05:
+                motor.mover_stop(cid, p['simbolo'], stop=t['entrada'])
+
+
+def _registrar_cerrados(e, a, it):
+    for t in db.q("""SELECT t.id, t.r, t.pnl, ag.estrategia FROM trades t JOIN ag_trades ag ON ag.trade_id=t.id
+                     WHERE t.estado='cerrado' AND ag.r IS NULL AND t.cuenta_id=?""", (a['cuenta_id'],)):
+        r = t['r'] if t['r'] is not None else 0.0
+        db.ex('UPDATE ag_trades SET r=? WHERE trade_id=?', (r, t['id']))
+        db.ex('UPDATE ag_intentos SET trades=trades+1, ganados=ganados+? WHERE id=?', (1 if t['pnl'] > 0 else 0, it['id']))
+        e = estado()
+        b = e['bandido'].setdefault(t['estrategia'], [1, 1])
+        b[0 if t['pnl'] > 0 else 1] += 1
+        guardar(e)
+        _poner(a['id'], ultimo=f"{'✅' if t['pnl'] > 0 else '❌'} {r:+.2f}R")
+
+
+def _autopsias(a):
+    """Por qué se perdió cada trade (revisado ≥ 15 min después de cerrar) y qué cambiar en ESTE agente."""
+    pend = db.q("""SELECT ag.*, t.entrada, t.salida, t.stop_inicial, t.objetivo, t.mfe, t.pnl, t.comisiones, t.cerrado, t.nota_cierre, t.cantidad
+                   FROM ag_trades ag JOIN trades t ON t.id=ag.trade_id
+                   WHERE ag.revisado=0 AND t.estado='cerrado' AND t.cerrado < ? AND ag.agente_id=?""", (int(time.time()) - 900, a['id']))
+    if not pend:
+        return
+    g = _g(a)
+    for x in pend:
+        db.ex('UPDATE ag_trades SET revisado=1 WHERE trade_id=?', (x['trade_id'],))
+        if x['pnl'] > 0:
+            continue
+        causas = diagnosticar(x, g)
+        db.ex('UPDATE ag_trades SET causa=? WHERE trade_id=?', (causas[0][0], x['trade_id']))
+        for tipo, texto, cambio in causas[:2]:
+            _leccion(a['id'], x['intento'], x['trade_id'], tipo, f"{a['nombre']} · {texto}", cambio)
+            g.update(cambio)
+    _poner(a['id'], genoma=json.dumps(g))
+
+
+def diagnosticar(x, g):
+    ras, gt = json.loads(x['rasgos']), json.loads(x['genoma'])
+    d = 1 if x['direccion'] == 'largo' else -1
+    dist = abs(x['entrada'] - (x['stop_inicial'] or x['entrada'])) or ras['dist']
+    bruto = (x['salida'] - x['entrada']) * d * x['cantidad']
+    causas = []
+    if x['comisiones'] > 0 and (bruto > -x['comisiones'] * 0.5 or ras['coste_pct'] > 0.35 * dist / x['entrada'] * 100):
+        sig = {'1m': '5m', '5m': '15m'}.get(g.get('marco', '1m'))
+        if g['min_ventaja'] >= 3 and sig:
+            causas.append(('costes', f"{x['simbolo']}: otra vez la comisión y el spread ({ras['coste_pct']:.3f} %) se comen la ganancia en velas de {g.get('marco')}. Solución: subir a velas de {sig}.", {'marco': sig, 'min_ventaja': 2.0}))
+        else:
+            nv = round(min(g['min_ventaja'] + 0.5, 6), 2)
+            causas.append(('costes', f"{x['simbolo']}: la comisión y el spread ({ras['coste_pct']:.3f} %) se comieron la operación. Solución: exigir objetivo ≥ {nv}× los costes.", {'min_ventaja': nv}))
+    despues = []
+    try:
+        despues = [b for b in datos.velas(x['simbolo'], gt.get('marco', '1m')) if b['t'] > x['cerrado']][:30]
+    except Exception:
+        pass
+    if x['stop_inicial'] and abs(x['salida'] - x['stop_inicial']) <= dist * 0.3 and x['objetivo'] and despues and \
+            any((b['h'] >= x['objetivo']) if d > 0 else (b['l'] <= x['objetivo']) for b in despues):
+        nv = round(min(g['stop_atr'] * 1.2, 4.0), 2)
+        causas.append(('stop_ajustado', f"{x['simbolo']}: saltó el stop y DESPUÉS el precio llegó al objetivo (stop dentro del ruido). Solución: stop de {g['stop_atr']} a {nv} ATR.", {'stop_atr': nv}))
+    if x['mfe'] and x['mfe'] >= dist * 0.9:
+        if not g['be_en_r']:
+            causas.append(('devolvio', f"{x['simbolo']}: iba +{x['mfe'] / dist:.1f}R y acabó en pérdida. Solución: stop a breakeven en +1R.", {'be_en_r': 1.0}))
+        else:
+            nv = round(max(g['rr'] * 0.85, 1.0), 2)
+            causas.append(('devolvio', f"{x['simbolo']}: devolvió la ganancia aun con breakeven. Solución: objetivo de {g['rr']}R a {nv}R.", {'rr': nv}))
+    if ras['tendencia'] == -d and not g['filtro_tendencia']:
+        causas.append(('contra_tendencia', f"{x['simbolo']}: entró contra la tendencia de la EMA50. Solución: solo a favor de la tendencia.", {'filtro_tendencia': True}))
+    gan = [json.loads(y['rasgos'])['atr_pct'] for y in db.q('SELECT rasgos FROM ag_trades WHERE r > 0 ORDER BY trade_id DESC LIMIT 60')]
+    if len(gan) >= 8:
+        med = statistics.median(gan)
+        if ras['atr_pct'] > med * 2.2:
+            nv = round(max(med * 2, 0.02), 4)
+            causas.append(('volatilidad', f"{x['simbolo']}: volatilidad extrema (ATR {ras['atr_pct']} % vs {med:.3f} % en las ganadoras). Solución: máximo {nv} %.", {'vol_max_pct': nv}))
+        elif ras['atr_pct'] < med * 0.4:
+            nv = round(ras['atr_pct'] * 1.1, 4)
+            causas.append(('sin_movimiento', f"{x['simbolo']}: mercado demasiado quieto (ATR {ras['atr_pct']} %). Solución: mínimo {nv} %.", {'vol_min_pct': nv}))
+    if (x['nota_cierre'] or '') == 'tiempo' and not causas:
+        nv = max(int(g['max_barras'] * 0.75), 5)
+        causas.append(('sin_continuidad', f"{x['simbolo']}: la señal no tuvo continuidad. Solución: salir antes ({nv} velas).", {'max_barras': nv}))
+    if not causas:
+        causas.append(('ruido', f"{x['simbolo']}: pérdida normal de {gt['estrategia']}, sin causa clara. No cambio nada por un solo trade.", {}))
+    return causas
+
+
+def _patrones_globales(e):
+    """Conocimiento COMPARTIDO: lo que pierde en todo el enjambre se bloquea para todos."""
+    filas = db.q('SELECT simbolo, rasgos, r FROM ag_trades WHERE r IS NOT NULL ORDER BY trade_id DESC LIMIT 1500')
+    por_s, por_h = {}, {}
+    for f in filas:
+        por_s.setdefault(f['simbolo'], []).append(f['r'])
+        por_h.setdefault(json.loads(f['rasgos'])['hora'], []).append(f['r'])
+    b = e.setdefault('bloqueos', {'simbolos': [], 'horas': []})
+    for s, rs in por_s.items():
+        if len(rs) >= 25 and statistics.fmean(rs) < -0.35 and s not in b['simbolos'] and len(b['simbolos']) < len(CRIPTO + ACCIONES) - 4:
+            b['simbolos'].append(s)
+            _leccion(None, None, None, 'compartida', f"Enjambre: {s} pierde en {len(rs)} operaciones de varios agentes ({statistics.fmean(rs):+.2f}R de media). Nadie lo opera más.", {'simbolo': s})
+    for h, rs in por_h.items():
+        if len(rs) >= 25 and statistics.fmean(rs) < -0.35 and h not in b['horas'] and len(b['horas']) < 8:
+            b['horas'].append(h)
+            _leccion(None, None, None, 'compartida', f"Enjambre: a las {h}:00 UTC se pierde de forma sistemática ({len(rs)} trades, {statistics.fmean(rs):+.2f}R). Nadie opera a esa hora.", {'hora': h})
+
+
+def aptitud(a):
+    rs = [x['r'] for x in db.q('SELECT r FROM ag_trades WHERE agente_id=? AND abierto>=? AND r IS NOT NULL', (a['id'], a['genoma_desde'] or 0))]
+    return (puntuar(rs) if len(rs) >= 5 else None), len(rs)
+
+
+def _cruce(g1, g2, rnd):
+    h = copy.deepcopy(g1)
+    for k in ('stop_atr', 'rr', 'filtro_tendencia', 'riesgo_pct', 'max_barras', 'be_en_r', 'min_ventaja', 'marco'):
+        if rnd.random() < 0.5:
+            h[k] = copy.deepcopy(g2[k])
+    return h
+
+
+def evolucionar(e):
+    """Selección natural: el 20 % peor se reemplaza por hijos (mutación / cruce) del 10 % mejor."""
+    rnd = random.Random()
+    vivos = agentes()
+    medidos = []
+    for a in vivos:
+        f, n = aptitud(a)
+        edad = time.time() - (a['genoma_desde'] or a['creado'])
+        if f is None and edad > 2 * EVOLUCION and n < 5:
+            f = -1.0  # no opera: tampoco aprende
+        if f is not None:
+            medidos.append((f, a))
+    if len(medidos) < 6:
+        return
+    medidos.sort(key=lambda x: x[0], reverse=True)
+    top = medidos[:max(3, len(vivos) // 10)]
+    malos = [x for x in medidos[-max(1, len(vivos) // 5):] if x[0] < top[-1][0]]
+    e['generacion'] = e.get('generacion', 0) + 1
+    nombres = []
+    for f, a in malos:
+        p1, p2 = rnd.choice(top)[1], rnd.choice(top)[1]
+        g = _cruce(_g(p1), _g(p2), rnd) if p1['id'] != p2['id'] and rnd.random() < 0.35 else _g(p1)
+        g = _mutar(g, rnd)
+        nuevo = _nombre(a['id'], rnd)
+        nombres.append(f"{a['nombre']} ({f:+.2f}) → {nuevo}, hijo de {p1['nombre']}")
+        _poner(a['id'], nombre=nuevo, generacion=(p1['generacion'] or 0) + 1, padre=p1['id'], genoma_desde=int(time.time()),
+               descartes=0, descartes_ref=0, max_equity=0, metas=0, intentos=0)
+        _nuevo_intento(e, db.uno('SELECT * FROM ag_agentes WHERE id=?', (a['id'],)), g, f"evolución gen {e['generacion']}")
+    guardar(e)
+    mejores = ', '.join(f"{a['nombre']} {f:+.2f}R ({_g(a)['estrategia']} {_g(a)['marco']})" for f, a in top[:3])
+    _leccion(None, None, None, 'evolucion', f"Generación {e['generacion']}: los mejores son {mejores}. Reemplacé {len(nombres)}: " + '; '.join(nombres[:8]), {})
+
+
+def buscar_solucion(e, a, ctx):
+    rnd = random.Random()
+    actual = _g(a)
+    cand = [('su genoma con las lecciones aplicadas', actual)]
+    vivos = [(aptitud(x)[0], x) for x in agentes() if x['id'] != a['id']]
+    vivos = [v for v in vivos if v[0] is not None]
+    if vivos:
+        mejor = max(vivos, key=lambda v: v[0])[1]
+        cand.append((f"copiar a {mejor['nombre']} (el mejor del enjambre)", _g(mejor)))
+    for k in range(4):
+        cand.append((f'mutación {k + 1}', _mutar(actual, rnd, k >= 2)))
+    b = estado()['bandido']
+    for _ in range(3):
+        est = max(ESTRATEGIAS, key=lambda s: rnd.betavariate(*b.get(s, [1, 1])))
+        g = copy.deepcopy(actual)
+        g['estrategia'], g['p'] = est, dict(ESTRATEGIAS[est])
+        cand.append((f'cambiar a {est}', _mutar(g, rnd)))
+    for m in MARCOS:
+        if m != actual.get('marco'):
+            g = copy.deepcopy(actual)
+            g['marco'] = m
+            cand.append((f'mismo sistema en velas de {m}', g))
+    sims = [s for s in _universo(e, actual) if s in ctx['q']][:8]
+    series = {}
+    for m in MARCOS:
+        series[m] = [ctx['v'].get((s, m)) or datos.velas(s, m)[:-1] for s in sims] if sims else []
+    if not sims:
+        return _mutar(actual, rnd), 'Sin mercados abiertos para probar soluciones: sigo con una mutación.'
+    coste = statistics.fmean(ctx['coste'][s][0] for s in sims)
     res = []
     for nombre, g in cand:
-        rs = simular(g, datos_m.get(g.get('marco', '1m'), []), coste)
+        rs = simular(g, [v for v in series.get(g.get('marco', '1m'), []) if v], coste)
         res.append((puntuar(rs), nombre, g, len(rs), statistics.fmean(rs) if rs else 0))
     res.sort(key=lambda x: x[0], reverse=True)
     p, nombre, g, n, m = res[0]
-    series = datos_m.get('1m', [])
-    tabla = '; '.join(f"{x[1]}: {x[4]:+.2f}R en {x[3]} trades" for x in res[:4])
+    g = copy.deepcopy(g)
+    extra = ''
     if p <= 0:
-        g = copy.deepcopy(g)
-        g['riesgo_pct'] = max(round(g['riesgo_pct'] * 0.7, 1), 5.0)
-        extra = f' Ninguna prueba sale positiva en datos recientes: arriesgo menos por operación ({g["riesgo_pct"]} %).'
-    else:
-        extra = ''
-    return g, f"Probé {len(res)} soluciones en {len(series)} mercados (últimas horas reales). Elegida: {nombre} ({m:+.2f}R por trade en {n} trades). Ranking: {tabla}.{extra}"
+        g['riesgo_pct'] = max(round(g['riesgo_pct'] * 0.7, 1), 3.0)
+        extra = f' Nada sale positivo en datos recientes: arriesgo menos ({g["riesgo_pct"]} %).'
+    tabla = '; '.join(f"{x[1]}: {x[4]:+.2f}R/{x[3]}" for x in res[:3])
+    return g, f"Probé {len(res)} soluciones en {len(sims)} mercados reales. Elegida: {nombre} ({m:+.2f}R por trade en {n}). Top: {tabla}.{extra}"
+
+
+def _quiebra(e, a, it, eq, ctx):
+    causas = db.q('SELECT tipo, COUNT(*) n FROM ag_lecciones WHERE intento=? AND agente_id=? GROUP BY tipo ORDER BY n DESC', (it['id'], a['id']))
+    causa = ', '.join(f"{c['tipo']} ×{c['n']}" for c in causas[:3]) or 'sin autopsias aún'
+    db.ex('UPDATE ag_intentos SET fin=?, final=?, resultado=?, causa=? WHERE id=?', (int(time.time()), eq, 'quiebra', causa, it['id']))
+    nuevo, inf = buscar_solucion(e, a, ctx)
+    _leccion(a['id'], it['id'], None, 'quiebra', f"💀 {a['nombre']} quebró (llegó a {it['max_equity']:.3f} $). Causas: {causa}. {inf}", {})
+    _poner(a['id'], genoma_desde=int(time.time()), estado='quebrado')
+    _nuevo_intento(e, db.uno('SELECT * FROM ag_agentes WHERE id=?', (a['id'],)), nuevo, 'tras quiebra')
+
+# ---------------- varios nodos (la Pi es la central; el PC u otros equipos suman agentes) ----------------
+
+
+def _vista_agentes(lim=None):
+    stats = {r['agente_id']: r for r in db.q('SELECT agente_id, COUNT(*) n, SUM(r>0) g, AVG(r) m FROM ag_trades WHERE r IS NOT NULL GROUP BY agente_id')}
+    out = []
+    for a in agentes():
+        g = _g(a)
+        try:
+            eq = motor.resumen(a['cuenta_id'])['equity']
+        except Exception:
+            eq = None
+        st = stats.get(a['id'], {})
+        out.append({'id': a['id'], 'nombre': a['nombre'], 'estado': a['estado'], 'ultimo': a['ultimo'], 'equity': round(eq, 4) if eq is not None else None,
+                    'max_equity': round(a['max_equity'] or 0, 4), 'generacion': a['generacion'], 'intentos': a['intentos'], 'metas': a['metas'],
+                    'trades': st.get('n', 0), 'ganados': st.get('g') or 0, 'r_medio': round(st['m'], 3) if st.get('m') is not None else None,
+                    'marco': g.get('marco'), 'estrategia': g['estrategia'], 'riesgo_pct': g['riesgo_pct'], 'tendencia': g['filtro_tendencia']})
+    return out[:lim] if lim else out
+
+
+def sincronizar(e):
+    """Nodo → central: manda su estado (para Mission Control) y cada 30 min intercambia los mejores genomas (modelo de islas)."""
+    import urllib.request
+    migrar = time.time() - e.get('ultima_migracion', 0) > MIGRACION
+    top = sorted(((aptitud(a)[0], a) for a in agentes()), key=lambda x: -9 if x[0] is None else x[0], reverse=True)[:3]
+    cuerpo = {'nodo': NODO, 'kpis': kpis(), 'agentes': _vista_agentes(), 'lecciones': lecciones(15),
+              'migrantes': [{'genoma': _g(a), 'aptitud': f, 'nombre': a['nombre']} for f, a in top if f is not None] if migrar else [], 'pedir': migrar}
+    req = urllib.request.Request(CENTRAL + '/api/enjambre/nodo', data=json.dumps(cuerpo, default=str).encode(), method='POST',
+                                 headers={'content-type': 'application/json', **({'x-token': CENTRAL_TOKEN} if CENTRAL_TOKEN else {})})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            resp = json.loads(r.read().decode())
+    except Exception as err:
+        log(f'sin conexión con la central: {err}')
+        return
+    if migrar:
+        e = estado()
+        e['ultima_migracion'] = time.time()
+        guardar(e)
+        recibir_migrantes(resp.get('migrantes') or [], 'central')
+
+
+def recibir_migrantes(migs, de):
+    if not migs:
+        return
+    vivos = sorted(((aptitud(a)[0], a) for a in agentes()), key=lambda x: -9 if x[0] is None else x[0])
+    e = estado()
+    for m, (f, a) in zip(migs, vivos):
+        if f is not None and m.get('aptitud') is not None and f >= m['aptitud']:
+            continue
+        _poner(a['id'], nombre=_nombre(a['id']), genoma_desde=int(time.time()), descartes=0, descartes_ref=0, generacion=(a['generacion'] or 0) + 1)
+        _nuevo_intento(e, db.uno('SELECT * FROM ag_agentes WHERE id=?', (a['id'],)), m['genoma'], f"migrante de {de} ({m.get('nombre')})")
+        _leccion(a['id'], None, None, 'migracion', f"Llega de {de} el sistema de {m.get('nombre')} ({m.get('aptitud', 0):+.2f}R) y sustituye a {a['nombre']}.", {})
+
+
+def recibir_nodo(c):
+    """En la central: guarda lo que manda un nodo y, si lo pide, le devuelve los 3 mejores genomas de aquí."""
+    db.ex('INSERT INTO ag_nodos(nodo,visto,datos) VALUES(?,?,?) ON CONFLICT(nodo) DO UPDATE SET visto=excluded.visto, datos=excluded.datos',
+          (str(c.get('nodo'))[:40], int(time.time()), json.dumps({k: c.get(k) for k in ('kpis', 'agentes', 'lecciones')}, default=str)))
+    out = {'ok': True}
+    if c.get('pedir'):
+        if (estado() or {}).get('activo'):
+            recibir_migrantes(c.get('migrantes') or [], c.get('nodo'))
+        top = sorted(((aptitud(a)[0], a) for a in agentes()), key=lambda x: -9 if x[0] is None else x[0], reverse=True)[:3]
+        out['migrantes'] = [{'genoma': _g(a), 'aptitud': f, 'nombre': a['nombre']} for f, a in top if f is not None]
+    return out
 
 # ---------------- consultas ----------------
 
 
+def kpis():
+    e = estado() or {}
+    t = db.uno('SELECT COUNT(*) n, SUM(r>0) g, AVG(r) m FROM ag_trades WHERE r IS NOT NULL AND abierto>=?', (e.get('sesion_inicio', 0),))
+    its = db.uno("SELECT SUM(resultado='quiebra') q, SUM(resultado='meta') m, MAX(max_equity) mx FROM ag_intentos WHERE inicio>=?", (e.get('sesion_inicio', 0),))
+    return {'nodo': NODO, 'activo': bool(e.get('activo')) and bool(_hilo and _hilo.is_alive()), 'agentes': len(agentes()), 'n': e.get('n'),
+            'capital': e.get('capital'), 'meta': e.get('meta'), 'mercados': e.get('mercados'), 'hasta': e.get('hasta'), 'generacion': e.get('generacion', 0),
+            'trades': t['n'], 'ganados': t['g'] or 0, 'r_medio': round(t['m'], 3) if t['m'] is not None else None,
+            'quiebras': its['q'] or 0, 'metas': its['m'] or 0, 'max_equity': round(its['mx'] or 0, 4), 'tick_s': ULTIMO_TICK['dur'],
+            'bloqueos': e.get('bloqueos'), 'bandido': e.get('bandido'), 'sesion_inicio': e.get('sesion_inicio')}
+
+
+_cache_mapa = {'t': 0, 'v': None}
+
+
 def resumen():
     preparar()
-    e = estado() or {}
-    it = _intento_actual()
-    r = motor.resumen(e['cuenta_id']) if e.get('cuenta_id') and db.uno('SELECT 1 x FROM cuentas WHERE id=?', (e['cuenta_id'],)) else None
-    tot = db.uno('SELECT COUNT(*) n, SUM(r>0) g, AVG(r) m FROM ag_trades WHERE r IS NOT NULL')
-    return {'activo': bool(e.get('activo')) and bool(_hilo and _hilo.is_alive()), 'configurado': bool(e), 'cuenta_id': e.get('cuenta_id'),
-            'capital': e.get('capital'), 'meta': e.get('meta'), 'mercados': e.get('mercados'), 'hasta': e.get('hasta'),
-            'equity': r['equity'] if r else None, 'intento': it, 'genoma': e.get('genoma'), 'metas_logradas': e.get('metas_logradas', 0),
-            'intentos': db.uno('SELECT COUNT(*) n FROM ag_intentos')['n'], 'trades': tot['n'], 'ganados': tot['g'] or 0,
-            'r_medio': round(tot['m'], 3) if tot['m'] is not None else None, 'descartes_coste': e.get('descartes_coste', 0),
-            'bandido': e.get('bandido'), 'log': LOG[-40:], 'posiciones': motor.posiciones(e['cuenta_id']) if r else []}
+    return {**kpis(), 'log': LOG[-40:]}
+
+
+def mapa():
+    """Todos los nodos con todos sus agentes (para Mission Control y el panel)."""
+    if time.time() - _cache_mapa['t'] < 4:
+        return _cache_mapa['v']
+    nodos = [{'nodo': NODO, 'local': True, 'visto': int(time.time()), 'kpis': kpis(), 'agentes': _vista_agentes()}]
+    for n in db.q('SELECT * FROM ag_nodos ORDER BY nodo'):
+        d = json.loads(n['datos'])
+        nodos.append({'nodo': n['nodo'], 'local': False, 'visto': n['visto'], 'en_linea': time.time() - n['visto'] < 300, **d})
+    tot = {'agentes': sum(len(x.get('agentes') or []) for x in nodos), 'trades': sum((x.get('kpis') or {}).get('trades') or 0 for x in nodos),
+           'metas': sum((x.get('kpis') or {}).get('metas') or 0 for x in nodos), 'quiebras': sum((x.get('kpis') or {}).get('quiebras') or 0 for x in nodos)}
+    v = {'nodos': nodos, 'total': tot, 'lecciones': lecciones(25), 'log': LOG[-30:]}
+    _cache_mapa.update(t=time.time(), v=v)
+    return v
+
+
+def agente(aid):
+    a = db.uno('SELECT * FROM ag_agentes WHERE id=?', (aid,))
+    if not a:
+        raise motor.ErrorOrden('no existe ese agente')
+    f, n = aptitud(a)
+    return {**{k: a[k] for k in ('id', 'nombre', 'estado', 'ultimo', 'generacion', 'padre', 'intentos', 'metas', 'max_equity')},
+            'genoma': _g(a), 'aptitud': f, 'trades_genoma': n, 'cuenta': motor.cuenta(a['cuenta_id']),
+            'intentos_lista': db.q('SELECT id,inicio,fin,max_equity,final,trades,ganados,resultado,causa FROM ag_intentos WHERE agente_id=? ORDER BY id DESC LIMIT 15', (aid,)),
+            'lecciones': db.q('SELECT * FROM ag_lecciones WHERE agente_id=? ORDER BY id DESC LIMIT 20', (aid,)),
+            'trades': db.q("""SELECT t.simbolo,t.direccion,t.entrada,t.salida,t.pnl,t.r,t.abierto,t.cerrado,ag.causa FROM ag_trades ag JOIN trades t ON t.id=ag.trade_id
+                              WHERE ag.agente_id=? ORDER BY t.id DESC LIMIT 20""", (aid,))}
 
 
 def lecciones(limite=50):
-    preparar()
-    return db.q('SELECT * FROM ag_lecciones ORDER BY id DESC LIMIT ?', (limite,))
-
-
-def intentos(limite=50):
-    preparar()
-    return db.q('SELECT id,inicio,fin,capital,meta,max_equity,final,trades,ganados,resultado,causa,genoma FROM ag_intentos ORDER BY id DESC LIMIT ?', (limite,))
+    return db.q("SELECT l.*, a.nombre FROM ag_lecciones l LEFT JOIN ag_agentes a ON a.id=l.agente_id WHERE l.tipo<>'ruido' ORDER BY l.id DESC LIMIT ?", (limite,))
 
 
 def informe(desde=None):
-    """Resumen en texto de lo que pasó (por defecto, desde el inicio de la sesión): para que APOLO lo cuente por la mañana."""
     preparar()
     e = estado() or {}
     desde = int(desde or e.get('sesion_inicio') or 0)
-    its = db.q('SELECT * FROM ag_intentos WHERE inicio>=? ORDER BY id', (desde,))
-    tr = db.q('SELECT a.*, t.pnl FROM ag_trades a JOIN trades t ON t.id=a.trade_id WHERE a.abierto>=? AND a.r IS NOT NULL', (desde,))
-    lec = db.q("SELECT tipo, COUNT(*) n FROM ag_lecciones WHERE ts>=? AND tipo NOT IN ('quiebra','ruido') GROUP BY tipo ORDER BY n DESC", (desde,))
-    ult = db.q("SELECT texto FROM ag_lecciones WHERE ts>=? AND tipo NOT IN ('ruido') ORDER BY id DESC LIMIT 6", (desde,))
-    if not its:
-        return 'El agente no ha hecho intentos todavía.'
-    mx = max(its, key=lambda x: x['max_equity'] or 0)
+    tr = db.q('SELECT ag.*, t.pnl FROM ag_trades ag JOIN trades t ON t.id=ag.trade_id WHERE ag.abierto>=? AND ag.r IS NOT NULL', (desde,))
+    its = db.q('SELECT * FROM ag_intentos WHERE inicio>=?', (desde,))
+    if not tr and not its:
+        return 'El enjambre aún no ha operado en esta sesión.'
     g = sum(1 for t in tr if t['pnl'] > 0)
-    por_est = {}
+    por = {}
     for t in tr:
-        por_est.setdefault(t['estrategia'], []).append(t['r'])
-    est_txt = ', '.join(f"{k} {statistics.fmean(v):+.2f}R ({len(v)})" for k, v in sorted(por_est.items(), key=lambda kv: -statistics.fmean(kv[1])))
-    lineas = [
-        f"Sesión desde {time.strftime('%d/%m %H:%M', time.localtime(desde))}: {len(its)} intento(s), {len(tr)} operaciones, {g} ganadas ({(g / len(tr) * 100) if tr else 0:.0f} %).",
-        f"Mejor momento: intento #{mx['id']} llegó a {mx['max_equity']:.3f} $ (meta {mx['meta']:.0f} $). Quiebras: {sum(1 for i in its if i['resultado'] == 'quiebra')}. Metas logradas: {sum(1 for i in its if i['resultado'] == 'meta')}.",
-        f"Por estrategia: {est_txt or '—'}.",
-        'Causas de pérdida más repetidas: ' + (', '.join(f"{x['tipo']} ×{x['n']}" for x in lec) or '—') + '.',
-        'Últimas lecciones: ' + ' | '.join(x['texto'] for x in ult),
-        f"Genoma actual: {json.dumps(e.get('genoma'), ensure_ascii=False)}",
-    ]
-    return '\n'.join(lineas)
+        gt = json.loads(t['genoma'])
+        por.setdefault(f"{gt['estrategia']} {gt['marco']}", []).append(t['r'])
+    ranking = sorted(((k, statistics.fmean(v), len(v)) for k, v in por.items() if len(v) >= 5), key=lambda x: -x[1])
+    mejores = sorted(((aptitud(a)[0], a) for a in agentes()), key=lambda x: -9 if x[0] is None else x[0], reverse=True)[:3]
+    lec = db.q("SELECT tipo, COUNT(*) n FROM ag_lecciones WHERE ts>=? AND tipo NOT IN ('ruido','quiebra') GROUP BY tipo ORDER BY n DESC", (desde,))
+    comp = db.q("SELECT texto FROM ag_lecciones WHERE ts>=? AND tipo IN ('compartida','evolucion','meta','migracion') ORDER BY id DESC LIMIT 6", (desde,))
+    mx = max(its, key=lambda i: i['max_equity'] or 0) if its else None
+    nodos = db.q('SELECT nodo, visto FROM ag_nodos')
+    return '\n'.join([
+        f"Desde {time.strftime('%d/%m %H:%M', time.localtime(desde))}: {len(agentes())} agentes en {NODO}" + (f" + nodos {', '.join(n['nodo'] for n in nodos)}" if nodos else '') +
+        f", generación {e.get('generacion', 0)}. {len(tr)} operaciones, {g} ganadas ({(g / len(tr) * 100) if tr else 0:.0f} %).",
+        f"Intentos: {len(its)} · quiebras {sum(1 for i in its if i['resultado'] == 'quiebra')} · metas {sum(1 for i in its if i['resultado'] == 'meta')}" +
+        (f" · mejor capital alcanzado {mx['max_equity']:.3f} $ (meta {mx['meta']:.0f} $)." if mx else '.'),
+        'Sistemas que mejor funcionan: ' + (', '.join(f"{k} {m:+.2f}R ({n})" for k, m, n in ranking[:4]) or 'aún sin datos suficientes') + '.',
+        'Sistemas que peor: ' + (', '.join(f"{k} {m:+.2f}R ({n})" for k, m, n in ranking[-3:]) if len(ranking) > 4 else '—') + '.',
+        'Mejores agentes ahora: ' + (', '.join(f"{a['nombre']} {f:+.2f}R ({_g(a)['estrategia']} {_g(a)['marco']})" for f, a in mejores if f is not None) or '—') + '.',
+        'Por qué se pierde (autopsias): ' + (', '.join(f"{x['tipo']} ×{x['n']}" for x in lec) or '—') + '.',
+        'Aprendizajes compartidos: ' + (' | '.join(x['texto'] for x in comp) or '—'),
+    ])
