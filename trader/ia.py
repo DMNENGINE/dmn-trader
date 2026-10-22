@@ -19,7 +19,8 @@ def rasgos(ras, g, d):
     x = [ras.get('atr_pct', 0.0), (ras.get('tendencia', 0) or 0) * d, math.sin(2 * math.pi * h / 24), math.cos(2 * math.pi * h / 24),
          ras.get('coste_pct', 0.0), (ras.get('dist') or 0) / precio * 100, float(d), 1.0 if g.get('entrada') == 'limite' else 0.0,
          float(g.get('tramos', 1)), float(g.get('rr', 1.5)), float(g.get('stop_atr', 1.5)),
-         (ras.get('coste_pct', 0.0) / ((ras.get('dist') or 1) / precio * 100)) if ras.get('dist') else 0.0]
+         (ras.get('coste_pct', 0.0) / ((ras.get('dist') or 1) / precio * 100)) if ras.get('dist') else 0.0,
+         ((ras['fng'] - 50) / 50) if ras.get('fng') is not None else 0.0, (ras.get('sent') or 0.0) * d]  # sentimiento: miedo/euforia y noticias a favor
     x += [1.0 if g.get('estrategia') == e else 0.0 for e in ESTRATEGIAS]
     x += [1.0 if g.get('marco') == m else 0.0 for m in MARCOS]
     return x
@@ -84,7 +85,7 @@ def entrenar(filas=None, limite=4000):
     ok = ll < llb * 0.995 and r_filtro is not None and r_filtro > r_todos and len(buenos) >= 15
     mu, sd = _norm(X)  # modelo final con todo
     w = _entrenar([[(a - m) / s for a, m, s in zip(x, mu, sd)] for x in X], y)
-    m = {'ok': ok, 'n': len(X), 'w': w, 'mu': mu, 'sd': sd, 'ts': int(time.time()), 'logloss': round(ll, 4), 'logloss_base': round(llb, 4),
+    m = {'ok': ok, 'n': len(X), 'nf': len(X[0]), 'w': w, 'mu': mu, 'sd': sd, 'ts': int(time.time()), 'logloss': round(ll, 4), 'logloss_base': round(llb, 4),
          'r_todos': round(r_todos, 3), 'r_filtrado': round(r_filtro, 3) if r_filtro is not None else None, 'aceptadas_pct': round(len(buenos) / len(test) * 100),
          'motivo': 'predice mejor que el azar en operaciones nuevas' if ok else 'aún no predice mejor que el azar: no filtra'}
     return _guardar(m)
@@ -108,9 +109,9 @@ def modelo():
 def probabilidad(ras, g, d):
     """Probabilidad de que la operación salga ganadora, o None si el modelo no es fiable todavía."""
     m = modelo()
-    if not m.get('ok'):
-        return None
     x = rasgos(ras, g, d)
+    if not m.get('ok') or m.get('nf') != len(x):  # sin modelo fiable, o entrenado con otros rasgos: no filtra hasta reentrenar
+        return None
     return _prob(m['w'], [(a - mu) / s for a, mu, s in zip(x, m['mu'], m['sd'])])
 
 

@@ -3,7 +3,7 @@ Cada agente: opera con su genoma → autopsia de cada pérdida con su arreglo �
 El enjambre: comparte lo que aprende (símbolos/horas que pierden para todos), evoluciona cada 2 h (el 20 % peor se reemplaza por hijos
 del 10 % mejor) y, si hay varios equipos (Pi = central, PC = nodo), intercambia los mejores genomas cada 30 min (modelo de islas)."""
 import copy, json, math, os, random, socket, statistics, sys, threading, time, traceback
-from . import ia, datos, db, indicadores as ind, motor
+from . import ia, sentimiento, datos, db, indicadores as ind, motor
 
 ESQUEMA = """
 CREATE TABLE IF NOT EXISTS ag_agentes (id INTEGER PRIMARY KEY, nombre TEXT, cuenta_id INTEGER, genoma TEXT, generacion INTEGER DEFAULT 0,
@@ -36,7 +36,7 @@ GENOMA_BASE = {'marco': '1m', 'estrategia': 'ema_cruce', 'p': dict(ESTRATEGIAS['
 # filtro_ia: probabilidad mínima de ganar según el modelo del enjambre (trader/ia.py); 0 = sin filtro.
 POOL_CRIPTO = CRIPTO + ['LTC-USD', 'BCH-USD', 'DOT-USD', 'UNI-USD', 'AAVE-USD', 'NEAR-USD', 'SUI-USD', 'SHIB-USD', 'APT-USD', 'ARB-USD',
                         'OP-USD', 'HBAR-USD', 'XLM-USD', 'ATOM-USD', 'FIL-USD', 'ETC-USD', 'PEPE-USD']
-N_CRIPTO, SPREAD_MAX, UNIVERSO_CADA, IA_CADA = 12, 0.15, 3600, 1800
+N_CRIPTO, SPREAD_MAX, UNIVERSO_CADA, IA_CADA, SENT_CADA = 12, 0.15, 3600, 1800, 1800
 # entrada 'limite': espera un retroceso de `retroceso` ATR durante `espera` velas (no paga spread ni deslizamiento al entrar).
 # tramos > 1 (DCA): el resto de la posición se compra escalonado entre la entrada y el stop, promediando el precio.
 DCA_HASTA = 0.6  # el último tramo va al 60 % del camino hacia el stop
@@ -492,6 +492,14 @@ def _entrenar_ia():
         log('error entrenando la IA: ' + traceback.format_exc().splitlines()[-1])
 
 
+def _sentimiento(e):
+    try:
+        sentimiento.actualizar(_universo(e))
+        log('📰 ' + sentimiento.resumen())
+    except Exception:
+        log('error en el sentimiento: ' + traceback.format_exc().splitlines()[-1])
+
+
 def contexto(e, marcos):
     ctx = {'q': {}, 'v': {}, 'coste': {}, 'sen': {}}
     cfg = dict(CUENTA_CFG, **{'comision_pct': CUENTA_CFG['comision_pct']})
@@ -542,6 +550,10 @@ def paso_enjambre(e):
     if ahora_ - e.get('ultima_evolucion', 0) > EVOLUCION:
         e['ultima_evolucion'] = ahora_
         evolucionar(e)
+    if ahora_ - e.get('ultimo_sent', 0) > SENT_CADA:
+        e['ultimo_sent'] = ahora_
+        guardar(e)
+        threading.Thread(target=_sentimiento, args=(e,), daemon=True).start()
     if ahora_ - e.get('ultima_ia', 0) > IA_CADA:
         e['ultima_ia'] = ahora_
         guardar(e)
@@ -722,6 +734,7 @@ def paso_agente(e, a, ctx):
     if hora in g['horas_bloqueadas'] or hora in e.get('bloqueos', {}).get('horas', []):
         return
     abiertos = {p['simbolo'] for p in pos} | esperando | _vetados(a, cid, g)
+    sent = sentimiento.actual()
     for sim in _universo(e, g):
         if sim in abiertos or sim not in ctx['q']:
             continue
@@ -751,7 +764,7 @@ def paso_agente(e, a, ctx):
             continue
         sl, tp = p - d * dist, p + d * g['rr'] * dist
         rasgos = {'atr_pct': round(atr[-1] / p * 100, 4), 'tendencia': tend[-1], 'hora': hora, 'spread_pct': round(spread, 4),
-                  'coste_pct': round(coste, 4), 'precio': p, 'dist': dist, 'entrada': g['entrada'], 'tramos': len(fr)}
+                  'coste_pct': round(coste, 4), 'precio': p, 'dist': dist, 'entrada': g['entrada'], 'tramos': len(fr), **sentimiento.rasgos(sim, sent)}
         if g.get('filtro_ia'):  # el modelo del enjambre opina: si ve pocas opciones de ganar, no entra
             pr = ia.probabilidad(rasgos, g, d)
             if pr is not None:
@@ -1099,7 +1112,8 @@ def sincronizar(e):
     migrar = time.time() - e.get('ultima_migracion', 0) > MIGRACION
     top = sorted(((aptitud(a)[0], a) for a in agentes()), key=lambda x: -9 if x[0] is None else x[0], reverse=True)[:3]
     cuerpo = {'nodo': NODO, 'kpis': kpis(), 'agentes': _vista_agentes(), 'lecciones': lecciones(15),
-              'migrantes': [{'genoma': _g(a), 'aptitud': f, 'nombre': a['nombre']} for f, a in top if f is not None] if migrar else [], 'pedir': migrar}
+              'migrantes': [{'genoma': _g(a), 'aptitud': f, 'nombre': a['nombre']} for f, a in top if f is not None] if migrar else [], 'pedir': migrar,
+              'sentimiento': sentimiento.actual()}
     req = urllib.request.Request(CENTRAL + '/api/enjambre/nodo', data=json.dumps(cuerpo, default=str).encode(), method='POST',
                                  headers={'content-type': 'application/json', **({'x-token': CENTRAL_TOKEN} if CENTRAL_TOKEN else {})})
     try:
@@ -1132,6 +1146,7 @@ def recibir_nodo(c):
     """En la central: guarda lo que manda un nodo y, si lo pide, le devuelve los 3 mejores genomas de aquí."""
     db.ex('INSERT INTO ag_nodos(nodo,visto,datos) VALUES(?,?,?) ON CONFLICT(nodo) DO UPDATE SET visto=excluded.visto, datos=excluded.datos',
           (str(c.get('nodo'))[:40], int(time.time()), json.dumps({k: c.get(k) for k in ('kpis', 'agentes', 'lecciones')}, default=str)))
+    sentimiento.recibir(c.get('sentimiento'))  # las noticias puntuadas por el LLM del nodo (el PC) le sirven a la central
     out = {'ok': True}
     if c.get('pedir'):
         if (estado() or {}).get('activo'):
@@ -1223,6 +1238,7 @@ def informe(desde=None):
         'Mejores agentes ahora: ' + (', '.join(f"{a['nombre']} {f:+.2f}R ({_g(a)['estrategia']} {_g(a)['marco']})" for f, a in mejores if f is not None) or '—') + '.',
         'Por qué se pierde (autopsias): ' + (', '.join(f"{x['tipo']} ×{x['n']}" for x in lec) or '—') + '.',
         ia.resumen(),
+        sentimiento.resumen(),
         'Mercados cripto (por volumen): ' + ', '.join(x.replace('-USD', '') for x in ((e.get('universo') or {}).get('cripto') or CRIPTO)) + '.',
         'Aprendizajes compartidos: ' + (' | '.join(x['texto'] for x in comp) or '—'),
     ])
