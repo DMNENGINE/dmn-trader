@@ -445,7 +445,7 @@ def _llenar(c, o, px, ts, moneda, tipo_activo=None):
             t = db.uno('SELECT * FROM trades WHERE id=?', (p['trade_id'],))
             neto = t['pnl'] - t['comisiones']
             db.ex("UPDATE trades SET estado='cerrado', cerrado=?, salida=?, pnl=?, r=?, nota_cierre=? WHERE id=?",
-                  (ts, t['salida_valor'] / t['salida_cant'], round(neto, 2), round(neto / t['riesgo'], 2) if t['riesgo'] else None,
+                  (ts, t['salida_valor'] / t['salida_cant'], round(neto, 8), round(neto / t['riesgo'], 3) if t['riesgo'] else None,
                    o['nota'] if o['reduce'] else None, t['id']))
             db.ex('DELETE FROM posiciones WHERE cuenta_id=? AND simbolo=?', (cid, sym))
             db.ex("UPDATE ordenes SET estado='cancelada', motivo='posición cerrada' WHERE cuenta_id=? AND simbolo=? AND reduce=1 AND estado IN ('pendiente','espera') AND id<>?",
@@ -460,7 +460,7 @@ def _llenar(c, o, px, ts, moneda, tipo_activo=None):
             db.ex('UPDATE posiciones SET cantidad=? WHERE cuenta_id=? AND simbolo=?', (nuevo, cid, sym))
     db.ex("UPDATE ordenes SET estado='ejecutada', ejecutada=?, precio_ejec=?, comision=? WHERE id=?", (ts, px, com, o['id']))
     db.ex('INSERT INTO ejecuciones(cuenta_id,orden_id,simbolo,lado,cantidad,precio,fx,comision,pnl,ts) VALUES(?,?,?,?,?,?,?,?,?,?)',
-          (cid, o['id'], sym, o['lado'], abs(q), px, fx, com, round(pnl, 2), ts))
+          (cid, o['id'], sym, o['lado'], abs(q), px, fx, com, round(pnl, 8), ts))
     # bracket: al llenarse la entrada se activan sus hijos; OCO: al llenarse uno, los hermanos se cancelan
     db.ex("UPDATE ordenes SET estado='pendiente', creada=? WHERE padre_id=? AND estado='espera'", (ts, o['id']))
     if o['oco']:

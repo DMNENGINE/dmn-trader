@@ -113,7 +113,7 @@ def simular(g, series, coste):
             d = s[i - 1]
             ent = v[i]['o']
             dist = atr[i - 1] * g['stop_atr']
-            if g['rr'] * dist / ent * 100 < g['min_ventaja'] * coste:
+            if g['rr'] * dist / ent * 100 < g['min_ventaja'] * coste or dist / ent * 100 < 2 * coste:
                 i += 1
                 continue
             stop, obj, be_hecho = ent - d * dist, ent + d * g['rr'] * dist, False
@@ -508,7 +508,8 @@ def paso_agente(e, a, ctx):
         p = q['precio']
         coste, spread = ctx['coste'][sim]
         dist = atr[-1] * g['stop_atr']
-        if g['rr'] * dist / p * 100 < g['min_ventaja'] * coste:
+        # regla de profesional: el objetivo debe pagar los costes con margen, y los costes no pueden comerse más de la mitad del stop
+        if g['rr'] * dist / p * 100 < g['min_ventaja'] * coste or dist / p * 100 < 2 * coste:
             db.ex('UPDATE ag_agentes SET descartes=descartes+1 WHERE id=?', (a['id'],))
             continue
         r = motor.resumen(cid)
@@ -567,12 +568,12 @@ def _registrar_cerrados(e, a, it):
             db.ex("UPDATE ag_trades SET r=?, causa='sistema', revisado=1 WHERE trade_id=?", (r, t['id']))
             continue
         db.ex('UPDATE ag_trades SET r=? WHERE trade_id=?', (r, t['id']))
-        db.ex('UPDATE ag_intentos SET trades=trades+1, ganados=ganados+? WHERE id=?', (1 if t['pnl'] > 0 else 0, it['id']))
+        db.ex('UPDATE ag_intentos SET trades=trades+1, ganados=ganados+? WHERE id=?', (1 if r > 0 else 0, it['id']))
         e = estado()
         b = e['bandido'].setdefault(t['estrategia'], [1, 1])
-        b[0 if t['pnl'] > 0 else 1] += 1
+        b[0 if r > 0 else 1] += 1
         guardar(e)
-        _poner(a['id'], ultimo=f"{'✅' if t['pnl'] > 0 else '❌'} {r:+.2f}R")
+        _poner(a['id'], ultimo=f"{'✅' if r > 0 else '❌'} {r:+.2f}R")
 
 
 def _autopsias(a):
@@ -585,7 +586,7 @@ def _autopsias(a):
     g = _g(a)
     for x in pend:
         db.ex('UPDATE ag_trades SET revisado=1 WHERE trade_id=?', (x['trade_id'],))
-        if x['pnl'] > 0:
+        if (x['r'] if x['r'] is not None else x['pnl']) > 0:
             continue
         causas = diagnosticar(x, g)
         db.ex('UPDATE ag_trades SET causa=? WHERE trade_id=?', (causas[0][0], x['trade_id']))
@@ -912,7 +913,7 @@ def informe(desde=None):
     its = db.q('SELECT * FROM ag_intentos WHERE inicio>=?', (desde,))
     if not tr and not its:
         return 'El enjambre aún no ha operado en esta sesión.'
-    g = sum(1 for t in tr if t['pnl'] > 0)
+    g = sum(1 for t in tr if (t['r'] or 0) > 0)
     por = {}
     for t in tr:
         gt = json.loads(t['genoma'])
