@@ -316,7 +316,25 @@ ULTIMO_TICK = {'dur': 0, 'ts': 0}
 _FOTOS = {}
 
 
+def _despierto(si):
+    """Windows: mientras el enjambre opera, el equipo no se suspende (la pantalla sí puede apagarse). Se libera al parar."""
+    if sys.platform == 'win32':
+        try:
+            import ctypes
+            ctypes.windll.kernel32.SetThreadExecutionState(0x80000000 | (0x00000001 if si else 0))
+        except Exception:
+            pass
+
+
 def _bucle():
+    _despierto(True)
+    try:
+        _bucle_()
+    finally:
+        _despierto(False)
+
+
+def _bucle_():
     while not _parar.is_set():
         t0 = time.time()
         try:
