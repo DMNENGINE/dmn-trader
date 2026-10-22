@@ -18,3 +18,10 @@ Simulador profesional de trading con **datos reales** (Yahoo Finance) y dinero *
 - Datos en `datos/trader.db` (SQLite). Prueba: `python tests/prueba_motor.py`.
 
 Los precios de acciones pueden ir con algo de retraso; las órdenes de acciones solo se ejecutan con el mercado abierto. No es asesoramiento financiero.
+
+## En la Pi (instalación actual)
+Servicio `dmn-trader` (systemd) en `/home/dmn/dmn-trader`, puerto 8777, token en `.env`. Panel: `http://192.168.1.124:8777/#token=<token>` (se recuerda en el navegador).
+Actualizar: `tar --exclude=datos --exclude=.git -cf - . | ssh dmn@192.168.1.124 'tar -xf - -C ~/dmn-trader' && ssh dmn@192.168.1.124 sudo systemctl restart dmn-trader`
+
+## El reto de APOLO (`trader/agente.py`)
+Agente que opera solo con microoperaciones (1m/5m/15m), hace la autopsia de cada pérdida, aplica arreglos, y al quebrar prueba candidatos en datos reales recientes antes del siguiente intento. Pestaña «🤖 APOLO» del panel o `trader.py agente …` desde APOLO.

@@ -75,9 +75,51 @@ def mercado_abierto(meta):
     return ahora - (meta.get('regularMarketTime') or 0) < 900
 
 
+# --- Coinbase (cripto en tiempo real, con compra/venta para simular el spread) ---
+CB = 'https://api.exchange.coinbase.com'
+CB_GRAN = {'1m': 60, '5m': 300, '15m': 900, '60m': 3600, '1h': 3600, '1d': 86400}
+
+
+def _cb(ruta, timeout=8):
+    req = urllib.request.Request(CB + ruta, headers={'User-Agent': UA, 'Accept': 'application/json'})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode('utf-8'))
+
+
+def es_coinbase(simbolo):
+    try:
+        prods = _cacheado(('cbp',), 3600, lambda: {p['id'] for p in _cb('/products') if p.get('status') == 'online'})
+    except Exception:
+        return False
+    return simbolo in prods
+
+
+def _cotizacion_cb(simbolo):
+    t = _cb(f'/products/{simbolo}/ticker')
+    st = _cacheado(('cbs', simbolo), 60, lambda: _cb(f'/products/{simbolo}/stats'))
+    p, ab = float(t['price']), float(st.get('open') or 0)
+    import calendar
+    ts = calendar.timegm(time.strptime(t['time'][:19], '%Y-%m-%dT%H:%M:%S'))
+    return {'simbolo': simbolo, 'nombre': simbolo.replace('-USD', '') + ' (Coinbase)', 'precio': p, 'cierre_anterior': ab or None,
+            'cambio': round(p - ab, 6) if ab else None, 'cambio_pct': round((p / ab - 1) * 100, 3) if ab else None,
+            'max_dia': float(st['high']), 'min_dia': float(st['low']), 'volumen': float(st.get('volume') or 0),
+            'max_52s': None, 'min_52s': None, 'moneda': 'USD', 'tipo': 'CRYPTOCURRENCY', 'bolsa': 'Coinbase', 'zona': 'UTC',
+            'ts': ts, 'abierto': True, 'bid': float(t['bid']), 'ask': float(t['ask']), 'fuente': 'coinbase'}
+
+
+def _velas_cb(simbolo, intervalo):
+    d = _cb(f'/products/{simbolo}/candles?granularity={CB_GRAN[intervalo]}')
+    return [{'t': x[0], 'o': x[3], 'h': x[2], 'l': x[1], 'c': x[4], 'v': x[5]} for x in reversed(d)]
+
+
 def cotizacion(simbolo):
     """Último precio y contexto. Devuelve dict con precio, cambio %, máximos/mínimos, moneda, tipo, abierto…"""
     simbolo = simbolo.strip().upper()
+    if es_coinbase(simbolo):
+        try:
+            return _cacheado(('qcb', simbolo), 3, lambda: _cotizacion_cb(simbolo))
+        except Exception:
+            pass  # si Coinbase falla, Yahoo
 
     def pedir():
         res = _chart(simbolo, '1m', '1d')
@@ -105,6 +147,11 @@ def velas(simbolo, intervalo='1d', rango=None, inicio=None, fin=None):
     simbolo = simbolo.strip().upper()
     if intervalo == '1h':
         intervalo = '60m'
+    if intervalo in ('1m', '5m', '15m', '60m') and not (rango or inicio) and es_coinbase(simbolo):
+        try:  # intradía de cripto: Coinbase (300 velas, al segundo)
+            return _cacheado(('vcb', simbolo, intervalo), 15, lambda: _velas_cb(simbolo, intervalo))
+        except Exception:
+            pass
 
     def pedir():
         res = _chart(simbolo, intervalo, rango, inicio, fin)

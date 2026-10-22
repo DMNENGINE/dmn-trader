@@ -61,3 +61,4 @@ td button{padding:2px 7px;font-size:11px}
 .toast{position:fixed;bottom:16px;right:16px;background:var(--panel2);border:1px solid var(--acento);border-radius:8px;padding:10px 14px;z-index:30;max-width:360px}
 @media (max-width:1100px){.mesa{grid-template-columns:1fr}.vig{max-height:220px}.dos,.dos.ancho-izq,.tres{grid-template-columns:1fr}.kpis{gap:14px}}
 @media (max-width:600px){main{padding:10px}.barra{flex-wrap:wrap;gap:8px}.fila4{grid-template-columns:1fr 1fr}.lienzo{height:340px}}
+.mono{font-family:Consolas,monospace;white-space:pre-wrap;max-height:360px;overflow:auto}#agLec{max-height:360px;overflow:auto}.lec{padding:6px 0;border-bottom:1px solid #172133}.lec small{color:var(--tenue)}

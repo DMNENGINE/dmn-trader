@@ -3,13 +3,21 @@
 Gestión de riesgo: % de riesgo por operación, pérdida diaria máxima (bloquea la cuenta hasta mañana), máximo de posiciones,
 apalancamiento, stop obligatorio opcional. Cada operación cerrada queda en el diario con su R, MFE/MAE y notas.
 Cuentas "replay": practicar sobre velas históricas avanzando vela a vela, sin ver el futuro."""
-import json, time, uuid
+import json, threading, time, uuid
 from . import datos, db, metricas
+
+_cerrojos, _cerrojo_g = {}, threading.Lock()
+
+
+def _cerrojo(cid):
+    """Un cerrojo por cuenta: el bucle del servidor y el agente nunca ejecutan la misma orden dos veces."""
+    with _cerrojo_g:
+        return _cerrojos.setdefault(cid, threading.RLock())
 
 CONFIG_DEFECTO = {
     'comision_fija': 0.0, 'comision_pct': 0.0, 'deslizamiento_pct': 0.02, 'riesgo_max_pct': 1.0,
     'perdida_diaria_max_pct': 3.0, 'max_posiciones': 8, 'apalancamiento': 1.0, 'exigir_stop': False,
-    'riesgo_estricto': True, 'permitir_cortos': True, 'webhook': '',
+    'riesgo_estricto': True, 'permitir_cortos': True, 'webhook': '', 'comision_por_tipo': {},
 }
 TIPOS = ('mercado', 'limite', 'stop', 'stop_limite', 'trailing')
 EPS = 1e-9
@@ -103,7 +111,8 @@ def barra(c, simbolo):
         return {**b, 'moneda': None, 'abierto': True}
     q = datos.cotizacion(simbolo)
     p = q['precio']
-    return {'t': q['ts'] or ahora(), 'o': p, 'h': p, 'l': p, 'c': p, 'moneda': q['moneda'], 'abierto': q['abierto'], 'tipo_activo': q['tipo']}
+    return {'t': q['ts'] or ahora(), 'o': p, 'h': p, 'l': p, 'c': p, 'moneda': q['moneda'], 'abierto': q['abierto'], 'tipo_activo': q['tipo'],
+            'bid': q.get('bid'), 'ask': q.get('ask')}
 
 
 def precio(c, simbolo):
@@ -229,7 +238,12 @@ def tamano_por_riesgo(cid, simbolo, entrada, stop, riesgo_pct=None):
             'valor_posicion': round(min(qty, tope) * entrada * fx, 2), 'limitado_por_poder_compra': tope < qty}
 
 
-def enviar(cid, simbolo, lado, cantidad=None, tipo='mercado', limite=None, stop=None, trail_pct=None,
+def enviar(cid, *a, **k):
+    with _cerrojo(cid):
+        return _enviar(cid, *a, **k)
+
+
+def _enviar(cid, simbolo, lado, cantidad=None, tipo='mercado', limite=None, stop=None, trail_pct=None,
            sl=None, tp=None, importe=None, nota=None, setup=None, origen='manual', oco=None, padre_id=None, reduce=False):
     c = _fila(cid)
     simbolo, lado, tipo = simbolo.strip().upper(), lado.lower(), tipo.lower()
@@ -360,8 +374,9 @@ def mover_stop(cid, simbolo, stop=None, objetivo=None, trail_pct=None):
 def _precio_ejecucion(o, b, slip):
     """Devuelve el precio de ejecución si la orden se dispara con esta barra, o None. Actualiza trailing/activación."""
     compra = o['lado'] == 'buy'
-    if o['tipo'] == 'mercado':
-        return b['o'] * (1 + slip if compra else 1 - slip)
+    if o['tipo'] == 'mercado':  # con libro real (Coinbase) se compra al ask y se vende al bid: el spread se paga
+        base = (b.get('ask') if compra else b.get('bid')) or b['o']
+        return base * (1 + slip if compra else 1 - slip)
     if o['tipo'] == 'trailing':
         ref = o['trail_ref'] or b['c']
         ref = min(ref, b['l']) if compra else max(ref, b['h'])
@@ -388,7 +403,7 @@ def _precio_ejecucion(o, b, slip):
     return None
 
 
-def _llenar(c, o, px, ts, moneda):
+def _llenar(c, o, px, ts, moneda, tipo_activo=None):
     cid, sym = c['id'], o['simbolo']
     cfg = c['config']
     p = db.uno('SELECT * FROM posiciones WHERE cuenta_id=? AND simbolo=?', (cid, sym))
@@ -401,7 +416,8 @@ def _llenar(c, o, px, ts, moneda):
         if abs(q) >= abs(actual) - EPS:
             q = -actual
     fx = _fx(c, moneda or (p or {}).get('moneda'))
-    com = cfg['comision_fija'] + abs(q) * px * fx * cfg['comision_pct'] / 100
+    pct = (cfg.get('comision_por_tipo') or {}).get(tipo_activo or '', cfg['comision_pct'])
+    com = cfg['comision_fija'] + abs(q) * px * fx * pct / 100
     db.ex('UPDATE cuentas SET efectivo=efectivo-? WHERE id=?', (q * px * fx + com, cid))
     pnl = 0.0
     nuevo = actual + q
@@ -455,7 +471,11 @@ def _llenar(c, o, px, ts, moneda):
 
 
 def procesar(cid, simbolos=None):
-    """Revisa las órdenes pendientes contra el precio actual (o la vela actual en replay). Devuelve nº de ejecuciones."""
+    with _cerrojo(cid):
+        return _procesar(cid, simbolos)
+
+
+def _procesar(cid, simbolos=None):
     c = _fila(cid)
     slip = c['config']['deslizamiento_pct'] / 100
     pend = db.q("SELECT * FROM ordenes WHERE cuenta_id=? AND estado='pendiente' ORDER BY reduce DESC, id", (cid,))
@@ -477,7 +497,7 @@ def procesar(cid, simbolos=None):
             continue
         px = _precio_ejecucion(o, b, slip)
         if px is not None:
-            _llenar(c, o, px, b['t'], b.get('moneda'))
+            _llenar(c, o, px, b['t'], b.get('moneda'), b.get('tipo_activo'))
             n += 1
     for p in db.q('SELECT * FROM posiciones WHERE cuenta_id=?', (cid,)):  # MFE / MAE: lo mejor y lo peor que llegó a ir
         try:

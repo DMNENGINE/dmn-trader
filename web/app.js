@@ -5,8 +5,12 @@ const E = { cuenta: null, cuentas: [], simbolo: localStorage.getItem('dmn.sim') 
   lado: 'buy', capas: new Set(JSON.parse(localStorage.getItem('dmn.capas') || '["sma"]')), velas: [], analisis: null, sub: 'pos', auto: null, estr: {} };
 const INTERVALOS = ['5m', '15m', '60m', '1d', '1wk'];
 
+// token (cuando el servidor está en la Pi): se pasa una vez como http://pi:8777/#token=XXXX y se recuerda
+try { const m = location.hash.match(/token=([^&]+)/); if (m) { localStorage.setItem('dmn.token', m[1]); history.replaceState(null, '', location.pathname); } } catch { }
+const TOKEN = (() => { try { return localStorage.getItem('dmn.token') || ''; } catch { return ''; } })();
 async function api(ruta, metodo = 'GET', cuerpo) {
-  const r = await fetch('/api' + ruta, { method: metodo, headers: cuerpo ? { 'content-type': 'application/json' } : {}, body: cuerpo ? JSON.stringify(cuerpo) : undefined });
+  const h = { ...(cuerpo ? { 'content-type': 'application/json' } : {}), ...(TOKEN ? { 'x-token': TOKEN } : {}) };
+  const r = await fetch('/api' + ruta, { method: metodo, headers: h, body: cuerpo ? JSON.stringify(cuerpo) : undefined });
   const j = await r.json().catch(() => ({ error: 'respuesta inválida' }));
   if (!r.ok) throw new Error(j.error || r.statusText);
   return j;
@@ -324,9 +328,36 @@ $('#btnBorrar').onclick = async () => { if (E.cuentas.length < 2) return msg('#a
   await api(`/cuentas/${E.cuenta.id}`, 'DELETE'); localStorage.removeItem('dmn.cuenta'); await cargarCuentas(); await cambiarCuenta(); msg('#ajMsg', 'Cuenta eliminada.', true); };
 $('#btnWebhook').onclick = async () => { try { await api('/ajustes', 'POST', { webhook: $('#wUrl').value.trim() }); msg('#ajMsg', 'Webhook guardado: los avisos (stops, alertas, bloqueos) llegarán ahí.', true); } catch (e) { msg('#ajMsg', e.message); } };
 
+// ---------- agente (el reto) ----------
+let gAg;
+async function cargarAgente() {
+  try {
+    const [a, lec, its] = await Promise.all([api('/agente'), api('/agente/lecciones?n=40'), api('/agente/intentos?n=30')]);
+    const it = a.intento || {}; const t = (x, y) => `<div class="tile"><small>${x}</small><b>${y}</b></div>`;
+    $('#agEstado').innerHTML = a.activo ? '<span class="verde">● operando</span>' : '<span class="tenue">○ parado</span>';
+    $('#agKpis').innerHTML = [t('Capital ahora', a.equity != null ? n(a.equity, 4) + ' $' : '—'), t('Meta', a.meta ? n(a.meta, 0) + ' $' : '—'), t('Intento', it.id ? '#' + it.id : '—'),
+      t('Máx. este intento', it.max_equity != null ? n(it.max_equity, 4) + ' $' : '—'), t('Intentos', a.intentos), t('Metas logradas', a.metas_logradas),
+      t('Operaciones', a.trades), t('Acierto', a.trades ? n(a.ganados / a.trades * 100, 0) + '%' : '—'), t('R medio', a.r_medio != null ? sg(a.r_medio) : '—'), t('Descartadas por costes', a.descartes_coste)].join('');
+    const g = a.genoma; $('#agGenoma').innerHTML = g ? `Velas de <b>${g.marco}</b> · estrategia <b>${g.estrategia}</b> ${esc(JSON.stringify(g.p))} · stop ${g.stop_atr} ATR · objetivo ${g.rr}R · riesgo ${g.riesgo_pct}% · ` +
+      `${g.filtro_tendencia ? 'solo a favor de tendencia' : 'sin filtro de tendencia'} · volatilidad ${g.vol_min_pct}–${g.vol_max_pct}% · máx ${g.max_barras} velas · breakeven ${g.be_en_r ? 'a ' + g.be_en_r + 'R' : 'no'} · ventaja mínima ${g.min_ventaja}× costes` +
+      (g.simbolos_bloqueados.length ? ` · evita ${g.simbolos_bloqueados.join(', ')}` : '') + (g.horas_bloqueadas.length ? ` · no opera a las ${g.horas_bloqueadas.join(', ')} h UTC` : '') : '—';
+    $('#agLec').innerHTML = lec.map(l => `<div class="lec">${esc(l.texto)}<br><small>${fecha(l.ts)} · ${l.tipo}${l.intento ? ' · intento #' + l.intento : ''}</small></div>`).join('') || '<span class="tenue">Aún sin lecciones.</span>';
+    $('#agLog').textContent = (a.log || []).slice().reverse().join('\n') || 'Sin actividad.';
+    $('#agInt').innerHTML = tabla([['#', x => x.id], ['Inicio', x => fecha(x.inicio)], ['Fin', x => fecha(x.fin)], ['Máximo', x => n(x.max_equity, 4)], ['Final', x => x.final != null ? n(x.final, 4) : '—'],
+      ['Trades', x => `${x.trades} (${x.ganados} ✔)`], ['Resultado', x => x.resultado || '<span class="verde">en curso</span>'], ['Causa', x => `<span class="chico">${esc(x.causa || '')}</span>`]], its);
+    if (a.cuenta_id) { const eq = await api(`/cuentas/${a.cuenta_id}/equity`);
+      if (!gAg) { gAg = LW.createChart($('#chartAg'), { ...temaG, autoSize: true }); gAg.s = gAg.addAreaSeries({ lineColor: '#22c55e', topColor: '#22c55e33', bottomColor: '#22c55e00', lineWidth: 2 }); }
+      const desde = it.inicio || 0, vis = new Set(); gAg.s.setData(eq.filter(p => p.ts >= desde && !vis.has(p.ts) && vis.add(p.ts)).map(p => ({ time: p.ts, value: p.valor }))); gAg.timeScale().fitContent(); }
+  } catch (e) { msg('#agMsg', e.message); }
+}
+$('#agIniciar').onclick = async () => { try { await api('/agente/iniciar', 'POST', { capital: +$('#agCap').value, meta: +$('#agMeta').value, hasta: $('#agHasta').value || null, mercados: $('#agMerc').value.split(',') });
+  msg('#agMsg', 'APOLO está operando. Vuelve por la mañana a ver qué aprendió.', true); cargarAgente(); } catch (e) { msg('#agMsg', e.message); } };
+$('#agParar').onclick = async () => { try { await api('/agente/parar', 'POST'); msg('#agMsg', 'Parado.', true); cargarAgente(); } catch (e) { msg('#agMsg', e.message); } };
+setInterval(() => { if (!document.hidden && E.pag === 'agente') cargarAgente(); }, 10000);
+
 // ---------- navegación ----------
 function irA(p) { $$('#pestanas button').forEach(b => b.classList.toggle('on', b.dataset.p === p)); $$('.pag').forEach(s => s.classList.toggle('on', s.id === 'p-' + p)); E.pag = p;
-  ({ diario: cargarDiario, stats: cargarStats, practica: cargarPracticas, escaner: cargarAlertas, ajustes: pintarCfg })[p]?.(); }
+  ({ agente: cargarAgente, diario: cargarDiario, stats: cargarStats, practica: cargarPracticas, escaner: cargarAlertas, ajustes: pintarCfg })[p]?.(); }
 $$('#pestanas button').forEach(b => b.onclick = () => irA(b.dataset.p));
 async function cambiarCuenta() { localStorage.setItem('dmn.cuenta', $('#selCuenta').value); pararAuto(); await cargarCuenta(); limpiarTicket(); await cargarGrafico(); cargarCotizacion(); cargarAnalisis(); if (E.pag && E.pag !== 'mesa') irA(E.pag); }
 $('#selCuenta').onchange = cambiarCuenta;

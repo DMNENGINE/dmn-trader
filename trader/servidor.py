@@ -4,7 +4,7 @@ Si se expone fuera de este PC, poner DMN_TRADER_TOKEN: se pedirá en la cabecera
 import argparse, json, mimetypes, os, re, threading, time, traceback
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
-from . import datos, db, motor, analisis, backtest
+from . import datos, db, motor, analisis, backtest, agente
 
 WEB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'web')
 VERSION = '1.0.0'
@@ -268,6 +268,48 @@ def r_ajustes_set(q, b):
             db.poner_ajuste(k, b[k])
     return r_ajustes(q, b)
 
+# ---------- agente autónomo (el reto) ----------
+
+
+@ruta('GET', '/api/agente')
+def r_agente(q, b):
+    return agente.resumen()
+
+
+@ruta('POST', '/api/agente/iniciar')
+def r_agente_ini(q, b):
+    hasta = b.get('hasta')
+    if isinstance(hasta, str) and ':' in hasta:  # "07:00" → próxima vez que sean esas horas (hora local del servidor)
+        hh, mm = map(int, hasta.split(':'))
+        t = time.localtime()
+        fin = time.mktime((t.tm_year, t.tm_mon, t.tm_mday, hh, mm, 0, 0, 0, -1))
+        hasta = fin + 86400 if fin <= time.time() else fin
+    elif hasta and float(hasta) < 1000:  # horas desde ahora
+        hasta = time.time() + float(hasta) * 3600
+    return agente.iniciar(float(b.get('capital', 1)), float(b.get('meta', 100)), b.get('mercados') or ['cripto', 'acciones'],
+                          int(hasta) if hasta else None, b.get('simbolos'))
+
+
+@ruta('POST', '/api/agente/parar')
+def r_agente_parar(q, b):
+    return agente.parar()
+
+
+@ruta('GET', '/api/agente/lecciones')
+def r_agente_lec(q, b):
+    return agente.lecciones(int(q.get('n', 50)))
+
+
+@ruta('GET', '/api/agente/intentos')
+def r_agente_int(q, b):
+    return agente.intentos(int(q.get('n', 50)))
+
+
+@ruta('GET', '/api/agente/informe')
+def r_agente_inf(q, b):
+    return {'texto': agente.informe(q.get('desde'))}
+
+
 # ---------- hilo de fondo ----------
 
 
@@ -386,6 +428,9 @@ def preparar():
         for i, s in enumerate(VIGILANCIA_INICIAL):
             db.ex('INSERT OR IGNORE INTO vigilancia(simbolo,anadido) VALUES(?,?)', (s, i))
         db.poner_ajuste('vigilancia_iniciada', True)
+    agente.preparar()
+    if (agente.estado() or {}).get('activo'):
+        agente.arrancar_hilo()  # el reto sigue tras un reinicio
     if not db.q('SELECT 1 FROM cuentas LIMIT 1'):
         c = motor.crear_cuenta('Principal', 10000, 'USD')
         db.poner_ajuste('cuenta_defecto', c['id'])
