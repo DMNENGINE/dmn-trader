@@ -390,6 +390,13 @@ def r_piloto_cfg(q, b):
     return piloto.poner_cfg(b or {})
 
 
+@ruta('POST', '/api/futuros/config')
+def r_futuros_cfg(q, b):
+    """Futuros (NinjaTrader): activo, real_activo, cuenta_real, real_perdida_dia, qty, cerrar_todo. Llega al PC en ≤1 min."""
+    from . import piloto_fut
+    return piloto_fut.poner_cfg(b or {})
+
+
 # ---------- hilo de fondo ----------
 
 

@@ -7,13 +7,14 @@
   Además la cuenta tiene que estar en `cuentas_orden` de Documents/NinjaTrader 8/dmn/puente.json (el AddOn rechaza las demás).
 Toda entrada lleva stop y objetivo (OCO) que pone el AddOn al llenarse; el piloto cierra por tiempo al pasar el `hold`."""
 import json, os, threading, time, urllib.request
-import numpy as np
-from . import conciencia, db, fabrica_fut as ff
+from . import db
 
 PUENTE = os.environ.get('DMN_NT_PUENTE', 'http://localhost:36990')
 TOKEN = os.path.join(os.path.expanduser('~'), 'Documents', 'NinjaTrader 8', 'dmn', 'token.txt')
 EST = 'piloto_fut'
-DEFECTO = {'activo': True, 'cuenta_sim': 'Sim101', 'cuenta_real': None, 'real_perdida_dia': 20.0, 'qty': 1, 'cada': 60}
+DEFECTO = {'activo': True, 'cuenta_sim': 'Sim101', 'cuenta_real': None, 'real_activo': False, 'real_perdida_dia': 20.0, 'qty': 1, 'cada': 60,
+           'cambiado': 0, 'cerrar_todo': 0}
+# se controla desde el panel (en la Pi o en el PC): la configuración más reciente gana (real.py la sincroniza con el nodo)
 _hilo = {'t': None}
 
 
@@ -42,9 +43,17 @@ def cfg():
 
 
 def poner_cfg(c):
-    nuevo = {**cfg(), **{k: v for k, v in c.items() if k in DEFECTO}}
+    nuevo = {**cfg(), **{k: v for k, v in (c or {}).items() if k in DEFECTO and k not in ('cambiado', 'cada')}}
+    nuevo['real_perdida_dia'] = max(0.0, min(float(nuevo['real_perdida_dia']), 500.0))
+    nuevo['qty'] = max(1, min(int(nuevo['qty']), 2))
+    nuevo['cambiado'] = int(time.time())
     db.poner_ajuste(EST + '_cfg', nuevo)
     return nuevo
+
+
+def cfg_mas_nueva(otra):
+    if isinstance(otra, dict) and otra.get('cambiado', 0) > cfg().get('cambiado', 0):
+        db.poner_ajuste(EST + '_cfg', otra)
 
 
 def _est():
@@ -56,6 +65,7 @@ def _log(e, txt):
 
 
 def estado():
+    from . import fabrica_fut as ff
     try:
         res = ff.resumen()
     except Exception:
@@ -66,6 +76,8 @@ def estado():
 def _barras(s):
     """Velas de 5 min en tiempo real del puente. NinjaTrader marca la vela con su hora de CIERRE: se pasa a hora de apertura
     y se quita la que aún se está formando."""
+    import numpy as np
+    from . import fabrica_fut as ff
     d = puente('/barras?inst=' + urllib.request.quote(ff.FUT[s]['nt']) + '&min=5&dias=4')
     ahora = time.time()
     v = [x for x in d['velas'] if x[0] <= ahora]
@@ -81,6 +93,7 @@ def _pnl_hoy(e):
 
 
 def paso():
+    from . import conciencia, fabrica_fut as ff
     c, e = cfg(), _est()
     try:
         est = puente('/estado')
@@ -96,6 +109,14 @@ def paso():
     e['permitidas'] = est.get('permitidas')
     ab = e.setdefault('abiertas', {})
     libro = None
+    if c.get('cerrar_todo', 0) > e.get('cerrar_hecho', 0):
+        e['cerrar_hecho'] = c['cerrar_todo']
+        for o in ab.values():
+            try:
+                puente('/cerrar', {'cuenta': o['cuenta'], 'inst': o['nt']})
+            except SinPuente as ex:
+                _log(e, f"⚠️ No pude cerrar {o['nt']}: {ex}")
+        _log(e, f'🧹 Cerrar todo (desde el panel): {len(ab)} posiciones')
     # 1) cierres: la posición ya no está (stop/objetivo) o se pasó del tiempo
     for k, o in list(ab.items()):
         cu = cuentas.get(o['cuenta'])
@@ -150,7 +171,7 @@ def paso():
     candidatas = ff._candidatas()
     promovidas = ff.promovidas()
     planes = [(c['cuenta_sim'], False, candidatas)]
-    if c.get('cuenta_real'):
+    if c.get('cuenta_real') and c.get('real_activo'):
         if _pnl_hoy(e) <= -c['real_perdida_dia']:
             if e.get('freno') != time.strftime('%Y-%m-%d'):
                 e['freno'] = time.strftime('%Y-%m-%d')
@@ -198,6 +219,7 @@ def _bucle():
 
 
 def arrancar():
+    from . import fabrica_fut as ff
     ff.arrancar()
     if not (_hilo['t'] and _hilo['t'].is_alive()):
         _hilo['t'] = threading.Thread(target=_bucle, daemon=True)

@@ -228,12 +228,13 @@ def _cfg_mas_nueva(otra):
 
 def recibir(snap):
     """En la central: guarda la foto que manda el nodo con la key y le devuelve la configuración del piloto."""
-    from . import piloto
+    from . import piloto, piloto_fut
     if isinstance(snap, dict) and snap.get('ts'):
         snap['recibido'] = int(time.time())
         _cfg_mas_nueva((snap.get('piloto') or {}).get('cfg'))
+        piloto_fut.cfg_mas_nueva(((snap.get('piloto') or {}).get('futuros') or {}).get('cfg'))
         db.poner_ajuste(CLAVE, snap)
-    return {'ok': True, 'piloto_cfg': piloto.cfg()}
+    return {'ok': True, 'piloto_cfg': piloto.cfg(), 'fut_cfg': piloto_fut.cfg()}
 
 
 def estado():
@@ -253,6 +254,8 @@ def _enviar(snap):
     try:
         r = json.loads(urllib.request.urlopen(req, timeout=10).read() or b'{}')
         _cfg_mas_nueva(r.get('piloto_cfg'))
+        from . import piloto_fut
+        piloto_fut.cfg_mas_nueva(r.get('fut_cfg'))
     except Exception:
         pass
 

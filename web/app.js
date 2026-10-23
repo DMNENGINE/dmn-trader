@@ -464,16 +464,38 @@ async function cargarPiloto() {
     + `<div class="tenue chico" style="margin-top:4px">${(C.eventos || []).map(e => `${fecha(e.ts)} · ${{ ronda: '🔁', record: '🏅', promocion: '💰', real: '💸', diario: '📔' }[e.tipo] || '•'} ${esc(e.titulo)}${e.apolo && e.apolo !== 'pendiente' ? ' 🧩' : ''}`).join('<br>')}</div>`
     : '<div class="tenue chico">Solo en el PC.</div>';
   const U = p.futuros, FF = U && U.fabrica, usd = x => x && x.n ? `${x.n} · ${sg(x.medio, 1)} $ · ${x.gana_pct} % gana` : '—';
-  $('#piFut').innerHTML = U ? (U.error ? `<div class="re-bot" style="border-left-color:var(--rojo)">⚠️ ${esc(U.error)}</div>` : '')
+  if (U && U.cfg && document.activeElement?.closest?.('#fuCuenta,#fuFreno,#fuQty') == null) {
+    const fc = U.cfg, reales = (U.cuentas || []).filter(x => !x.simulada).map(x => x.nombre);
+    if (fc.cuenta_real && !reales.includes(fc.cuenta_real)) reales.push(fc.cuenta_real);
+    $('#fuCuenta').innerHTML = '<option value="">— ninguna —</option>' + reales.map(x => `<option ${x === fc.cuenta_real ? 'selected' : ''}>${esc(x)}</option>`).join('');
+    $('#fuSim').checked = !!fc.activo; $('#fuFreno').value = fc.real_perdida_dia; $('#fuQty').value = fc.qty;
+  }
+  const fcfg = (U && U.cfg) || {}, autorizada = fcfg.cuenta_real && (U.permitidas || []).includes(fcfg.cuenta_real);
+  const estadoReal = !fcfg.cuenta_real ? 'cuenta real: ninguna elegida (conéctala en NinjaTrader)' : !fcfg.real_activo ? `cuenta real ${esc(fcfg.cuenta_real)}: <b>parada</b>`
+    : !autorizada ? `⚠️ ${esc(fcfg.cuenta_real)} activada aquí pero falta autorizarla en puente.json del PC` : `💵 <b>${esc(fcfg.cuenta_real)} ACTIVA</b> · freno ${fcfg.real_perdida_dia} $/día · ${fcfg.qty} contrato(s)`;
+  $('#piFut').innerHTML = (U ? `<div class="chico" style="margin-bottom:4px">${fcfg.activo ? '🧪 Sim operando' : '⏸️ Futuros parados'} · ${estadoReal}</div>` : '') + (U ? (U.error ? `<div class="re-bot" style="border-left-color:var(--rojo)">⚠️ ${esc(U.error)}</div>` : '')
     + `<div class="chico">${(U.cuentas || []).filter(c => c.conectada).map(c => `<b>${esc(c.nombre)}</b> ${c.simulada ? '(sim)' : '<b>(REAL)</b>'}: ${n(c.saldo, 2)} $ · realizado ${sg(c.realizado, 2)} $`).join(' · ') || 'NinjaTrader sin cuentas conectadas'}</div>`
     + `<div class="chico">Abiertas: ${Object.values(U.abiertas || {}).map(o => `${o.real ? '💵' : '🧪'} ${esc(o.nt)} ${o.lado === 1 ? 'largo' : 'corto'} («${esc(o.estrategia)}»)`).join(' · ') || 'ninguna'}</div>`
     + (FF && FF.manuales ? `<div class="tenue chico" style="margin-top:6px">${FF.muestras} muestras · ${esc(FF.msg || '')} · resultados en $ por contrato, con costes</div>`
       + `<div class="re-bot" style="margin-top:6px;border-left-color:var(--verde)">💰 <b>A la cuenta real</b> (en vivo ≥ ${FF.promo.vivo_n} ops, ≥ +${FF.promo.vivo_usd} $/op, ≥ ${FF.promo.vivo_gana} % ganadoras): ${(FF.promovidas || []).length ? FF.promovidas.map(x => `<b>${esc(x.nombre || x.id)}</b> (${usd(x.vivo)})`).join(' · ') : '<span class="tenue">ninguna todavía</span>'}</div>`
       + tabla([['Estrategia', x => `<b>${esc(x.nombre || x.id)}</b><div class="tenue chico">${esc(x.regla)}</div>`], ['Entreno', x => usd(x.entreno)], ['Validación', x => usd(x.prueba)], ['En vivo', x => usd(x.vivo)]], (FF.manuales || []).concat(FF.salon || []), '') : '')
     + `<pre class="chico" style="max-height:160px;overflow:auto;margin-top:6px">${esc((U.log || []).slice().reverse().map(([t, l]) => `${fecha(t)}  ${l}`).join(String.fromCharCode(10)))}</pre>`
-    : '<div class="tenue chico">Solo en el PC.</div>';
+    : '<div class="tenue chico">Solo en el PC.</div>');
   $('#piLog').textContent = (p.log || []).slice().reverse().map(([t, l]) => `${fecha(t)}  ${l}`).join('\n');
 }
+async function guardarFuturos(extra = {}) {
+  try {
+    await api('/futuros/config', 'POST', { activo: $('#fuSim').checked, cuenta_real: $('#fuCuenta').value || null, real_perdida_dia: +$('#fuFreno').value, qty: +$('#fuQty').value, ...extra });
+    toast('Futuros: guardado (llega al PC en menos de 1 min)'); cargarPiloto();
+  } catch (e) { toast(e.message); }
+}
+$('#fuGuardar').onclick = () => guardarFuturos();
+$('#fuSim').onchange = () => guardarFuturos();
+$('#fuRealOn').onclick = () => { if (!$('#fuCuenta').value) return toast('Elige primero la cuenta real');
+  if (confirm(`¿Activar futuros con DINERO REAL en ${$('#fuCuenta').value}?
+Solo estrategias que ya ganaron en vivo, ${$('#fuQty').value} contrato(s), se para el día que pierda ${$('#fuFreno').value} $.`)) guardarFuturos({ real_activo: true }); };
+$('#fuRealOff').onclick = () => guardarFuturos({ real_activo: false });
+$('#fuCerrar').onclick = () => { if (confirm('¿Cerrar TODAS las posiciones de futuros (Sim y real) ahora?')) guardarFuturos({ cerrar_todo: Math.floor(Date.now() / 1000) }); };
 async function guardarPiloto(extra = {}) {
   try {
     await api('/piloto/config', 'POST', { por_op_sol: +$('#piPorOp').value, perdida_max_sol: +$('#piPerd').value, max_ops_dia: +$('#piOps').value, umbral: +$('#piUmbral').value, ...extra });

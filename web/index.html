@@ -116,7 +116,13 @@
     <details style="margin-top:6px"><summary class="chico">🧪 Laboratorio de modelos (qué IA acierta más)</summary><div id="piLab"></div></details>
     <details style="margin-top:6px" open><summary class="chico">🏭 Fábrica de estrategias (simulado: manuales + generador evolutivo)</summary><div id="piFab"></div></details>
     <details style="margin-top:6px" open><summary class="chico">🧠 Conciencia del trader (línea de progreso; los hitos van a la memoria de APOLO)</summary><div id="piCon"></div></details>
-    <details style="margin-top:6px" open><summary class="chico">📈 Futuros con NinjaTrader (micros de CME: Sim101 prueba todo; la real solo lo promovido, freno −20 $/día)</summary><div id="piFut"></div></details>
+    <details style="margin-top:6px" open><summary class="chico">📈 Futuros con NinjaTrader (micros de CME: Sim101 prueba todo; la real solo lo promovido, freno −20 $/día)</summary><div class="fila" style="flex-wrap:wrap;gap:8px;align-items:end;margin:6px 0">
+        <label class="chico"><input id="fuSim" type="checkbox"> Sim operando</label>
+        <label class="chico">Cuenta real<br><select id="fuCuenta" style="min-width:120px"><option value="">— ninguna —</option></select></label>
+        <label class="chico">Freno real ($/día)<br><input id="fuFreno" type="number" step="5" min="5" max="500" style="width:80px"></label>
+        <label class="chico">Contratos real<br><input id="fuQty" type="number" step="1" min="1" max="2" style="width:60px"></label>
+        <button id="fuGuardar">Guardar</button><button id="fuRealOn" class="verde">💵 Activar real</button><button id="fuRealOff" class="rojo">⏹ Parar real</button><button id="fuCerrar" class="rojo">🧹 Cerrar todo</button>
+      </div><div id="piFut"></div></details>
     <div class="cab chico" style="margin-top:8px">Historial del piloto</div><div id="piOps2"></div>
     <pre id="piLog" class="chico" style="max-height:180px;overflow:auto"></pre></div>
   <div class="panel"><div class="cab">🤖 Qué está haciendo el bot ahora</div><div id="reBot"></div></div>
