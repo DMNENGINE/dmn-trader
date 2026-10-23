@@ -3,7 +3,7 @@ Cada agente: opera con su genoma → autopsia de cada pérdida con su arreglo �
 El enjambre: comparte lo que aprende (símbolos/horas que pierden para todos), evoluciona cada 2 h (el 20 % peor se reemplaza por hijos
 del 10 % mejor) y, si hay varios equipos (Pi = central, PC = nodo), intercambia los mejores genomas cada 30 min (modelo de islas)."""
 import bisect, copy, json, math, os, random, socket, statistics, sys, threading, time, traceback
-from . import analista, flujo, ia, sentimiento, datos, db, indicadores as ind, motor
+from . import analista, flujo, ia, onchain, sentimiento, datos, db, indicadores as ind, motor
 
 ESQUEMA = """
 CREATE TABLE IF NOT EXISTS ag_agentes (id INTEGER PRIMARY KEY, nombre TEXT, cuenta_id INTEGER, genoma TEXT, generacion INTEGER DEFAULT 0,
@@ -30,7 +30,11 @@ GENOMA_BASE = {'marco': '1m', 'estrategia': 'ema_cruce', 'p': dict(ESTRATEGIAS['
                'cortos': True, 'horas_bloqueadas': [], 'simbolos_bloqueados': [],
                'entrada': 'limite', 'retroceso': 0.3, 'espera': 3, 'tramos': 1,
                'enfriar': 2, 'guardia': 3, 'roi_min': None, 'trail_r': 0.0, 'trail_frac': 0.8, 'filtro_ia': 0.0, 'noticias': 0,
-               'parcial_r': 1.0, 'parcial_frac': 0.5, 'sin_avance': 0, 'regimen': 1, 'confirmar_1h': 0, 'flujo': 0, 'veto_llm': 0}
+               'parcial_r': 1.0, 'parcial_frac': 0.5, 'sin_avance': 0, 'regimen': 1, 'confirmar_1h': 0, 'flujo': 0, 'veto_llm': 0,
+               'onchain': 0, 'smart_money': 0}
+# onchain = 1: especialista en memecoins de Solana (datos de GMGN, solo en el equipo con la key): opera SOLO esos tokens, solo en largo
+#   (en un DEX no hay cortos) y paga costes de DEX (1 % por lado + 0,6 % de spread). smart_money = 1: no compra un token que las
+#   wallets smart money estén vendiendo en la última hora.
 # parcial_r: en +parcial_r R cierra parcial_frac de la posición y sube el stop a la entrada (no devolver lo ganado); 0 = no.
 # sin_avance: si en N velas no ha ido ni +0,3R a favor, cierra (stop por tiempo); 0 = no.
 # regimen = 1: los sistemas de tendencia solo operan con ADX ≥ 20, los de rango con ADX ≤ 25 y nadie con volatilidad disparada.
@@ -157,7 +161,7 @@ def _senales(g, v, v1h=None):
 
 
 def coste_pct(cfg, spread_pct=0.0, tipo=None):
-    com = (cfg.get('comision_por_tipo') or {}).get(tipo or '', cfg['comision_pct'])
+    com = (cfg.get('comision_por_tipo') or {}).get(tipo or '', onchain.COMISION_PCT if tipo == 'ONCHAIN' else cfg['comision_pct'])
     return 2 * (com + cfg['deslizamiento_pct']) + spread_pct
 
 
@@ -322,9 +326,20 @@ def _mutar(g, rnd, fuerte=False):
     g['parcial_frac'] = round(min(max(g.get('parcial_frac', 0.5) * rnd.uniform(1 - f, 1 + f), 0.25), 0.75), 2)
     if rnd.random() < 0.1:
         g['sin_avance'] = rnd.choice([0, 0, 4, 6, 10])
-    for k, pr in (('regimen', 0.1), ('confirmar_1h', 0.12), ('flujo', 0.12), ('veto_llm', 0.08)):
+    for k, pr in (('regimen', 0.1), ('confirmar_1h', 0.12), ('flujo', 0.12), ('veto_llm', 0.08), ('smart_money', 0.12)):
         if rnd.random() < pr:
             g[k] = 0 if g.get(k) else 1
+    if onchain.disponible() and rnd.random() < 0.03:
+        g = a_onchain(g, rnd) if not g.get('onchain') else dict(g, onchain=0)
+    return g
+
+
+def a_onchain(g, rnd):
+    """Convierte un genoma en especialista on-chain: memes en 5m/15m, solo largos, con más volatilidad permitida."""
+    g = dict(g, onchain=1, cortos=False, vol_max_pct=max(g.get('vol_max_pct', 3.0), 12.0))
+    if g.get('marco') == '1m':
+        g['marco'] = rnd.choice(['5m', '15m'])
+    g['smart_money'] = rnd.choice([0, 1])
     return g
 
 
@@ -407,6 +422,9 @@ def genoma_inicial(i, rnd):
     g['regimen'] = rnd.choice([1, 1, 0])
     g['confirmar_1h'], g['flujo'] = rnd.choice([0, 1]), rnd.choice([0, 1])
     g['veto_llm'] = rnd.choice([0, 0, 0, 1])
+    g['smart_money'] = 0
+    if onchain.disponible() and i % 5 == 4:  # 1 de cada 5: especialista en memecoins
+        g = a_onchain(g, rnd)
     return g
 
 
@@ -539,7 +557,11 @@ def _bucle_():
 
 
 def _universo(e, g=None):
-    sims = []
+    oc = ((e.get('universo') or {}).get('onchain') or []) if onchain.disponible() else []
+    if g is not None and g.get('onchain'):  # especialista: solo memes
+        bloq = set(e.get('bloqueos', {}).get('simbolos', [])) | set(g.get('simbolos_bloqueados', []))
+        return [s for s in oc if s not in bloq]
+    sims = [] if g is not None else list(oc)
     if 'cripto' in e['mercados']:
         sims += (e.get('universo') or {}).get('cripto') or CRIPTO
     if 'acciones' in e['mercados']:
@@ -574,6 +596,52 @@ def _refrescar_universo(e):
     guardar(e2)
     log('🌐 mercados cripto por volumen: ' + ', '.join(x.replace('-USD', '') for x in elegidas))
     return e
+
+
+def _refrescar_onchain(e):
+    """Cada 15 min: memecoins en tendencia que pasan el filtro anti-rug (trader/onchain.py)."""
+    u = e.get('universo') or {}
+    if not onchain.disponible() or time.time() - u.get('onchain_ts', 0) < onchain.CADA:
+        return e
+    e2 = estado()
+    u2 = e2.get('universo') or {}
+    u2['onchain_ts'] = int(time.time())
+    try:
+        sims, det, rech = onchain.universo()
+    except Exception as err:
+        log(f'on-chain: {err}')
+        e2['universo'] = e['universo'] = u2
+        guardar(e2)
+        return e
+    if sims:
+        u2.update(onchain=sims, onchain_det=det, onchain_rech=rech)
+    e2['universo'] = e['universo'] = u2
+    guardar(e2)
+    log('🪙 ' + onchain.resumen(det, rech))
+    return e
+
+
+_SMART = {'ts': 0}
+
+
+def _smart():
+    try:
+        onchain.actualizar_smart()
+    except Exception as err:
+        log(f'smart money: {err}')
+
+
+def _migrar_onchain(e):
+    """Una vez, en el equipo con GMGN: el 20 % de los agentes pasa a especialista en memecoins (la evolución dirá si sirven)."""
+    rnd = random.Random()
+    vivos = [a for a in agentes() if not _llm(a)]
+    for a in rnd.sample(vivos, len(vivos) // 5):
+        _nuevo_intento(e, a, a_onchain(_g(a), rnd), 'especialista en memecoins (GMGN)')
+    e = estado()
+    e['onchain_v1'] = 1
+    guardar(e)
+    _leccion(None, None, None, 'evolucion', f'On-chain: {len(vivos) // 5} agentes pasan a operar memecoins de Solana con datos de GMGN '
+             '(filtro anti-rug, solo largos, costes de DEX de 1 % por lado + 0,6 % de spread; la mitad, además, sin comprar lo que vende el smart money).', {})
 
 
 def _jefe(e):
@@ -707,6 +775,14 @@ def paso_enjambre(e):
         _migrar_v2(e)
         e = estado()
     e = _refrescar_universo(e)
+    if onchain.disponible():
+        e = _refrescar_onchain(e)
+        if not e.get('onchain_v1') and (e.get('universo') or {}).get('onchain'):
+            _migrar_onchain(e)
+            e = estado()
+        if time.time() - _SMART['ts'] > 60:
+            _SMART['ts'] = time.time()
+            threading.Thread(target=_smart, daemon=True).start()
     vivos = agentes()
     marcos = {_g(a).get('marco', '1m') for a in vivos} or {'5m'}
     ctx = contexto(e, marcos)
@@ -940,7 +1016,9 @@ def paso_agente(e, a, ctx):
         if not s[-1] or not atr[-1]:
             continue
         q, d = ctx['q'][sim], s[-1]
-        if sim.endswith('-USD') and dirs.count(d) >= MAX_CORR:  # ya hay 2 apuestas cripto iguales: la tercera sería la misma apuesta
+        if onchain.es(sim) and d < 0:  # en un DEX solo se puede comprar
+            continue
+        if (sim.endswith('-USD') or onchain.es(sim)) and dirs.count(d) >= MAX_CORR:  # ya hay 2 apuestas cripto iguales: la tercera sería la misma apuesta
             continue
         lim = g['entrada'] == 'limite'
         coste, spread = ctx['coste'][sim]
@@ -962,11 +1040,14 @@ def paso_agente(e, a, ctx):
         sl, tp = p - d * dist, p + d * g['rr'] * dist
         rasgos = {'atr_pct': round(atr[-1] / p * 100, 4), 'tendencia': tend[-1], 'hora': hora, 'spread_pct': round(spread, 4),
                   'coste_pct': round(coste, 4), 'precio': p, 'dist': dist, 'entrada': g['entrada'], 'tramos': len(fr),
-                  'adx': round(ad[-1], 1) if ad[-1] else None, **sentimiento.rasgos(sim, sent), **flujo.rasgos(sim)}
+                  'adx': round(ad[-1], 1) if ad[-1] else None, **sentimiento.rasgos(sim, sent), **flujo.rasgos(sim), **onchain.rasgos(sim)}
         if g.get('noticias') and (rasgos.get('sent', 0) * d <= -0.4 or rasgos.get('evento')):  # el analista avisa: noticias en contra o evento macro
             db.ex('UPDATE ag_agentes SET descartes=descartes+1 WHERE id=?', (a['id'],))
             continue
         if g.get('flujo') and flujo.en_contra(rasgos, d):  # el libro empuja en contra o todo el mundo ya está en ese lado
+            db.ex('UPDATE ag_agentes SET descartes=descartes+1 WHERE id=?', (a['id'],))
+            continue
+        if g.get('smart_money') and onchain.en_contra(rasgos, d):  # las wallets listas están vendiendo este meme
             db.ex('UPDATE ag_agentes SET descartes=descartes+1 WHERE id=?', (a['id'],))
             continue
         if g.get('filtro_ia'):  # el modelo del enjambre opina: si ve pocas opciones de ganar, no entra
@@ -985,7 +1066,7 @@ def paso_agente(e, a, ctx):
             _poner(a['id'], ultimo=f"⚖ {sim}: esperando al comité de veto")
         elif _enviar_entrada(a, info):
             esperando.add(sim)
-        if sim.endswith('-USD') and sim in esperando:
+        if (sim.endswith('-USD') or onchain.es(sim)) and sim in esperando:
             dirs.append(d)
         if len(motor.posiciones(cid, False)) + len(esperando) >= CUENTA_CFG['max_posiciones']:
             break
@@ -1193,7 +1274,7 @@ def _cruce(g1, g2, rnd):
     h = copy.deepcopy(g1)
     for k in ('stop_atr', 'rr', 'filtro_tendencia', 'riesgo_pct', 'max_barras', 'be_en_r', 'min_ventaja', 'marco', 'entrada', 'retroceso', 'tramos',
               'enfriar', 'guardia', 'roi_min', 'trail_r', 'trail_frac', 'filtro_ia', 'noticias', 'parcial_r', 'parcial_frac', 'sin_avance',
-              'regimen', 'confirmar_1h', 'flujo', 'veto_llm'):
+              'regimen', 'confirmar_1h', 'flujo', 'veto_llm', 'smart_money'):
         if rnd.random() < 0.5:
             h[k] = copy.deepcopy(g2.get(k, GENOMA_BASE[k]))
     return h
@@ -1385,6 +1466,8 @@ def recibir_migrantes(migs, de):
     for m, (f, a) in zip(migs, vivos):
         if f is not None and m.get('aptitud') is not None and f >= m['aptitud']:
             continue
+        if m['genoma'].get('onchain') and not onchain.disponible():  # aquí no hay datos de GMGN: el especialista no podría operar
+            continue
         _poner(a['id'], nombre=_nombre(a['id']), genoma_desde=int(time.time()), descartes=0, descartes_ref=0, generacion=(a['generacion'] or 0) + 1)
         _nuevo_intento(e, db.uno('SELECT * FROM ag_agentes WHERE id=?', (a['id'],)), m['genoma'], f"migrante de {de} ({m.get('nombre')})")
         _leccion(a['id'], None, None, 'migracion', f"Llega de {de} el sistema de {m.get('nombre')} ({m.get('aptitud', 0):+.2f}R) y sustituye a {a['nombre']}.", {})
@@ -1473,13 +1556,21 @@ def _resumen_jefe():
 def _resumen_mejoras(tr):
     """Cómo van los genes nuevos: R medio con y sin cada uno (en las operaciones de la sesión)."""
     out = []
-    for k, nombre in (('confirmar_1h', 'confirmación 1 h'), ('flujo', 'flujo'), ('veto_llm', 'veto'), ('regimen', 'régimen'), ('sin_avance', 'stop por tiempo')):
+    for k, nombre in (('confirmar_1h', 'confirmación 1 h'), ('flujo', 'flujo'), ('veto_llm', 'veto'), ('regimen', 'régimen'), ('sin_avance', 'stop por tiempo'),
+                     ('onchain', 'memecoins'), ('smart_money', 'smart money')):
         si = [t['r'] for t in tr if json.loads(t['genoma']).get(k)]
         no = [t['r'] for t in tr if not json.loads(t['genoma']).get(k)]
         if len(si) >= 5 and len(no) >= 5:
             out.append(f"{nombre} {statistics.fmean(si):+.2f}R ({len(si)}) vs sin {statistics.fmean(no):+.2f}R")
     from . import escuadron
     return 'Genes nuevos: ' + (', '.join(out) or 'aún sin datos suficientes') + '. ' + escuadron.resumen_veto()
+
+
+def _resumen_onchain():
+    if not onchain.disponible():
+        return 'On-chain: sin GMGN en este equipo.'
+    u = (estado() or {}).get('universo') or {}
+    return onchain.resumen(u.get('onchain_det'), u.get('onchain_rech'))
 
 
 def _resumen_alpaca():
@@ -1519,6 +1610,7 @@ def informe(desde=None):
         _resumen_mejoras(tr),
         flujo.resumen(),
         sentimiento.resumen(),
+        _resumen_onchain(),
         analista.resumen(),
         _resumen_jefe(),
         _resumen_alpaca(),

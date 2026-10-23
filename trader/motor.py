@@ -4,7 +4,7 @@ Gestión de riesgo: % de riesgo por operación, pérdida diaria máxima (bloquea
 apalancamiento, stop obligatorio opcional. Cada operación cerrada queda en el diario con su R, MFE/MAE y notas.
 Cuentas "replay": practicar sobre velas históricas avanzando vela a vela, sin ver el futuro."""
 import json, threading, time, uuid
-from . import datos, db, metricas
+from . import datos, db, metricas, onchain
 
 _cerrojos, _cerrojo_g = {}, threading.Lock()
 
@@ -418,7 +418,7 @@ def _llenar(c, o, px, ts, moneda, tipo_activo=None):
         if abs(q) >= abs(actual) - EPS:
             q = -actual
     fx = _fx(c, moneda or (p or {}).get('moneda'))
-    pct = (cfg.get('comision_por_tipo') or {}).get(tipo_activo or '', cfg['comision_pct'])
+    pct = (cfg.get('comision_por_tipo') or {}).get(tipo_activo or '', onchain.COMISION_PCT if tipo_activo == 'ONCHAIN' else cfg['comision_pct'])
     com = cfg['comision_fija'] + abs(q) * px * fx * pct / 100
     db.ex('UPDATE cuentas SET efectivo=efectivo-? WHERE id=?', (q * px * fx + com, cid))
     pnl = 0.0

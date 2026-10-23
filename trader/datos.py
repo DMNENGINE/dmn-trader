@@ -2,6 +2,7 @@
 Cubre acciones, ETF, índices (^GSPC), divisas (EURUSD=X), cripto (BTC-USD), futuros (GC=F) y materias primas.
 Todo se cachea en memoria para no martillear a Yahoo (cotización 8 s, velas según intervalo)."""
 import json, time, threading, urllib.request, urllib.parse, urllib.error
+from . import onchain
 
 UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) DMN-Trader/1.0'
 BASES = ['https://query1.finance.yahoo.com', 'https://query2.finance.yahoo.com']
@@ -115,6 +116,11 @@ def _velas_cb(simbolo, intervalo):
 def cotizacion(simbolo):
     """Último precio y contexto. Devuelve dict con precio, cambio %, máximos/mínimos, moneda, tipo, abierto…"""
     simbolo = simbolo.strip().upper()
+    if onchain.es(simbolo):  # memecoins de Solana (GMGN)
+        try:
+            return onchain.cotizacion(simbolo)
+        except onchain.ErrorOnchain as e:
+            raise ErrorDatos(str(e))
     if es_coinbase(simbolo):
         try:
             return _cacheado(('qcb', simbolo), 3, lambda: _cotizacion_cb(simbolo))
@@ -147,6 +153,11 @@ def velas(simbolo, intervalo='1d', rango=None, inicio=None, fin=None):
     simbolo = simbolo.strip().upper()
     if intervalo == '1h':
         intervalo = '60m'
+    if onchain.es(simbolo):
+        try:
+            return onchain.velas(simbolo, intervalo, rango, inicio, fin)
+        except onchain.ErrorOnchain as e:
+            raise ErrorDatos(str(e))
     if intervalo in ('1m', '5m', '15m', '60m') and not (rango or inicio) and es_coinbase(simbolo):
         try:  # intradía de cripto: Coinbase (300 velas, al segundo)
             return _cacheado(('vcb', simbolo, intervalo), 15, lambda: _velas_cb(simbolo, intervalo))
