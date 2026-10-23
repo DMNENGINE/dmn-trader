@@ -37,7 +37,12 @@ def poner_cfg(nuevo):
 
 
 def estado():
-    return {**(db.ajuste(EST) or {}), 'cfg': cfg()}
+    from . import laboratorio_ia
+    try:
+        lab = laboratorio_ia.informe() if _hilo['t'] else None
+    except Exception:
+        lab = None
+    return {**(db.ajuste(EST) or {}), 'cfg': cfg(), 'lab': lab}
 
 
 def _est():
@@ -326,7 +331,8 @@ def _seguir(e, c):
         op = {**o, 'cerrada': int(time.time()), 'resultado': res, 'pnl_sol': round(pnl, 6)}
         e['ops'] = (e.get('ops') or [])[-199:] + [op]
         e['orden'] = None
-        if res == 'sl' or (res in ('salida', 'cerrada') and pnl < 0):
+        # el saldo incluye ≈0,002 SOL de alquiler de la cuenta del token (recuperable al cerrarla): para contar stops manda el precio
+        if res == 'sl' or (res in ('salida', 'cerrada') and (o['pnl_pct'] if o.get('pnl_pct') is not None else pnl) < 0):
             e['stops_seguidos'] = e.get('stops_seguidos', 0) + 1
             e.setdefault('enfriar', {})[o['token']] = int(time.time()) + c['enfriar_token_h'] * 3600
         elif res == 'tp':
@@ -418,4 +424,6 @@ def arrancar():
     if real.disponible() and not (_hilo['t'] and _hilo['t'].is_alive()):
         _hilo['t'] = threading.Thread(target=_bucle, daemon=True)
         _hilo['t'].start()
+        from . import laboratorio_ia
+        laboratorio_ia.arrancar()
     return bool(_hilo['t'])

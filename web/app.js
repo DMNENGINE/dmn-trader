@@ -442,6 +442,10 @@ async function cargarPiloto() {
     (p.ultimo_scan || {}).top || [], 'Aún no ha escaneado.') + (p.ultimo_scan ? `<div class="tenue chico">${fecha(p.ultimo_scan.ts)}</div>` : '');
   $('#piOps2').innerHTML = tabla([['Fecha', x => fecha(x.creada)], ['Token', x => esc(x.simbolo)], ['Resultado', x => ({ tp: '<span class="verde">TP</span>', sl: '<span class="rojo">SL</span>', no_entro: 'no entró', fallo_compra: '<span class="ambar">fallo compra</span>' })[x.resultado] || esc(x.resultado)], ['SOL', x => sg(x.pnl_sol, 4)]],
     (p.ops || []).slice().reverse().slice(0, 20), 'Sin operaciones todavía.');
+  const L = p.lab;
+  $('#piLab').innerHTML = L ? tabla([['Modelo', x => esc(x.modelo)], ['Preguntas', x => x.preguntas], ['Aprueba', x => n(x.aprueba_pct, 0) + ' %'], ['Acierto', x => n(x.acierto_pct, 0) + ' %'],
+    ['Resultado siguiéndolo', x => sg(x.resultado_siguiendolo_pct, 1) + ' %'], ['Por entrada', x => sg(x.medio_por_entrada_pct, 1) + ' %'], ['Tarda', x => n(x.ms_medio / 1000, 1) + ' s'], ['Errores', x => x.errores]],
+    L.modelos || [], 'Aún sin resultados: cada caso se evalúa 1 h después de preguntar.') + `<div class="tenue chico">Referencia (entrar en todo): ${sg(L.referencia_entrar_en_todo_pct, 1)} % en ${L.casos} casos · pendientes ${L.pendientes} · modelos: ${(L.instalados || []).map(esc).join(', ')}</div>` : '<div class="tenue chico">Solo en el PC.</div>';
   $('#piLog').textContent = (p.log || []).slice().reverse().map(([t, l]) => `${fecha(t)}  ${l}`).join('\n');
 }
 async function guardarPiloto(extra = {}) {

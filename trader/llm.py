@@ -25,13 +25,13 @@ def uso_hora():
         return len(_uso)
 
 
-def preguntar(texto, timeout=120, temperatura=0.0):
+def preguntar(texto, timeout=120, temperatura=0.0, modelo=None):
     """Devuelve el objeto JSON que conteste el modelo ({} si no contesta JSON)."""
     if uso_hora() >= MAX_HORA:
         raise SinCuota(f'tope de {MAX_HORA} consultas/hora al modelo')
     with _lock:
         _uso.append(time.time())
-    cuerpo = {'model': MODELO, 'stream': False, 'format': 'json', 'options': {'temperature': temperatura},
+    cuerpo = {'model': modelo or MODELO, 'stream': False, 'format': 'json', 'options': {'temperature': temperatura},
               'messages': [{'role': 'user', 'content': texto}]}
     req = urllib.request.Request(OLLAMA + '/api/chat', data=json.dumps(cuerpo).encode(), headers={'content-type': 'application/json'})
     with urllib.request.urlopen(req, timeout=timeout) as r:
