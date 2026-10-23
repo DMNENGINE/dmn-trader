@@ -374,6 +374,7 @@ async function cargarReal() {
     return `<div class="re-bot" style="border-left-color:var(--ambar)">Esperando para comprar <b>${esc(e.simbolo || e.token.slice(0, 6))}</b>${e.invertir_sol ? ` con ${n(e.invertir_sol, 3)} SOL` : ''}: compra si baja a <b>${np(b.precio)} $</b>.
       Después vende si sube un <span class="verde">${tp ? n(tp.pct, 0) : '—'} %</span> o si baja un <span class="rojo">${sl ? n(sl.pct, 0) : '—'} %</span>.${e.caduca ? `<span class="tenue chico"> Caduca en ${hace_(e.caduca - ahora)}.</span>` : ''}</div>`; }).join('');
   if (!P.length && !pend.length) $('#reBot').innerHTML = `<div class="tenue">El bot no vigila nada ahora. ${r.sol ? `Hay ${n(r.sol, 4)} SOL libres para la próxima operación.` : ''}</div>`;
+  velasReal(r, P, pend);
   $('#rePos').innerHTML = P.length ? P.map(p => {
     const lo = Math.min(p.sl || p.precio, p.precio, p.entrada || p.precio) * 0.99, hi = Math.max(p.tp || p.precio, p.precio, p.entrada || p.precio) * 1.01, x = v => ((v - lo) / (hi - lo) * 100).toFixed(1) + '%';
     return `<div class="re-pos"><div>${p.logo ? `<img src="${esc(p.logo)}" alt="">` : ''}<b>${esc(p.simbolo)}</b> <span class="tenue chico">${esc(p.nombre || '')}</span>
@@ -384,6 +385,37 @@ async function cargarReal() {
   $('#reAct').innerHTML = tabla([['Hora', a => fecha(a.ts)], ['Tipo', a => a.tipo === 'buy' ? '<span class="verde">compra</span>' : a.tipo === 'sell' ? '<span class="rojo">venta</span>' : esc(a.tipo)],
     ['Token', a => esc(a.simbolo) + (a.ruta && a.ruta.length ? ` <span class="tenue chico">vía ${a.ruta.map(esc).join(' → ')}</span>` : '')], ['Cantidad', a => n(a.cantidad, 2)], ['$', a => n(a.usd, 3)], ['Precio', a => np(a.precio)], ['Costes $', a => n((a.gas_usd || 0) + (a.dex_usd || 0), 3)],
     ['Tx', a => `<a href="https://solscan.io/tx/${esc(a.tx)}" target="_blank" rel="noopener">${esc((a.tx || '').slice(0, 8))}…</a>`]], r.actividad || [], 'Sin actividad.');
+}
+// gráfico de velas del token que se está operando (posición abierta, compra pendiente o, si no hay, el último operado)
+const GR = { tok: null };
+function velasReal(r, P, pend) {
+  const V = r.velas || {}, toks = Object.keys(V);
+  if (!toks.length) { $('#reVTok').innerHTML = '<span class="tenue chico">sin velas todavía</span>'; return; }
+  if (!toks.includes(GR.tok)) GR.tok = toks[0];
+  const nombre = tk => (P.find(p => p.token === tk) || {}).simbolo || (pend.find(e => e.token === tk) || {}).simbolo || ((r.actividad || []).find(a => a.token === tk) || {}).simbolo || tk.slice(0, 6);
+  $('#reVTok').innerHTML = toks.map(tk => `<button class="chico${tk === GR.tok ? ' activo' : ''}" data-tk="${esc(tk)}">${esc(nombre(tk))}</button>`).join(' ');
+  $('#reVTok').querySelectorAll('button').forEach(b => b.onclick = () => { GR.tok = b.dataset.tk; GR.ult = null; velasReal(r, P, pend); });
+  if (!GR.c) {
+    GR.c = LW.createChart($('#reChart'), { ...temaG, autoSize: true });
+    GR.s = GR.c.addCandlestickSeries({ upColor: '#22c55e', downColor: '#ef4444', borderVisible: false, wickUpColor: '#22c55e', wickDownColor: '#ef4444' });
+    GR.vol = GR.c.addHistogramSeries({ priceFormat: { type: 'volume' }, priceScaleId: 'vol', color: '#334155' });
+    GR.c.priceScale('vol').applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
+    GR.lineas = [];
+  }
+  const v = V[GR.tok], ult = v[v.length - 1], d = Math.min(12, pd(ult.c) + 1);
+  GR.s.applyOptions({ priceFormat: { type: 'price', precision: d, minMove: Math.pow(10, -d) } });
+  GR.s.setData(v.map(b => ({ time: b.t, open: b.o, high: b.h, low: b.l, close: b.c })));
+  GR.vol.setData(v.map(b => ({ time: b.t, value: b.v, color: b.c >= b.o ? '#22c55e44' : '#ef444444' })));
+  GR.lineas.forEach(l => GR.s.removePriceLine(l)); GR.lineas = [];
+  const linea = (price, color, title, lineStyle = 2) => price && GR.lineas.push(GR.s.createPriceLine({ price, color, title, lineStyle, lineWidth: 1, axisLabelVisible: true }));
+  const p = P.find(x => x.token === GR.tok), e = pend.find(x => x.token === GR.tok);
+  if (p) { linea(p.entrada, '#94a3b8', 'entrada', 0); linea(p.tp, '#22c55e', 'TP'); linea(p.sl, '#ef4444', 'SL'); }
+  if (e) { const c = t => e.condiciones.find(x => x.tipo.startsWith(t)); linea(c('buy')?.precio, '#f59e0b', 'compra si baja a'); }
+  const t0 = v[0].t;
+  GR.s.setMarkers((r.actividad || []).filter(a => a.token === GR.tok && a.ts >= t0).sort((a, b) => a.ts - b.ts).map(a => ({ time: a.ts - a.ts % 60,
+    position: a.tipo === 'buy' ? 'belowBar' : 'aboveBar', color: a.tipo === 'buy' ? '#22c55e' : '#ef4444', shape: a.tipo === 'buy' ? 'arrowUp' : 'arrowDown',
+    text: `${a.tipo === 'buy' ? 'compra' : 'venta'} ${n(a.usd, 2)} $` })));
+  if (GR.ult !== GR.tok) { GR.c.timeScale().fitContent(); GR.ult = GR.tok; }
 }
 setInterval(() => { if (!document.hidden && E.pag === 'real') cargarReal(); }, 5000);
 

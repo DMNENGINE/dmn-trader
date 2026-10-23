@@ -74,3 +74,4 @@ td button{padding:2px 7px;font-size:11px}
 .re-barra span{position:absolute;font-size:10px;white-space:nowrap;transform:translateX(-50%);color:var(--tenue)}
 .re-barra span.ar{top:-17px}.re-barra span.ab{top:13px}
 @media (max-width:700px){.re-pos{grid-template-columns:1fr}}
+#reVTok button{background:#1a2333;border:1px solid var(--borde);color:var(--tenue);border-radius:6px;padding:2px 8px;cursor:pointer}#reVTok button.activo{color:#fff;border-color:var(--verde)}

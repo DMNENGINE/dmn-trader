@@ -118,13 +118,35 @@ def foto():
                     'dist_tp': (tp / precio - 1) * 100 if tp and precio else None, 'dist_sl': (sl / precio - 1) * 100 if sl and precio else None,
                     'caduca': int(st['expire_time'] / 1000) if st and st.get('expire_time') else None})
     act = actividad(_ultimo['actividad'][:40])
+    vigila = [p['token'] for p in pos] + [o.get('base_token') for o in ords if o.get('status') in ('open', 'prepare')] + [x['token'] for x in act if x.get('token')][:1]
     return {'ts': int(ahora), 'wallet': w, 'sol': sol, 'sol_usd': sol_usd, 'posiciones': pos, 'actividad': act,
+            'velas': {tk: v for tk in list(dict.fromkeys(t for t in vigila if t))[:3] for v in [_velas(tk)] if v},
             'estrategias': [{'token': o.get('base_token'), 'simbolo': _simbolo(o.get('base_token')), 'estado': o.get('status'),
                              'creada': int(_f(o.get('create_time')) / 1000), 'caduca': int(_f(o.get('expire_time')) / 1000) or None,
                              'invertir_sol': _f(o.get('quote_investment')) / 1e9 or None,
                              'cerrada': int(_f(o.get('close_time')) / 1000) or None, 'condiciones': [
                                  {'tipo': c['order_type'], 'estado': c.get('status'), 'precio': _f(c.get('check_price')), 'pct': _f(c.get('price_scale'))}
                                  for c in o.get('condition_orders') or []]} for o in ords][:20]}
+
+
+_VELAS = {}
+
+
+def _velas(tk, res='1m'):
+    """Últimas 100 velas de 1 min del token (las que da GMGN en una petición), cacheadas 15 s; para el gráfico del panel."""
+    c = _VELAS.get(tk)
+    if c and time.time() - c[0] < onchain.TTL[res]:
+        return c[1]
+    fin = int(time.time())
+    try:
+        d = onchain._api('/v1/market/token_kline', chain='sol', address=tk, resolution=res, **{'from': (fin - 6000) * 1000, 'to': fin * 1000})
+        lista = ((d or {}).get('list') if isinstance(d, dict) else d) or []
+        v = sorted(({'t': int(x['time']) // 1000, 'o': _f(x['open']), 'h': _f(x['high']), 'l': _f(x['low']), 'c': _f(x['close']), 'v': _f(x.get('volume'))}
+                    for x in lista), key=lambda x: x['t'])
+    except Exception:
+        return c[1] if c else None
+    _VELAS[tk] = (time.time(), v)
+    return v
 
 
 _SIMB = {}
