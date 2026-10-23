@@ -387,9 +387,39 @@ async function cargarReal() {
 }
 setInterval(() => { if (!document.hidden && E.pag === 'real') cargarReal(); }, 5000);
 
+// ---------- Up/Down de Polymarket (simulado) ----------
+async function cargarUpdown() {
+  try {
+    const [m, inf] = await Promise.all([api('/updown'), api('/updown/informe')]);
+    const t = (x, y) => `<div class="tile"><small>${x}</small><b>${y}</b></div>`, pc = x => x == null ? '—' : n(x * 100, 1) + ' %';
+    $('#udEstado').innerHTML = m.activo ? `<span class="verde">● ${m.agentes} apostando</span>` : '<span class="tenue">○ parado</span>';
+    $('#udKpis').innerHTML = [t('Apostadores', m.agentes), t('Apuestas resueltas', m.apuestas), t('Abiertas', m.abiertas), t('Acierto', pc(m.acierto)),
+      t('Resultado', sg(m.pnl) + ' $'), t('Capital total', n(m.capital_total) + ' $'), t('Quiebras', m.quiebras)].join('');
+    $('#udInforme').textContent = inf.texto;
+    $('#udMerc').innerHTML = tabla([['Mercado', x => `<b>${x.activo}</b> ${x.marco}`], ['Inicio', x => np(x.K)], ['Ahora', x => np(x.S)], ['Δ', x => sg((x.S / x.K - 1) * 100, 3) + ' %'],
+      ['Modelo P(Up)', x => pc(x.p_up)], ['Up', x => x.up != null ? n(x.up, 2) : '—'], ['Down', x => x.down != null ? n(x.down, 2) : '—'],
+      ['Ventaja Up', x => x.up != null ? sg((x.p_up - x.up) * 100, 1) + ' pt' : '—'], ['Quedan', x => hace_(x.segs)]], m.mercados || [], 'Sin mercados ahora mismo.');
+    $('#udEst').innerHTML = tabla([['Estrategia', ([k]) => `<b>${k}</b>`], ['Apuestas', ([, v]) => v.apuestas], ['Acierto', ([, v]) => pc(v.acierto)],
+      ['Necesita', ([, v]) => '> ' + pc(v.precio_medio)], ['ROI', ([, v]) => v.roi != null ? sg(v.roi * 100, 1) + ' %' : '—'], ['Resultado', ([, v]) => sg(v.pnl) + ' $'],
+      ['Comisiones', ([, v]) => n(v.comisiones) + ' $']], Object.entries(m.estrategias || {}), 'Aún no se ha resuelto ninguna apuesta.');
+    $('#udAg').innerHTML = tabla([['Apostador', a => `<b>${esc(a.nombre)}</b>`], ['Estrategia', a => a.estrategia], ['Mercados', a => `${a.genoma.activos.join(',')} · ${a.genoma.marcos.join(',')}`],
+      ['Capital', a => n(a.capital, 2) + ' $'], ['Apuestas', a => `${a.apuestas} (${a.ganadas}✔)`], ['Resultado', a => sg(a.pnl) + ' $'], ['Gen', a => a.generacion],
+      ['Quiebras', a => a.quiebras || ''], ['Último', a => `<span class="chico">${esc(a.ultimo || '')}</span>`]], m.apostadores || []);
+    $('#udAp').innerHTML = tabla([['Hora', x => fecha(x.ts)], ['Apostador', x => esc(x.nombre)], ['Estrategia', x => x.estrategia], ['Mercado', x => `${x.activo.toUpperCase()} ${x.marco}`],
+      ['Lado', x => x.lado === 'Up' ? '<span class="verde">Up</span>' : '<span class="rojo">Down</span>'], ['Precio', x => n(x.precio, 2)], ['$', x => n(x.coste + x.comision, 2)],
+      ['Quedaban', x => hace_(x.segs_rest)], ['Resultado', x => x.resultado ? (x.resultado === x.lado ? '<span class="verde">✔ ganó</span>' : '<span class="rojo">✘ perdió</span>') : '<span class="tenue">abierta</span>'],
+      ['P&L', x => x.pnl != null ? sg(x.pnl) + ' $' : '—']], m.recientes || [], 'Sin apuestas todavía.');
+    $('#udLec').innerHTML = (m.lecciones || []).map(l => `<div class="lec">${esc(l.texto)}<br><small>${fecha(l.ts)}</small></div>`).join('') || '<span class="tenue">La primera evolución llega a las 3 h.</span>';
+    $('#udLog').textContent = (m.log || []).slice().reverse().join('\n') || 'Sin actividad.';
+  } catch (e) { msg('#udMsg', e.message); }
+}
+$('#udIniciar').onclick = async () => { try { await api('/updown/iniciar', 'POST', { agentes: +$('#udN').value, capital: +$('#udCap').value }); msg('#udMsg', 'Apostando (simulado).', true); cargarUpdown(); } catch (e) { msg('#udMsg', e.message); } };
+$('#udParar').onclick = async () => { try { await api('/updown/parar', 'POST'); msg('#udMsg', 'Parado.', true); cargarUpdown(); } catch (e) { msg('#udMsg', e.message); } };
+setInterval(() => { if (!document.hidden && E.pag === 'updown') cargarUpdown(); }, 5000);
+
 // ---------- navegación ----------
 function irA(p) { $$('#pestanas button').forEach(b => b.classList.toggle('on', b.dataset.p === p)); $$('.pag').forEach(s => s.classList.toggle('on', s.id === 'p-' + p)); E.pag = p;
-  ({ agente: cargarAgente, real: cargarReal, diario: cargarDiario, stats: cargarStats, practica: cargarPracticas, escaner: cargarAlertas, ajustes: pintarCfg })[p]?.(); }
+  ({ agente: cargarAgente, real: cargarReal, updown: cargarUpdown, diario: cargarDiario, stats: cargarStats, practica: cargarPracticas, escaner: cargarAlertas, ajustes: pintarCfg })[p]?.(); }
 $$('#pestanas button').forEach(b => b.onclick = () => irA(b.dataset.p));
 async function cambiarCuenta() { localStorage.setItem('dmn.cuenta', $('#selCuenta').value); pararAuto(); await cargarCuenta(); limpiarTicket(); await cargarGrafico(); cargarCotizacion(); cargarAnalisis(); if (E.pag && E.pag !== 'mesa') irA(E.pag); }
 $('#selCuenta').onchange = cambiarCuenta;

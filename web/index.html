@@ -18,6 +18,7 @@
   <button data-p="mesa" class="on">Mesa</button>
   <button data-p="agente">🤖 Enjambre</button>
   <button data-p="real">💰 Real (GMGN)</button>
+  <button data-p="updown">🎲 Up/Down (sim)</button>
   <button data-p="diario">Diario</button>
   <button data-p="stats">Estadísticas</button>
   <button data-p="backtest">Backtest</button>
@@ -107,6 +108,28 @@
   <div class="dos">
     <div class="panel"><div class="cab">⚡ Eventos</div><div id="reEv" class="chico mono"></div></div>
     <div class="panel"><div class="cab">Actividad en la blockchain</div><div id="reAct" class="tabla-scroll"></div></div>
+  </div>
+</section>
+
+<!-- UP/DOWN (Polymarket, simulado) -->
+<section id="p-updown" class="pag">
+  <div id="udKpis" class="tiles"></div>
+  <div class="dos">
+    <div class="panel form"><div class="cab">🎲 Up/Down de Polymarket <span id="udEstado" class="tenue"></span></div>
+      <p class="tenue chico">Los mercados «¿BTC/ETH/SOL/XRP termina más arriba o más abajo?» de 5 y 15 min que enseña Future.news. Precios y libros reales; apuestas SIMULADAS que pagan la comisión real (hasta 1,56 % a 50 ¢) y cobran según la resolución oficial de Polymarket. Para no perder hay que acertar más que el precio pagado.</p>
+      <div class="fila2"><label>Apostadores <input id="udN" type="number" value="24" min="4" max="200"></label><label>Cada uno empieza con ($) <input id="udCap" type="number" step="any" value="5"></label></div>
+      <div class="fila2"><button id="udIniciar" class="enviar">▶ Empezar / redimensionar</button><button id="udParar" class="enviar venta">⏹ Parar</button></div>
+      <div id="udMsg" class="msg"></div>
+    </div>
+    <div class="panel"><div class="cab">Informe</div><div id="udInforme" class="chico mono"></div></div>
+  </div>
+  <div class="panel"><div class="cab">Mercados en vivo <span class="tenue chico">modelo = probabilidad de Up por la distancia al precio de inicio y la volatilidad</span></div><div id="udMerc" class="tabla-scroll"></div></div>
+  <div class="panel"><div class="cab">Por estrategia <span class="tenue chico">«azar» es el control: si nadie le gana, no hay ventaja</span></div><div id="udEst" class="tabla-scroll"></div></div>
+  <div class="panel"><div class="cab">Apostadores</div><div id="udAg" class="tabla-scroll"></div></div>
+  <div class="panel"><div class="cab">Apuestas recientes</div><div id="udAp" class="tabla-scroll"></div></div>
+  <div class="dos">
+    <div class="panel"><div class="cab">🧬 Lecciones</div><div id="udLec" class="chico"></div></div>
+    <div class="panel"><div class="cab">Actividad</div><div id="udLog" class="chico mono"></div></div>
   </div>
 </section>
 

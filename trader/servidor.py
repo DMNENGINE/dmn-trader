@@ -4,7 +4,7 @@ Si se expone fuera de este PC, poner DMN_TRADER_TOKEN: se pedirá en la cabecera
 import argparse, json, mimetypes, os, re, threading, time, traceback
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
-from . import datos, db, motor, analisis, backtest, agente, real
+from . import datos, db, motor, analisis, backtest, agente, real, updown
 
 WEB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'web')
 VERSION = '1.0.0'
@@ -328,6 +328,29 @@ def r_enj_nodo(q, b):
     return agente.recibir_nodo(b)
 
 
+# ---------- Up/Down de Polymarket (simulado) ----------
+
+
+@ruta('GET', '/api/updown')
+def r_ud(q, b):
+    return updown.mapa()
+
+
+@ruta('GET', '/api/updown/informe')
+def r_ud_inf(q, b):
+    return {'texto': updown.informe()}
+
+
+@ruta('POST', '/api/updown/iniciar')
+def r_ud_ini(q, b):
+    return updown.iniciar(int(b.get('agentes', 24)), float(b.get('capital', updown.CAPITAL)))
+
+
+@ruta('POST', '/api/updown/parar')
+def r_ud_parar(q, b):
+    return updown.parar()
+
+
 # ---------- cuenta real (GMGN, solo lectura) ----------
 
 
@@ -462,6 +485,9 @@ def preparar():
     agente.preparar()
     if (agente.estado() or {}).get('activo'):
         agente.arrancar_hilo()  # el reto sigue tras un reinicio
+    updown.preparar()
+    if updown.estado().get('activo') or db.uno('SELECT 1 FROM pm_apuestas WHERE resultado IS NULL'):
+        updown.arrancar_hilo()  # los apostadores siguen tras un reinicio (y las apuestas abiertas se cobran)
     real.arrancar()  # solo donde está gmgn-cli con la key (el PC): vigila la cuenta real y la manda a la central
     if not db.q('SELECT 1 FROM cuentas LIMIT 1'):
         c = motor.crear_cuenta('Principal', 10000, 'USD')
