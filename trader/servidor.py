@@ -4,7 +4,7 @@ Si se expone fuera de este PC, poner DMN_TRADER_TOKEN: se pedirá en la cabecera
 import argparse, json, mimetypes, os, re, threading, time, traceback
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
-from . import datos, db, motor, analisis, backtest, agente
+from . import datos, db, motor, analisis, backtest, agente, real
 
 WEB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'web')
 VERSION = '1.0.0'
@@ -328,6 +328,19 @@ def r_enj_nodo(q, b):
     return agente.recibir_nodo(b)
 
 
+# ---------- cuenta real (GMGN, solo lectura) ----------
+
+
+@ruta('GET', '/api/real')
+def r_real(q, b):
+    return real.estado()
+
+
+@ruta('POST', '/api/real/nodo')
+def r_real_nodo(q, b):
+    return real.recibir(b)
+
+
 # ---------- hilo de fondo ----------
 
 
@@ -449,6 +462,7 @@ def preparar():
     agente.preparar()
     if (agente.estado() or {}).get('activo'):
         agente.arrancar_hilo()  # el reto sigue tras un reinicio
+    real.arrancar()  # solo donde está gmgn-cli con la key (el PC): vigila la cuenta real y la manda a la central
     if not db.q('SELECT 1 FROM cuentas LIMIT 1'):
         c = motor.crear_cuenta('Principal', 10000, 'USD')
         db.poner_ajuste('cuenta_defecto', c['id'])

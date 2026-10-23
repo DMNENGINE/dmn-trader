@@ -351,9 +351,40 @@ $('#agIniciar').onclick = async () => { try { await api('/enjambre/iniciar', 'PO
 $('#agParar').onclick = async () => { try { await api('/enjambre/parar', 'POST'); msg('#agMsg', 'Parado.', true); cargarAgente(); } catch (e) { msg('#agMsg', e.message); } };
 setInterval(() => { if (!document.hidden && E.pag === 'agente') cargarAgente(); }, 10000);
 
+// ---------- cuenta real (GMGN) ----------
+const hace_ = s => s < 90 ? `${Math.round(s)} s` : s < 5400 ? `${Math.round(s / 60)} min` : s < 172800 ? `${Math.round(s / 3600)} h` : `${Math.round(s / 86400)} d`;
+async function cargarReal() {
+  let r;
+  try { r = await api('/real'); } catch (e) { $('#reEstado').textContent = e.message; return; }
+  if (!r.ts) { $('#reEstado').innerHTML = '<span class="tenue">○ sin datos: enciende el servidor del PC (servidor-pc.bat)</span>'; return; }
+  const viva = r.edad < 60;
+  $('#reEstado').innerHTML = `${viva ? '<span class="verde">● en vivo</span>' : '<span class="ambar">● sin actualizar</span>'} · hace ${hace_(r.edad)}${r.vigilando_aqui ? ' · vigilando desde este equipo' : r.recibido ? ' · desde el PC' : ''}${r.error && r.error_ts > r.ts ? ` · <span class="rojo">${esc(r.error)}</span>` : ''}`;
+  $('#reWallet').innerHTML = r.wallet ? `<a href="https://solscan.io/account/${esc(r.wallet)}" target="_blank" rel="noopener">${esc(r.wallet.slice(0, 6))}…${esc(r.wallet.slice(-4))}</a>` : '';
+  const P = r.posiciones || [], vPos = P.reduce((a, p) => a + (p.valor || 0), 0), pnl = P.reduce((a, p) => a + (p.pnl || 0), 0), solUsd = r.sol_usd ? r.sol * r.sol_usd : null;
+  const t = (x, y) => `<div class="tile"><small>${x}</small><b>${y}</b></div>`;
+  $('#reKpis').innerHTML = [t('SOL en la wallet', `${n(r.sol, 4)} <span class="tenue chico">≈ ${n(solUsd)} $</span>`), t('En posiciones', n(vPos) + ' $'), t('PnL abierto', sg(pnl, 3) + ' $'),
+    t('Total', solUsd != null ? n(solUsd + vPos) + ' $' : '—'), t('Posiciones', P.length), t('Precio SOL', r.sol_usd ? n(r.sol_usd) + ' $' : '—')].join('');
+  const ahora = Date.now() / 1000;
+  $('#reBot').innerHTML = P.length ? P.map(p => `<div class="re-bot">Vigilando <b>${esc(p.simbolo)}</b>: va ${sg(p.pnl_pct, 1)} % (${np(p.precio)} $).
+    ${p.tp ? `Vende el ${n(p.condiciones.find(c => c.tipo.startsWith('profit'))?.venta ?? 100, 0)} % si sube a <b class="verde">${np(p.tp)} $</b> (${sg(p.dist_tp, 1)} % desde aquí)` : 'Sin take-profit puesto'}${p.sl ? ` o si baja a <b class="rojo">${np(p.sl)} $</b> (${sg(p.dist_sl, 1)} %).` : '. <span class="rojo">Sin stop-loss puesto.</span>'}
+    ${p.caduca ? `<span class="tenue chico"> Las órdenes caducan en ${hace_(p.caduca - ahora)}.</span>` : ''}</div>`).join('')
+    : `<div class="tenue">Sin posiciones abiertas: el bot no vigila nada. ${r.sol ? `Hay ${n(r.sol, 4)} SOL libres para la próxima operación.` : ''}</div>`;
+  $('#rePos').innerHTML = P.length ? P.map(p => {
+    const lo = Math.min(p.sl || p.precio, p.precio, p.entrada || p.precio) * 0.99, hi = Math.max(p.tp || p.precio, p.precio, p.entrada || p.precio) * 1.01, x = v => ((v - lo) / (hi - lo) * 100).toFixed(1) + '%';
+    return `<div class="re-pos"><div>${p.logo ? `<img src="${esc(p.logo)}" alt="">` : ''}<b>${esc(p.simbolo)}</b> <span class="tenue chico">${esc(p.nombre || '')}</span>
+      <div class="chico">${n(p.cantidad, 2)} · ${n(p.valor, 3)} $ · coste ${n(p.coste, 3)} $</div><div class="grande">${sg(p.pnl_pct, 2)} %</div>
+      <div class="tenue chico">desde ${fecha(p.desde)} · liquidez ${n(p.liquidez / 1000, 0)} k$ · <a href="https://gmgn.ai/sol/token/${esc(p.token)}" target="_blank" rel="noopener">GMGN</a></div></div>
+      <div class="re-barra">${p.sl ? `<span class="ab" style="left:${x(p.sl)}">SL ${np(p.sl)}</span>` : ''}${p.tp ? `<span class="ab" style="left:${x(p.tp)}">TP ${np(p.tp)}</span>` : ''}${p.entrada ? `<i class="ent" style="left:${x(p.entrada)}"></i><span class="ar" style="left:${x(p.entrada)}">entrada ${np(p.entrada)}</span>` : ''}<i class="act" style="left:${x(p.precio)}" title="ahora"></i></div></div>`; }).join('') : '<div class="tenue">Nada abierto.</div>';
+  $('#reEv').textContent = (r.eventos || []).slice().reverse().map(([ts, txt]) => `${fecha(ts)}  ${txt}`).join('\n') || 'Sin eventos todavía: aparecerán aquí las compras, ventas y los TP/SL que salten.';
+  $('#reAct').innerHTML = tabla([['Hora', a => fecha(a.ts)], ['Tipo', a => a.tipo === 'buy' ? '<span class="verde">compra</span>' : a.tipo === 'sell' ? '<span class="rojo">venta</span>' : esc(a.tipo)],
+    ['Token', a => esc(a.simbolo)], ['Cantidad', a => n(a.cantidad, 2)], ['$', a => n(a.usd, 3)], ['Precio', a => np(a.precio)], ['Costes $', a => n((a.gas_usd || 0) + (a.dex_usd || 0), 3)],
+    ['Tx', a => `<a href="https://solscan.io/tx/${esc(a.tx)}" target="_blank" rel="noopener">${esc((a.tx || '').slice(0, 8))}…</a>`]], r.actividad || [], 'Sin actividad.');
+}
+setInterval(() => { if (!document.hidden && E.pag === 'real') cargarReal(); }, 5000);
+
 // ---------- navegación ----------
 function irA(p) { $$('#pestanas button').forEach(b => b.classList.toggle('on', b.dataset.p === p)); $$('.pag').forEach(s => s.classList.toggle('on', s.id === 'p-' + p)); E.pag = p;
-  ({ agente: cargarAgente, diario: cargarDiario, stats: cargarStats, practica: cargarPracticas, escaner: cargarAlertas, ajustes: pintarCfg })[p]?.(); }
+  ({ agente: cargarAgente, real: cargarReal, diario: cargarDiario, stats: cargarStats, practica: cargarPracticas, escaner: cargarAlertas, ajustes: pintarCfg })[p]?.(); }
 $$('#pestanas button').forEach(b => b.onclick = () => irA(b.dataset.p));
 async function cambiarCuenta() { localStorage.setItem('dmn.cuenta', $('#selCuenta').value); pararAuto(); await cargarCuenta(); limpiarTicket(); await cargarGrafico(); cargarCotizacion(); cargarAnalisis(); if (E.pag && E.pag !== 'mesa') irA(E.pag); }
 $('#selCuenta').onchange = cambiarCuenta;

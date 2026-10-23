@@ -63,3 +63,14 @@ td button{padding:2px 7px;font-size:11px}
 @media (max-width:600px){main{padding:10px}.barra{flex-wrap:wrap;gap:8px}.fila4{grid-template-columns:1fr 1fr}.lienzo{height:340px}}
 .mono{font-family:Consolas,monospace;white-space:pre-wrap;max-height:360px;overflow:auto}#agLec{max-height:360px;overflow:auto}.lec{padding:6px 0;border-bottom:1px solid #172133}.lec small{color:var(--tenue)}
 .tabla-scroll{max-height:520px;overflow:auto}
+
+/* cuenta real (GMGN) */
+.re-bot{padding:8px 10px;border-left:3px solid var(--verde);background:rgba(255,255,255,.02);margin-bottom:6px;border-radius:4px}
+.re-pos{display:grid;grid-template-columns:minmax(160px,1fr) 3fr;gap:14px;align-items:center;padding:10px 0;border-top:1px solid var(--borde)}
+.re-pos:first-child{border-top:0}.re-pos img{width:28px;height:28px;border-radius:50%;vertical-align:middle;margin-right:6px}
+.re-barra{position:relative;height:10px;border-radius:5px;background:linear-gradient(90deg,var(--rojo),#2a3448 45%,var(--verde));margin:18px 0 22px}
+.re-barra i{position:absolute;top:-5px;width:3px;height:20px;border-radius:2px;transform:translateX(-50%)}
+.re-barra i.ent{background:var(--tenue)}.re-barra i.act{background:#fff;box-shadow:0 0 6px #fff}
+.re-barra span{position:absolute;font-size:10px;white-space:nowrap;transform:translateX(-50%);color:var(--tenue)}
+.re-barra span.ar{top:-17px}.re-barra span.ab{top:13px}
+@media (max-width:700px){.re-pos{grid-template-columns:1fr}}

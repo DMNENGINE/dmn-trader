@@ -17,6 +17,7 @@
 <nav class="pestanas" id="pestanas">
   <button data-p="mesa" class="on">Mesa</button>
   <button data-p="agente">🤖 Enjambre</button>
+  <button data-p="real">💰 Real (GMGN)</button>
   <button data-p="diario">Diario</button>
   <button data-p="stats">Estadísticas</button>
   <button data-p="backtest">Backtest</button>
@@ -93,6 +94,19 @@
   <div class="dos">
     <div class="panel"><div class="cab">🧠 Lecciones</div><div id="agLec" class="chico"></div></div>
     <div class="panel"><div class="cab">Actividad en vivo</div><div id="agLog" class="chico mono"></div></div>
+  </div>
+</section>
+
+<!-- REAL (GMGN) -->
+<section id="p-real" class="pag">
+  <div class="panel"><div class="cab">💰 Cuenta real en GMGN <span id="reEstado" class="tenue chico"></span><span class="espacio"></span><span id="reWallet" class="tenue chico mono"></span></div>
+    <p class="tenue chico">Dinero de verdad. Esta pestaña solo mira: el PC consulta tu wallet cada 10 s con gmgn-cli (la clave no sale de él) y lo manda aquí. Las compras, los take-profit y los stop los ejecuta el bot de GMGN.</p>
+    <div id="reKpis" class="tiles"></div></div>
+  <div class="panel"><div class="cab">🤖 Qué está haciendo el bot ahora</div><div id="reBot"></div></div>
+  <div class="panel"><div class="cab">Posiciones abiertas</div><div id="rePos"></div></div>
+  <div class="dos">
+    <div class="panel"><div class="cab">⚡ Eventos</div><div id="reEv" class="chico mono"></div></div>
+    <div class="panel"><div class="cab">Actividad en la blockchain</div><div id="reAct" class="tabla-scroll"></div></div>
   </div>
 </section>
 
