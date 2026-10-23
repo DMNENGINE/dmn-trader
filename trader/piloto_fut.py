@@ -238,6 +238,13 @@ def _bucle():
             reenviar_velas()
         except Exception:
             pass
+        if time.time() - _hilo.get('grafo', 0) > 300:
+            _hilo['grafo'] = time.time()
+            try:
+                from . import conciencia
+                conciencia.enviar_grafo()
+            except Exception:
+                pass
         try:
             paso()
         except Exception as ex:

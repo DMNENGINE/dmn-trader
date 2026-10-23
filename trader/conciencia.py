@@ -221,6 +221,22 @@ def sincronizar():
 # ---------------- lectura ----------------
 
 
+def rondas(mercado='memes'):
+    """Cuántas rondas lleva (para seguir la numeración tras reiniciar el servidor)."""
+    preparar()
+    return db.uno(f"SELECT COUNT(*) n FROM con_eventos WHERE tipo='ronda' AND {MERCADO}=?", (mercado,))['n']
+
+
+def enviar_grafo():
+    """El grafo (resumido) a la central (Pi) para dibujarlo en su panel; lo llama el bucle del piloto cada 5 min."""
+    from . import agente
+    if not agente.CENTRAL:
+        return
+    rq = urllib.request.Request(agente.CENTRAL + '/api/conciencia/grafo', data=json.dumps(grafo(), default=str).encode(), method='POST',
+                                headers={'content-type': 'application/json', **({'x-token': agente.CENTRAL_TOKEN} if agente.CENTRAL_TOKEN else {})})
+    urllib.request.urlopen(rq, timeout=20).read()
+
+
 def linea(limite=200, mercado='memes'):
     preparar()
     rs = db.q(f"SELECT ts, nivel, datos FROM con_eventos WHERE tipo='ronda' AND {MERCADO}=? ORDER BY id DESC LIMIT ?", (mercado, limite))[::-1]
@@ -243,7 +259,7 @@ def resumen():
 
 def grafo(max_nodos=300):
     preparar()
-    nodos = db.q('SELECT id, tipo, nombre, veces, datos FROM con_nodos ORDER BY (tipo=\'ronda\') DESC, veces DESC LIMIT ?', (max_nodos,))
+    nodos = db.q('SELECT id, tipo, nombre, veces FROM con_nodos ORDER BY (tipo=\'ronda\') DESC, veces DESC LIMIT ?', (max_nodos,))
     ids = {n['id'] for n in nodos}
     ar = [a for a in db.q('SELECT de, a, tipo, peso FROM con_aristas') if a['de'] in ids and a['a'] in ids]
     return {'nodos': nodos, 'aristas': ar}

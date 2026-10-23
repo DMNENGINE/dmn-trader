@@ -390,6 +390,24 @@ def r_piloto_cfg(q, b):
     return piloto.poner_cfg(b or {})
 
 
+_GRAFO = {}
+
+
+@ruta('POST', '/api/conciencia/grafo')
+def r_grafo_recibir(q, b):
+    _GRAFO.update(b or {}, recibido=int(time.time()))
+    return {'ok': True}
+
+
+@ruta('GET', '/api/conciencia/grafo')
+def r_grafo(q, b):
+    """Grafo de la conciencia: el local si este equipo lo tiene; si no, el último que mandó el PC."""
+    if piloto._hilo['t'] and piloto._hilo['t'].is_alive():
+        from . import conciencia
+        return conciencia.grafo()
+    return _GRAFO or {'nodos': [], 'aristas': []}
+
+
 @ruta('POST', '/api/futuros/velas')
 def r_futuros_velas(q, b):
     """El PC manda las velas en tiempo real de NinjaTrader ({'MES=F': {'1m': [...], '5m': [...]}}): las usa el enjambre."""

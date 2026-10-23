@@ -521,6 +521,7 @@ def _bucle():
 def arrancar():
     preparar()
     conciencia.preparar()
+    _ultimo['gen'] = max(_ultimo['gen'], conciencia.rondas('memes'))
     if not (_hilo['t'] and _hilo['t'].is_alive()):
         _hilo['t'] = threading.Thread(target=_bucle, daemon=True)
         _hilo['t'].start()

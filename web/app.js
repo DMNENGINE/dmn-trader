@@ -571,3 +571,51 @@ function lineaConciencia(L) {
     + L.map((r, i) => r.mejor_vivo != null ? `<circle cx="${x(i)}" cy="${y(r.nivel)}" r="3" fill="var(--verde)"><title>en vivo ${r.mejor_vivo} %/op</title></circle>` : '').join('')
     + `</svg><div class="tenue chico">${L.length} rondas · desde ${fecha(L[0].ts)} · ahora: ${ult.pasan} pasan la validación${ult.mejor_prueba != null ? `, mejor ${sg(ult.mejor_prueba, 1)} %/op fuera de muestra` : ''}. Hasta 40 = solo datos y exploración; por encima solo sube con ventaja demostrada.</div>`;
 }
+
+// ---------- grafo de la conciencia (fuerzas, canvas) ----------
+const GR_COL = { ronda: '#22c55e', estrategia: '#a855f7', moneda: '#f59e0b', futuro: '#38bdf8', 'operación': '#ef4444', aprendizaje: '#94a3b8', sistema: '#eab308' };
+let grAnim = null;
+$('#grVer').onclick = async () => {
+  const caja = $('#grCaja');
+  if (caja.style.display !== 'none') { caja.style.display = 'none'; cancelAnimationFrame(grAnim); $('#grVer').textContent = '🕸️ Ver el grafo'; return; }
+  caja.style.display = ''; $('#grVer').textContent = 'Ocultar el grafo';
+  let g; try { g = await api('/conciencia/grafo'); } catch (e) { return toast(e.message); }
+  dibujarGrafo(g);
+};
+function dibujarGrafo(g) {
+  const cv = $('#grLienzo'), dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
+  cv.width = W * dpr; cv.height = H * dpr; const cx = cv.getContext('2d'); cx.scale(dpr, dpr);
+  const N = (g.nodos || []).map((n, i) => ({ ...n, x: W / 2 + Math.cos(i) * (50 + i % 200), y: H / 2 + Math.sin(i) * (50 + i % 200), vx: 0, vy: 0,
+    r: n.tipo === 'ronda' ? 7 : Math.min(12, 3 + Math.sqrt(n.veces || 1)) }));
+  const idx = Object.fromEntries(N.map((n, i) => [n.id, i]));
+  const A = (g.aristas || []).filter(a => a.de in idx && a.a in idx).map(a => ({ ...a, s: idx[a.de], t: idx[a.a] }));
+  const cuenta = {}; N.forEach(n => cuenta[n.tipo] = (cuenta[n.tipo] || 0) + 1);
+  $('#grLeyenda').innerHTML = Object.entries(cuenta).map(([k, v]) => `<span style="color:${GR_COL[k] || '#888'}">●</span> ${esc(k)} ${v}`).join(' · ') + ` · ${A.length} enlaces · <span class="tenue">verde enlazado = la línea de rondas (progreso)</span>`;
+  let paso = 0, sobre = null;
+  const tick = () => {
+    if (paso++ < 400) {
+      const k = 0.02 * (1 - paso / 420);
+      for (let i = 0; i < N.length; i++) for (let j = i + 1; j < N.length; j++) {
+        const a = N[i], b = N[j]; let dx = a.x - b.x, dy = a.y - b.y, d2 = dx * dx + dy * dy + 0.01;
+        if (d2 > 40000) continue; const f = 600 / d2; dx *= f; dy *= f; a.vx += dx; a.vy += dy; b.vx -= dx; b.vy -= dy;
+      }
+      for (const e of A) { const a = N[e.s], b = N[e.t], dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy) || 1, f = (d - (e.tipo === 'sigue_a' ? 30 : 55)) * 0.02;
+        a.vx += dx / d * f; a.vy += dy / d * f; b.vx -= dx / d * f; b.vy -= dy / d * f; }
+      for (const n of N) { n.vx += (W / 2 - n.x) * 0.002; n.vy += (H / 2 - n.y) * 0.002; n.x += Math.max(-8, Math.min(8, n.vx * k * 50)); n.y += Math.max(-8, Math.min(8, n.vy * k * 50));
+        n.vx *= 0.5; n.vy *= 0.5; n.x = Math.max(8, Math.min(W - 8, n.x)); n.y = Math.max(8, Math.min(H - 8, n.y)); }
+    }
+    cx.clearRect(0, 0, W, H);
+    for (const e of A) { const a = N[e.s], b = N[e.t], linea = e.tipo === 'sigue_a', resalta = sobre != null && (e.s === sobre || e.t === sobre);
+      cx.strokeStyle = linea ? '#22c55e' : resalta ? 'rgba(250,250,250,.7)' : 'rgba(140,140,160,.18)'; cx.lineWidth = linea ? 2.5 : resalta ? 1.2 : 0.6;
+      cx.beginPath(); cx.moveTo(a.x, a.y); cx.lineTo(b.x, b.y); cx.stroke(); }
+    N.forEach((n, i) => { cx.fillStyle = GR_COL[n.tipo] || '#888'; cx.globalAlpha = sobre == null || i === sobre || A.some(e => (e.s === sobre && e.t === i) || (e.t === sobre && e.s === i)) ? 1 : 0.25;
+      cx.beginPath(); cx.arc(n.x, n.y, n.r, 0, 7); cx.fill(); });
+    cx.globalAlpha = 1;
+    grAnim = requestAnimationFrame(tick);
+  };
+  cv.onmousemove = ev => { const b = cv.getBoundingClientRect(), x = ev.clientX - b.left, y = ev.clientY - b.top;
+    sobre = null; let mejor = 14; N.forEach((n, i) => { const d = Math.hypot(n.x - x, n.y - y); if (d < mejor) { mejor = d; sobre = i; } });
+    $('#grInfo').innerHTML = sobre == null ? '' : `<b style="color:${GR_COL[N[sobre].tipo] || '#888'}">${esc(N[sobre].nombre)}</b> <span class="tenue">(${esc(N[sobre].tipo)} · ${A.filter(e => e.s === sobre || e.t === sobre).length} enlaces)</span>`; };
+  cv.onmouseleave = () => { sobre = null; $('#grInfo').innerHTML = ''; };
+  cancelAnimationFrame(grAnim); tick();
+}
