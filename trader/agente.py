@@ -1473,6 +1473,62 @@ def recibir_migrantes(migs, de):
         _leccion(a['id'], None, None, 'migracion', f"Llega de {de} el sistema de {m.get('nombre')} ({m.get('aptitud', 0):+.2f}R) y sustituye a {a['nombre']}.", {})
 
 
+# ---------------- órdenes de la central a los nodos (cuántos agentes en cada equipo) ----------------
+ORDENES = 'ordenes_nodos'
+_ordenes = {'t': None}
+
+
+def ordenar(nodo, orden):
+    """En la central: deja una orden (iniciar con N agentes o parar) para un nodo; el nodo la recoge en ≤ 10 s."""
+    m = db.ajuste(ORDENES, {}) or {}
+    m[nodo] = dict(orden, id=f'{time.time():.3f}', ts=int(time.time()))
+    db.poner_ajuste(ORDENES, m)
+    return {'ok': True, 'nodo': nodo, 'pendiente': True, **orden}
+
+
+def orden(nodo):
+    return (db.ajuste(ORDENES, {}) or {}).get(nodo) or {}
+
+
+def _latido():
+    """Con el enjambre parado no hay sincronía: el nodo avisa igual a la central de que sigue vivo (y de su estado)."""
+    import urllib.request
+    cuerpo = {'nodo': NODO, 'kpis': kpis(), 'agentes': _vista_agentes(), 'lecciones': lecciones(15)}
+    req = urllib.request.Request(CENTRAL + '/api/enjambre/nodo', data=json.dumps(cuerpo, default=str).encode(), method='POST',
+                                 headers={'content-type': 'application/json', **({'x-token': CENTRAL_TOKEN} if CENTRAL_TOKEN else {})})
+    urllib.request.urlopen(req, timeout=15).read()
+
+
+def _vigilar_ordenes():
+    import urllib.parse, urllib.request
+    ultimo_latido = 0
+    while True:
+        try:
+            req = urllib.request.Request(CENTRAL + '/api/enjambre/orden?nodo=' + urllib.parse.quote(NODO), headers={'x-token': CENTRAL_TOKEN} if CENTRAL_TOKEN else {})
+            o = json.loads(urllib.request.urlopen(req, timeout=10).read().decode() or '{}')
+            if o.get('id') and o['id'] != db.ajuste('orden_hecha'):
+                db.poner_ajuste('orden_hecha', o['id'])
+                if o.get('accion') == 'parar':
+                    parar('parado desde el panel de la central')
+                elif o.get('accion') == 'iniciar':
+                    iniciar(o.get('n', 50), o.get('capital', 1), o.get('meta', 100), o.get('mercados') or ('cripto', 'acciones'), o.get('hasta'))
+                log(f"📡 orden de la central: {o.get('accion')}{' ' + str(o.get('n')) + ' agentes' if o.get('accion') == 'iniciar' else ''}")
+                ultimo_latido = 0
+            if not (estado() or {}).get('activo') and time.time() - ultimo_latido > 60:
+                _latido()
+                ultimo_latido = time.time()
+        except Exception:
+            pass
+        time.sleep(10)
+
+
+def arrancar_ordenes():
+    """Solo en los nodos (los que tienen central): recogen las órdenes que se dan desde el panel de la central."""
+    if CENTRAL and not _ordenes['t']:
+        _ordenes['t'] = threading.Thread(target=_vigilar_ordenes, daemon=True)
+        _ordenes['t'].start()
+
+
 def recibir_nodo(c):
     """En la central: guarda lo que manda un nodo y, si lo pide, le devuelve los 3 mejores genomas de aquí."""
     db.ex('INSERT INTO ag_nodos(nodo,visto,datos) VALUES(?,?,?) ON CONFLICT(nodo) DO UPDATE SET visto=excluded.visto, datos=excluded.datos',

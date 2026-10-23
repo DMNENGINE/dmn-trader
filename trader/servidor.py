@@ -294,13 +294,23 @@ def r_enj_mapa(q, b):
 
 @ruta('POST', '/api/enjambre/iniciar')
 def r_enj_ini(q, b):
+    if b.get('nodo') and b['nodo'] != agente.NODO:  # otro equipo (el PC): se le deja la orden
+        return agente.ordenar(b['nodo'], {'accion': 'iniciar', 'n': int(b.get('agentes', 50)), 'capital': float(b.get('capital', 1)), 'meta': float(b.get('meta', 100)),
+                                          'mercados': b.get('mercados') or ['cripto', 'acciones'], 'hasta': _hasta(b.get('hasta'))})
     return agente.iniciar(int(b.get('agentes', 50)), float(b.get('capital', 1)), float(b.get('meta', 100)),
                           b.get('mercados') or ['cripto', 'acciones'], _hasta(b.get('hasta')))
 
 
 @ruta('POST', '/api/enjambre/parar')
 def r_enj_parar(q, b):
+    if b.get('nodo') and b['nodo'] != agente.NODO:
+        return agente.ordenar(b['nodo'], {'accion': 'parar'})
     return agente.parar()
+
+
+@ruta('GET', '/api/enjambre/orden')
+def r_enj_orden(q, b):
+    return agente.orden(q.get('nodo') or '')
 
 
 @ruta('GET', r'/api/enjambre/agente/(?P<aid>\d+)')
@@ -488,6 +498,7 @@ def preparar():
     updown.preparar()
     if updown.estado().get('activo') or db.uno('SELECT 1 FROM pm_apuestas WHERE resultado IS NULL'):
         updown.arrancar_hilo()  # los apostadores siguen tras un reinicio (y las apuestas abiertas se cobran)
+    agente.arrancar_ordenes()  # nodos: obedecen al panel de la central (cuántos agentes aquí, parar)
     real.arrancar()  # solo donde está gmgn-cli con la key (el PC): vigila la cuenta real y la manda a la central
     if not db.q('SELECT 1 FROM cuentas LIMIT 1'):
         c = motor.crear_cuenta('Principal', 10000, 'USD')

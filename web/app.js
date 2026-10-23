@@ -336,6 +336,8 @@ async function cargarAgente() {
     $('#agEstado').innerHTML = k.activo ? `<span class="verde">● ${k.agentes} agentes operando</span> · ciclo ${k.tick_s}s` : '<span class="tenue">○ parado</span>';
     $('#agKpis').innerHTML = [t('Agentes (todos los nodos)', m.total.agentes), t('Generación', k.generacion), t('Operaciones', m.total.trades), t('Acierto', k.trades ? n(k.ganados / k.trades * 100, 0) + '%' : '—'),
       t('R medio', k.r_medio != null ? sg(k.r_medio) : '—'), t('Quiebras', m.total.quiebras), t('Metas 🏆', m.total.metas), t('Mejor capital', n(k.max_equity, 2) + ' $')].join('');
+    const cajas = $('#agPorNodo'), vistos = [...cajas.querySelectorAll('input')].map(i => i.dataset.nodo);
+    if (m.nodos.map(x => x.nodo).join() !== vistos.join()) cajas.innerHTML = m.nodos.map(x => `<label>${esc(x.nodo)}${x.local ? ' (central)' : ''} <input type="number" min="0" max="2000" data-nodo="${esc(x.nodo)}" value="${(x.kpis || {}).activo ? (x.kpis.n || (x.agentes || []).length) : 0}"></label>`).join('');
     $('#agNodos').textContent = m.nodos.map(x => `${x.nodo}: ${(x.agentes || []).length}${x.local ? ' (aquí)' : x.en_linea ? ' (en línea)' : ' (desconectado)'}`).join(' · ');
     const todos = m.nodos.flatMap(x => (x.agentes || []).map(a => ({ ...a, nodo: x.nodo }))).sort((a, b) => (b.r_medio ?? -9) - (a.r_medio ?? -9));
     $('#agTabla').innerHTML = tabla([['Agente', a => `<b>${esc(a.nombre)}</b>`], ['Nodo', a => a.nodo], ['Gen', a => a.generacion], ['Sistema', a => `${a.estrategia} · ${a.marco}${a.tendencia ? ' · tend' : ''} · ${a.riesgo_pct}%`],
@@ -346,9 +348,17 @@ async function cargarAgente() {
     $('#agLog').textContent = (m.log || []).slice().reverse().join('\n') || 'Sin actividad.';
   } catch (e) { msg('#agMsg', e.message); }
 }
-$('#agIniciar').onclick = async () => { try { await api('/enjambre/iniciar', 'POST', { agentes: +$('#agN').value, capital: +$('#agCap').value, meta: +$('#agMeta').value, hasta: $('#agHasta').value || null, mercados: $('#agMerc').value.split(',') });
-  msg('#agMsg', 'El enjambre está operando.', true); cargarAgente(); } catch (e) { msg('#agMsg', e.message); } };
-$('#agParar').onclick = async () => { try { await api('/enjambre/parar', 'POST'); msg('#agMsg', 'Parado.', true); cargarAgente(); } catch (e) { msg('#agMsg', e.message); } };
+$('#agIniciar').onclick = async () => { try {
+  const hecho = [];
+  for (const i of $('#agPorNodo').querySelectorAll('input')) {
+    const nodo = i.dataset.nodo, k = +i.value;
+    if (k > 0) await api('/enjambre/iniciar', 'POST', { nodo, agentes: k, capital: +$('#agCap').value, meta: +$('#agMeta').value, hasta: $('#agHasta').value || null, mercados: $('#agMerc').value.split(',') });
+    else await api('/enjambre/parar', 'POST', { nodo });
+    hecho.push(`${nodo}: ${k || 'parado'}`);
+  }
+  msg('#agMsg', hecho.join(' · ') + ' (los otros equipos lo aplican en ≤ 10 s)', true); setTimeout(cargarAgente, 1500); } catch (e) { msg('#agMsg', e.message); } };
+$('#agParar').onclick = async () => { try { for (const i of $('#agPorNodo').querySelectorAll('input')) { await api('/enjambre/parar', 'POST', { nodo: i.dataset.nodo }); i.value = 0; }
+  msg('#agMsg', 'Parados todos.', true); cargarAgente(); } catch (e) { msg('#agMsg', e.message); } };
 setInterval(() => { if (!document.hidden && E.pag === 'agente') cargarAgente(); }, 10000);
 
 // ---------- cuenta real (GMGN) ----------
