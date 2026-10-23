@@ -52,7 +52,12 @@ def estado():
         con = conciencia.resumen() if _hilo['t'] else None
     except Exception:
         con = None
-    return {**(db.ajuste(EST) or {}), 'cfg': cfg(), 'lab': lab, 'fabrica': fab, 'conciencia': con}
+    from . import piloto_fut
+    try:
+        fut = piloto_fut.estado() if _hilo['t'] else None
+    except Exception:
+        fut = None
+    return {**(db.ajuste(EST) or {}), 'cfg': cfg(), 'lab': lab, 'fabrica': fab, 'conciencia': con, 'futuros': fut}
 
 
 def _est():
@@ -470,4 +475,6 @@ def arrancar():
         laboratorio_ia.arrancar()
         from . import fabrica
         fabrica.arrancar()
+        from . import piloto_fut
+        piloto_fut.arrancar()  # futuros por NinjaTrader (Sim101; la real solo si está en puente.json y en su cfg)
     return bool(_hilo['t'])
