@@ -232,16 +232,20 @@ def simular(e, D, mascara=None, con_idx=False):
     if not len(idx):
         return []
     atr = np.nan_to_num(D.F[idx, D.col['atr']], nan=3.0)
-    sl = np.clip(e['sl_k'] * atr, 4, 30)
+    lo, hi = getattr(D, 'sl_lim', (4, 30))
+    sl = np.clip(e['sl_k'] * atr, lo, hi)
     tp = sl * e['rr']
     h = int(e['hold'])
     L, H, C = D.L[idx, :h], D.H[idx, :h], D.C[idx, :h]
+    if e.get('lado', 1) == -1:  # corto: la ruta se ve al revés
+        L, H, C = -H, -L, -C
     toca_sl = L <= -sl[:, None]
     toca_tp = H >= tp[:, None]
     i_sl = np.where(toca_sl.any(1), toca_sl.argmax(1), h)
     i_tp = np.where(toca_tp.any(1), toca_tp.argmax(1), h)
     res = np.where(i_sl <= i_tp, np.where(i_sl < h, -sl, np.nan), tp)  # si la misma vela toca los dos: stop (lo peor)
-    res = np.where(np.isnan(res), C[:, -1], res) - COSTES
+    costes = getattr(D, 'costes', None)
+    res = np.where(np.isnan(res), C[:, -1], res) - (COSTES if costes is None else costes[idx])
     salida = np.minimum(np.minimum(i_sl, i_tp), h - 1)
     ops, libre = [], {}
     for k, n in enumerate(idx):  # una posición por token a la vez
@@ -284,9 +288,15 @@ def _umbral(D, nom):
     return round(float(np.quantile(x, random.uniform(0.05, 0.95))), 4) if len(x) > 20 else None
 
 
+def _base(e):
+    return {k: e[k] for k in ('conds', 'sl_k', 'rr', 'hold', 'lado') if k in e}
+
+
 def _al_azar(D):
-    e = {'conds': [], 'sl_k': round(random.uniform(1.5, 6), 2), 'rr': round(random.uniform(1, 4), 2), 'hold': random.choice([6, 12, 18, 24])}
-    for nom in random.sample(RASGOS, random.randint(1, 3)):
+    e = {'conds': [], 'sl_k': round(random.uniform(1.5, 6), 2), 'rr': round(random.uniform(1, 4), 2), 'hold': random.choice(getattr(D, 'holds', [6, 12, 18, 24]))}
+    if getattr(D, 'cortos', False):
+        e['lado'] = random.choice([1, -1])
+    for nom in random.sample(getattr(D, 'rasgos', RASGOS), random.randint(1, 3)):
         u = _umbral(D, nom)
         if u is not None:
             e['conds'].append([nom, random.choice('<>'), u])
@@ -300,15 +310,17 @@ def _mutar(e, D):
         c = random.choice(e['conds'])
         c[2] = _umbral(D, c[0]) if random.random() < 0.5 else round(c[2] * random.uniform(0.8, 1.2), 4)
     elif r < 0.55 and len(e['conds']) < 5:
-        nom = random.choice(RASGOS)
+        nom = random.choice(getattr(D, 'rasgos', RASGOS))
         u = _umbral(D, nom)
         if u is not None:
             e['conds'].append([nom, random.choice('<>'), u])
     elif r < 0.65 and len(e['conds']) > 1:
         e['conds'].pop(random.randrange(len(e['conds'])))
+    elif r < 0.7 and getattr(D, 'cortos', False):
+        e['lado'] = -e.get('lado', 1)
     else:
         k = random.choice(['sl_k', 'rr', 'hold'])
-        e[k] = random.choice([6, 12, 18, 24]) if k == 'hold' else round(max(0.8, e[k] * random.uniform(0.75, 1.3)), 2)
+        e[k] = random.choice(getattr(D, 'holds', [6, 12, 18, 24])) if k == 'hold' else round(max(0.8, e[k] * random.uniform(0.75, 1.3)), 2)
     return e
 
 
@@ -319,20 +331,26 @@ def _cruzar(a, b):
             vistos.add((c[0], c[1]))
             conds.append(c)
     conds = conds or a['conds'][:1]
-    return {'conds': json.loads(json.dumps(conds)), 'sl_k': random.choice([a, b])['sl_k'], 'rr': random.choice([a, b])['rr'], 'hold': random.choice([a, b])['hold']}
+    h = {'conds': json.loads(json.dumps(conds)), 'sl_k': random.choice([a, b])['sl_k'], 'rr': random.choice([a, b])['rr'], 'hold': random.choice([a, b])['hold']}
+    if 'lado' in a:
+        h['lado'] = a['lado']
+    return h
 
 
 def describir(e):
-    return ' y '.join(f"{n} {o} {u:g}" for n, o, u in e['conds']) + f" → SL {e['sl_k']:g}×ATR, TP {e['rr']:g}×SL, máx. {e['hold'] * 5} min"
+    return ('CORTO: ' if e.get('lado') == -1 else 'LARGO: ' if e.get('lado') == 1 else '') + ' y '.join(f"{n} {o} {u:g}" for n, o, u in e['conds']) + f" → SL {e['sl_k']:g}×ATR, TP {e['rr']:g}×SL, máx. {e['hold'] * 5} min"
 
 
-def evolucionar(poblacion=160, generaciones=20):
-    D = Datos()
+def evolucionar(poblacion=160, generaciones=20, D=None, manuales=None, salon_clave='fabrica_salon', ultimo=None, grabar=None):
+    """Una ronda del generador. Por defecto, memecoins; la fábrica de futuros pasa sus datos, manuales, salón y estado."""
+    D = D or Datos()
+    manuales = MANUALES if manuales is None else manuales
+    ultimo = _ultimo if ultimo is None else ultimo
     if D.n < 300:
-        _ultimo['msg'] = f'Esperando datos: {D.n} muestras listas (mínimo 300)'
+        ultimo['msg'] = f'Esperando datos: {D.n} muestras listas (mínimo 300)'
         return None
-    salon = db.ajuste('fabrica_salon') or []
-    pob = [json.loads(json.dumps(x)) for x in salon] + [{k: m[k] for k in ('conds', 'sl_k', 'rr', 'hold')} for m in MANUALES]
+    salon = db.ajuste(salon_clave) or []
+    pob = [json.loads(json.dumps(x)) for x in salon] + [_base(m) for m in manuales]
     pob += [_al_azar(D) for _ in range(poblacion - len(pob))]
     for g in range(generaciones):
         punt = sorted(((_aptitud(e, D), i) for i, e in enumerate(pob)), reverse=True)
@@ -354,14 +372,14 @@ def evolucionar(poblacion=160, generaciones=20):
         vistos.add(clave)
         ev = evaluar(e, D, e.get('desde'))
         if ev['entreno']['n'] >= 15 and (ev['entreno']['medio'] or 0) > 0 and ev['prueba']['n'] >= 8 and (ev['prueba']['medio'] or 0) > 0:
-            nuevo.append({**{k: e[k] for k in ('conds', 'sl_k', 'rr', 'hold')}, 'desde': e.get('desde') or ahora, 'id': e.get('id') or f'G{ahora % 100000}-{len(nuevo)}'})
+            nuevo.append({**_base(e), 'desde': e.get('desde') or ahora, 'id': e.get('id') or f"{getattr(D, 'prefijo', 'G')}{ahora % 100000}-{len(nuevo)}"})
     nuevo.sort(key=lambda e: -_aptitud(e, D))
-    db.poner_ajuste('fabrica_salon', nuevo[:20])
-    _ultimo.update(evo=ahora, gen=_ultimo['gen'] + 1, msg=f'{D.n} muestras · {len(nuevo)} estrategias pasan la validación')
+    db.poner_ajuste(salon_clave, nuevo[:20])
+    ultimo.update(evo=ahora, gen=ultimo['gen'] + 1, msg=f'{D.n} muestras · {len(nuevo)} estrategias pasan la validación')
     try:
-        _grabar_ronda(D, pob, nuevo, poblacion * generaciones)
+        (grabar or _grabar_ronda)(D, pob, nuevo, poblacion * generaciones)
     except Exception as ex:
-        _ultimo['msg'] += f' (conciencia: {str(ex)[:60]})'
+        ultimo['msg'] += f' (conciencia: {str(ex)[:60]})'
     return nuevo
 
 

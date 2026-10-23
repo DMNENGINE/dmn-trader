@@ -50,8 +50,11 @@ def arista(de, a, tipo, peso=1.0, datos=None):
           (de, a, tipo, peso, json.dumps(datos) if datos is not None else None, int(time.time())))
 
 
-def _nivel_actual():
-    r = db.uno('SELECT nivel FROM con_eventos WHERE nivel IS NOT NULL ORDER BY id DESC LIMIT 1')
+MERCADO = "COALESCE(json_extract(datos,'$.mercado'),'memes')"
+
+
+def _nivel_actual(mercado='memes'):
+    r = db.uno(f"SELECT nivel FROM con_eventos WHERE tipo='ronda' AND {MERCADO}=? ORDER BY id DESC LIMIT 1", (mercado,))
     return r['nivel'] if r else 0.0
 
 
@@ -63,13 +66,14 @@ def evento(tipo, titulo, datos=None, nivel=None, apolo=False):
                   'pendiente' if apolo else None))
 
 
-def calcular_nivel(muestras, probadas, mejor_prueba, mejor_vivo):
+def calcular_nivel(muestras, probadas, mejor_prueba, mejor_vivo, escala=5.0):
     """0-100. Datos: 25 (llega al máximo con 100 000 muestras). Exploración: 15 (50 000 estrategias simuladas).
-    Ventaja: 60 = 25 fuera de muestra (+5 %/op) + 35 en vivo (+5 %/op). Sin ventaja nunca pasa de 40."""
+    Ventaja: 60 = 25 fuera de muestra + 35 en vivo, llenos con +escala por operación (memes 5 %, futuros 20 $/contrato).
+    Sin ventaja nunca pasa de 40."""
     datos = 25 * min(1, math.log10(max(muestras, 1)) / 5)
     expl = 15 * min(1, math.log10(max(probadas, 1)) / math.log10(50_000))
-    v1 = 25 * min(1, max(0, mejor_prueba or 0) / 5)
-    v2 = 35 * min(1, max(0, mejor_vivo or 0) / 5)
+    v1 = 25 * min(1, max(0, mejor_prueba or 0) / escala)
+    v2 = 35 * min(1, max(0, mejor_vivo or 0) / escala)
     return round(datos + expl + v1 + v2, 1)
 
 # ---------------- ganchos (los llama la fábrica y el piloto) ----------------
@@ -94,19 +98,24 @@ def velas(lote):
 def ronda(r):
     """r = {gen, muestras, vivas, tokens, probadas, pasan, top:[{id, regla, nombre?, entreno, prueba, vivo, ops:[{token, simbolo, ts, res}]}]}"""
     preparar()
-    probadas = (db.ajuste('con_probadas') or 0) + r['probadas']
-    db.poner_ajuste('con_probadas', probadas)
+    m = r.get('mercado', 'memes')
+    suf = '' if m == 'memes' else '_' + m
+    ud = ' %' if m == 'memes' else ' $'
+    pre = '' if m == 'memes' else m.capitalize() + ' · '
+    probadas = (db.ajuste('con_probadas' + suf) or 0) + r['probadas']
+    db.poner_ajuste('con_probadas' + suf, probadas)
     mejor_p = max([t['prueba']['medio'] for t in r['top'] if t['prueba']['n'] >= 15 and t['prueba']['medio'] is not None] or [None], key=lambda x: x if x is not None else -1e9)
     mejor_v = max([t['vivo']['medio'] for t in r['top'] if t['vivo']['n'] >= 10 and t['vivo']['medio'] is not None] or [None], key=lambda x: x if x is not None else -1e9)
-    nivel = calcular_nivel(r['muestras'], probadas, mejor_p, mejor_v)
-    previo = db.uno("SELECT id, datos FROM con_eventos WHERE tipo='ronda' ORDER BY id DESC LIMIT 1")
-    titulo = (f"Ronda {r['gen']}: {r['muestras']} muestras, {r['probadas']} estrategias simuladas, {r['pasan']} pasan la validación"
-              + (f"; mejor fuera de muestra {mejor_p:+.1f} %/op" if mejor_p is not None else ''))
+    nivel = calcular_nivel(r['muestras'], probadas, mejor_p, mejor_v, r.get('escala', 5.0))
+    previo = db.uno(f"SELECT id, datos FROM con_eventos WHERE tipo='ronda' AND {MERCADO}=? ORDER BY id DESC LIMIT 1", (m,))
+    titulo = (f"{pre}Ronda {r['gen']}: {r['muestras']} muestras, {r['probadas']} estrategias simuladas, {r['pasan']} pasan la validación"
+              + (f"; mejor fuera de muestra {mejor_p:+.1f}{ud}/op" if mejor_p is not None else ''))
     datos = {k: r[k] for k in ('gen', 'muestras', 'vivas', 'tokens', 'probadas', 'pasan')}
+    datos['mercado'] = m
     datos.update(mejor_prueba=mejor_p, mejor_vivo=mejor_v, probadas_total=probadas,
                  top=[{k: t.get(k) for k in ('id', 'nombre', 'regla', 'entreno', 'prueba', 'vivo')} for t in r['top']])
     eid = evento('ronda', titulo, datos, nivel)
-    rn = nodo(f'ronda:{eid}', 'ronda', f"Ronda {r['gen']}", {'nivel': nivel, 'pasan': r['pasan'], 'mejor_prueba': mejor_p})
+    rn = nodo(f'ronda:{eid}', 'ronda', f"{pre}Ronda {r['gen']}", {'nivel': nivel, 'pasan': r['pasan'], 'mejor_prueba': mejor_p})
     if previo:
         arista(rn, f"ronda:{previo['id']}", 'sigue_a', 1, {'nivel_antes': json.loads(previo['datos']).get('nivel')})
     for t in r['top']:
@@ -118,17 +127,18 @@ def ronda(r):
             p['n'] += 1
             p['s'] += o['res']
         for tok, p in porm.items():
-            arista(en, nodo(f'moneda:{tok}', 'moneda', p['simbolo'] or tok[:6]), 'operó', p['n'], {'medio': round(p['s'] / p['n'], 2)})
+            arista(en, nodo(f'moneda:{tok}', 'moneda' if m == 'memes' else 'futuro', p['simbolo'] or tok[:6]), 'operó', p['n'], {'medio': round(p['s'] / p['n'], 2)})
     # hitos para la memoria principal
-    record = db.ajuste('con_record_prueba')
-    if mejor_p is not None and mejor_p > 0 and (record is None or mejor_p > record + 0.5):
-        db.poner_ajuste('con_record_prueba', mejor_p)
+    record = db.ajuste('con_record_prueba' + suf)
+    if mejor_p is not None and mejor_p > 0 and (record is None or mejor_p > record + 0.1 * r.get('escala', 5.0)):
+        db.poner_ajuste('con_record_prueba' + suf, mejor_p)
         t = next(t for t in r['top'] if t['prueba']['medio'] == mejor_p)
-        evento('record', f"DMN Trader (fábrica de estrategias): nuevo récord fuera de muestra, {mejor_p:+.1f} % por operación en "
+        evento('record', f"DMN Trader (fábrica de {'estrategias' if m == 'memes' else m}): nuevo récord fuera de muestra, {mejor_p:+.1f}{ud} por operación en "
                f"{t['prueba']['n']} operaciones simuladas con la regla «{t['regla']}». Aún no es dinero real: falta probarla en vivo.",
                {'estrategia': t['id']}, nivel, apolo=True)
-    _estado_apolo(nivel, r, mejor_p, mejor_v)
-    _diario()
+    if m == 'memes':
+        _estado_apolo(nivel, r, mejor_p, mejor_v)
+        _diario()
     sincronizar()
     return nivel
 
@@ -211,9 +221,9 @@ def sincronizar():
 # ---------------- lectura ----------------
 
 
-def linea(limite=200):
+def linea(limite=200, mercado='memes'):
     preparar()
-    rs = db.q("SELECT ts, nivel, datos FROM con_eventos WHERE tipo='ronda' ORDER BY id DESC LIMIT ?", (limite,))[::-1]
+    rs = db.q(f"SELECT ts, nivel, datos FROM con_eventos WHERE tipo='ronda' AND {MERCADO}=? ORDER BY id DESC LIMIT ?", (mercado, limite))[::-1]
     out = []
     for r in rs:
         d = json.loads(r['datos'])
@@ -226,7 +236,7 @@ def resumen():
     preparar()
     ev = db.q("SELECT ts, tipo, titulo, nivel, apolo FROM con_eventos WHERE tipo!='velas' ORDER BY id DESC LIMIT 12")
     cnt = {r['tipo']: r['n'] for r in db.q('SELECT tipo, COUNT(*) n FROM con_nodos GROUP BY tipo')}
-    return {'nivel': _nivel_actual(), 'linea': linea(150), 'eventos': ev, 'nodos': cnt,
+    return {'nivel': _nivel_actual(), 'linea': linea(150), 'nivel_futuros': _nivel_actual('futuros'), 'linea_futuros': linea(150, 'futuros'), 'eventos': ev, 'nodos': cnt,
             'aristas': db.uno('SELECT COUNT(*) n FROM con_aristas')['n'], 'velas_total': db.ajuste('con_velas_total') or 0,
             'apolo_pendientes': db.uno("SELECT COUNT(*) n FROM con_eventos WHERE apolo='pendiente'")['n']}
 
