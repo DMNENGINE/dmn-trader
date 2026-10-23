@@ -1392,7 +1392,7 @@ def _quiebra(e, a, it, eq, ctx):
         nuevo, inf = _g(a), 'Sigue con su criterio: las lecciones de esta quiebra van en su próximo prompt.'
     else:
         nuevo, inf = buscar_solucion(e, a, ctx)
-    _leccion(a['id'], it['id'], None, 'quiebra', f"💀 {a['nombre']} quebró (llegó a {it['max_equity']:.3f} $). Causas: {causa}. {inf}", {})
+    _leccion(a['id'], it['id'], None, 'quiebra', f"💀 {a['nombre']} quebró (máximo {it['max_equity']:.2f} $ de {it['capital']:.2f} $ iniciales). Causas: {causa}. {inf}", {})
     _poner(a['id'], genoma_desde=int(time.time()), estado='quebrado')
     _nuevo_intento(e, db.uno('SELECT * FROM ag_agentes WHERE id=?', (a['id'],)), nuevo, 'tras quiebra')
 
@@ -1601,7 +1601,7 @@ def informe(desde=None):
         f"Desde {time.strftime('%d/%m %H:%M', time.localtime(desde))}: {len(agentes())} agentes en {NODO}" + (f" + nodos {', '.join(n['nodo'] for n in nodos)}" if nodos else '') +
         f", generación {e.get('generacion', 0)}. {len(tr)} operaciones, {g} ganadas ({(g / len(tr) * 100) if tr else 0:.0f} %).",
         f"Intentos: {len(its)} · quiebras {sum(1 for i in its if i['resultado'] == 'quiebra')} · metas {sum(1 for i in its if i['resultado'] == 'meta')}" +
-        (f" · mejor capital alcanzado {mx['max_equity']:.3f} $ (meta {mx['meta']:.0f} $)." if mx else '.'),
+        (f" · mejor capital alcanzado {mx['max_equity']:.2f} $ (meta {mx['meta']:.0f} $)." if mx else '.'),
         'Sistemas que mejor funcionan: ' + (', '.join(f"{k} {m:+.2f}R ({n})" for k, m, n in ranking[:4]) or 'aún sin datos suficientes') + '.',
         'Sistemas que peor: ' + (', '.join(f"{k} {m:+.2f}R ({n})" for k, m, n in ranking[-3:]) if len(ranking) > 4 else '—') + '.',
         'Mejores agentes ahora: ' + (', '.join(f"{a['nombre']} {f:+.2f}R ({_g(a)['estrategia']} {_g(a)['marco']})" for f, a in mejores if f is not None) or '—') + '.',

@@ -335,11 +335,11 @@ async function cargarAgente() {
     const loc = m.nodos.find(x => x.local) || m.nodos[0], k = loc.kpis, t = (x, y) => `<div class="tile"><small>${x}</small><b>${y}</b></div>`;
     $('#agEstado').innerHTML = k.activo ? `<span class="verde">● ${k.agentes} agentes operando</span> · ciclo ${k.tick_s}s` : '<span class="tenue">○ parado</span>';
     $('#agKpis').innerHTML = [t('Agentes (todos los nodos)', m.total.agentes), t('Generación', k.generacion), t('Operaciones', m.total.trades), t('Acierto', k.trades ? n(k.ganados / k.trades * 100, 0) + '%' : '—'),
-      t('R medio', k.r_medio != null ? sg(k.r_medio) : '—'), t('Quiebras', m.total.quiebras), t('Metas 🏆', m.total.metas), t('Mejor capital', n(k.max_equity, 3) + ' $')].join('');
+      t('R medio', k.r_medio != null ? sg(k.r_medio) : '—'), t('Quiebras', m.total.quiebras), t('Metas 🏆', m.total.metas), t('Mejor capital', n(k.max_equity, 2) + ' $')].join('');
     $('#agNodos').textContent = m.nodos.map(x => `${x.nodo}: ${(x.agentes || []).length}${x.local ? ' (aquí)' : x.en_linea ? ' (en línea)' : ' (desconectado)'}`).join(' · ');
     const todos = m.nodos.flatMap(x => (x.agentes || []).map(a => ({ ...a, nodo: x.nodo }))).sort((a, b) => (b.r_medio ?? -9) - (a.r_medio ?? -9));
     $('#agTabla').innerHTML = tabla([['Agente', a => `<b>${esc(a.nombre)}</b>`], ['Nodo', a => a.nodo], ['Gen', a => a.generacion], ['Sistema', a => `${a.estrategia} · ${a.marco}${a.tendencia ? ' · tend' : ''} · ${a.riesgo_pct}%`],
-      ['Capital', a => n(a.equity, 4)], ['Máximo', a => n(a.max_equity, 3)], ['Trades', a => `${a.trades} (${a.ganados}✔)`], ['R medio', a => a.r_medio != null ? sg(a.r_medio) : '—'],
+      ['Capital', a => n(a.equity, 2)], ['Máximo', a => n(a.max_equity, 2)], ['Trades', a => `${a.trades} (${a.ganados}✔)`], ['R medio', a => a.r_medio != null ? sg(a.r_medio) : '—'],
       ['Intentos', a => a.intentos], ['🏆', a => a.metas || ''], ['Estado', a => esc(a.estado)], ['Último', a => `<span class="chico">${esc(a.ultimo || '')}</span>`]], todos);
     $('#agInforme').textContent = inf.texto;
     $('#agLec').innerHTML = m.lecciones.map(l => `<div class="lec">${esc(l.texto)}<br><small>${fecha(l.ts)} · ${l.tipo}</small></div>`).join('') || '<span class="tenue">Aún sin lecciones.</span>';
