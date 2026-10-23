@@ -1405,14 +1405,18 @@ def _vista_agentes(lim=None):
     curvas = {}
     for r in db.q('SELECT cuenta_id, valor FROM equity WHERE ts>=? ORDER BY ts, rowid', (int(time.time()) - 6 * 3600,)):
         curvas.setdefault(r['cuenta_id'], []).append(r['valor'])
+    # último equity guardado de cada cuenta: valorar en vivo las posiciones de 50 agentes tardaba ~20 s y Mission Control cortaba
+    ultimo = {r['cuenta_id']: r['valor'] for r in db.q('SELECT cuenta_id, valor FROM equity WHERE rowid IN (SELECT MAX(rowid) FROM equity GROUP BY cuenta_id)')}
     cap = (estado() or {}).get('capital') or 1.0
     out = []
     for a in agentes():
         g = _g(a)
-        try:
-            eq = motor.resumen(a['cuenta_id'])['equity']
-        except Exception:
-            eq = None
+        eq = ultimo.get(a['cuenta_id'])
+        if eq is None:
+            try:
+                eq = motor.resumen(a['cuenta_id'])['equity']
+            except Exception:
+                eq = None
         st, cv = stats.get(a['id'], {}), curvas.get(a['cuenta_id'], [])
         paso = max(1, len(cv) // 30)
         out.append({'id': a['id'], 'nombre': a['nombre'], 'estado': a['estado'], 'ultimo': a['ultimo'], 'equity': round(eq, 4) if eq is not None else None,
