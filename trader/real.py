@@ -84,7 +84,7 @@ def foto():
             c['coste'] += sg * _f(a.get('cost_usd'))
             c['fees'] += _f(a.get('gas_usd')) + _f(a.get('dex_usd'))
             c['desde'] = min(c['desde'] or 9e12, a.get('timestamp') or 9e12)
-    tokens = list(dict.fromkeys([o.get('base_token') for o in ords if o.get('status') == 'open'] + [k for k, c in compras.items() if c['cant'] > 0] + list(hold)))
+    tokens = list(dict.fromkeys([o.get('base_token') for o in ords if o.get('status') in ('open', 'prepare')] + [k for k, c in compras.items() if c['cant'] > 0] + list(hold)))
     pos = []
     for tk in [t for t in tokens if t]:
         try:
@@ -104,7 +104,7 @@ def foto():
         cant_c = _f(h.get('accu_amount')) or c.get('cant') or 0.0
         entrada = coste / cant_c if cant_c else None
         valor = bal * precio
-        st = next((o for o in ords if o.get('base_token') == tk and o.get('status') == 'open'), None)
+        st = next((o for o in ords if o.get('base_token') == tk and o.get('status') in ('open', 'prepare')), None)
         conds = [{'tipo': x['order_type'], 'estado': x.get('status'), 'precio': _f(x.get('check_price')), 'pct': _f(x.get('price_scale')),
                   'venta': _f(x.get('sell_ratio'))} for x in (st or {}).get('condition_orders') or []]
         tp = next((x['precio'] for x in conds if x['tipo'].startswith('profit') and x['estado'] == 'check'), None)
@@ -119,10 +119,25 @@ def foto():
                     'caduca': int(st['expire_time'] / 1000) if st and st.get('expire_time') else None})
     act = actividad(_ultimo['actividad'][:40])
     return {'ts': int(ahora), 'wallet': w, 'sol': sol, 'sol_usd': sol_usd, 'posiciones': pos, 'actividad': act,
-            'estrategias': [{'token': o.get('base_token'), 'estado': o.get('status'), 'creada': int(_f(o.get('create_time')) / 1000),
+            'estrategias': [{'token': o.get('base_token'), 'simbolo': _simbolo(o.get('base_token')), 'estado': o.get('status'),
+                             'creada': int(_f(o.get('create_time')) / 1000), 'caduca': int(_f(o.get('expire_time')) / 1000) or None,
+                             'invertir_sol': _f(o.get('quote_investment')) / 1e9 or None,
                              'cerrada': int(_f(o.get('close_time')) / 1000) or None, 'condiciones': [
                                  {'tipo': c['order_type'], 'estado': c.get('status'), 'precio': _f(c.get('check_price')), 'pct': _f(c.get('price_scale'))}
                                  for c in o.get('condition_orders') or []]} for o in ords][:20]}
+
+
+_SIMB = {}
+
+
+def _simbolo(tk):
+    """Ticker de un token (con caché: no cambia)."""
+    if tk and tk not in _SIMB:
+        try:
+            _SIMB[tk] = (onchain._api('/v1/token/info', chain='sol', address=tk) or {}).get('symbol')
+        except Exception:
+            return None
+    return _SIMB.get(tk)
 
 
 def actividad(lista):

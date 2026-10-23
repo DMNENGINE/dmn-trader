@@ -368,7 +368,12 @@ async function cargarReal() {
   $('#reBot').innerHTML = P.length ? P.map(p => `<div class="re-bot">Vigilando <b>${esc(p.simbolo)}</b>: va ${sg(p.pnl_pct, 1)} % (${np(p.precio)} $).
     ${p.tp ? `Vende el ${n(p.condiciones.find(c => c.tipo.startsWith('profit'))?.venta ?? 100, 0)} % si sube a <b class="verde">${np(p.tp)} $</b> (${sg(p.dist_tp, 1)} % desde aquí)` : 'Sin take-profit puesto'}${p.sl ? ` o si baja a <b class="rojo">${np(p.sl)} $</b> (${sg(p.dist_sl, 1)} %).` : '. <span class="rojo">Sin stop-loss puesto.</span>'}
     ${p.caduca ? `<span class="tenue chico"> Las órdenes caducan en ${hace_(p.caduca - ahora)}.</span>` : ''}</div>`).join('')
-    : `<div class="tenue">Sin posiciones abiertas: el bot no vigila nada. ${r.sol ? `Hay ${n(r.sol, 4)} SOL libres para la próxima operación.` : ''}</div>`;
+    : '';
+  const pend = (r.estrategias || []).filter(e => ['open', 'prepare'].includes(e.estado) && !P.some(p => p.token === e.token) && e.condiciones.some(c => c.tipo.startsWith('buy') && c.estado === 'check'));
+  $('#reBot').innerHTML += pend.map(e => { const b = e.condiciones.find(c => c.tipo.startsWith('buy')), tp = e.condiciones.find(c => c.tipo.startsWith('profit')), sl = e.condiciones.find(c => c.tipo.startsWith('loss'));
+    return `<div class="re-bot" style="border-left-color:var(--ambar)">Esperando para comprar <b>${esc(e.simbolo || e.token.slice(0, 6))}</b>${e.invertir_sol ? ` con ${n(e.invertir_sol, 3)} SOL` : ''}: compra si baja a <b>${np(b.precio)} $</b>.
+      Después vende si sube un <span class="verde">${tp ? n(tp.pct, 0) : '—'} %</span> o si baja un <span class="rojo">${sl ? n(sl.pct, 0) : '—'} %</span>.${e.caduca ? `<span class="tenue chico"> Caduca en ${hace_(e.caduca - ahora)}.</span>` : ''}</div>`; }).join('');
+  if (!P.length && !pend.length) $('#reBot').innerHTML = `<div class="tenue">El bot no vigila nada ahora. ${r.sol ? `Hay ${n(r.sol, 4)} SOL libres para la próxima operación.` : ''}</div>`;
   $('#rePos').innerHTML = P.length ? P.map(p => {
     const lo = Math.min(p.sl || p.precio, p.precio, p.entrada || p.precio) * 0.99, hi = Math.max(p.tp || p.precio, p.precio, p.entrada || p.precio) * 1.01, x = v => ((v - lo) / (hi - lo) * 100).toFixed(1) + '%';
     return `<div class="re-pos"><div>${p.logo ? `<img src="${esc(p.logo)}" alt="">` : ''}<b>${esc(p.simbolo)}</b> <span class="tenue chico">${esc(p.nombre || '')}</span>
