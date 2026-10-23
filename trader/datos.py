@@ -11,6 +11,36 @@ INTERVALOS = {'1m': '5d', '2m': '5d', '5m': '1mo', '15m': '1mo', '30m': '1mo', '
 TTL_VELAS = {'1m': 20, '2m': 30, '5m': 45, '15m': 90, '30m': 120, '60m': 300, '1h': 300, '1d': 600, '1wk': 3600, '1mo': 3600}
 
 _cache, _lock = {}, threading.Lock()
+# velas en TIEMPO REAL de NinjaTrader para los futuros ('MES=F'…): las manda el PC cada minuto (POST /api/futuros/velas).
+# Si son de hace menos de 10 min se usan en vez de Yahoo (que da los futuros de CME con ~10 min de retraso).
+NT, NT_FRESCO = {}, 600
+
+
+def recibir_nt(d):
+    for s, x in (d or {}).items():
+        if s.endswith('=F'):
+            NT[s] = {'ts': time.time(), '1m': x.get('1m') or [], '5m': x.get('5m') or []}
+    return {'ok': True, 'simbolos': sorted(NT)}
+
+
+def _nt(simbolo, intervalo):
+    x = NT.get(simbolo)
+    if not x or time.time() - x['ts'] > NT_FRESCO:
+        return None
+    if intervalo in ('1m', '5m'):
+        return [dict(b) for b in x[intervalo]] or None
+    seg = {'15m': 900}.get(intervalo)  # 1 h sigue en Yahoo: hace falta más historia que la que se manda
+    if not seg or not x['5m']:
+        return None
+    out = []
+    for b in x['5m']:  # 15 min a partir de las de 5 min
+        t = b['t'] // seg * seg
+        if out and out[-1]['t'] == t:
+            o = out[-1]
+            o['h'], o['l'], o['c'], o['v'] = max(o['h'], b['h']), min(o['l'], b['l']), b['c'], o['v'] + b['v']
+        else:
+            out.append({**b, 't': t})
+    return out
 
 
 class ErrorDatos(Exception):
@@ -145,7 +175,13 @@ def cotizacion(simbolo):
             'bolsa': m.get('fullExchangeName') or m.get('exchangeName'), 'zona': m.get('exchangeTimezoneName'),
             'ts': m.get('regularMarketTime'), 'abierto': mercado_abierto(m),
         }
-    return _cacheado(('q', simbolo), 8, pedir)
+    q = _cacheado(('q', simbolo), 8, pedir)
+    v = _nt(simbolo, '1m') if simbolo.endswith('=F') else None
+    if v:  # precio en tiempo real de NinjaTrader
+        p, prev = v[-1]['c'], q.get('cierre_anterior')
+        q = {**q, 'precio': p, 'ts': v[-1]['t'] + 60, 'fuente': 'ninjatrader', 'cambio': round(p - prev, 6) if prev else None,
+             'cambio_pct': round((p / prev - 1) * 100, 3) if prev else None}
+    return q
 
 
 def velas(simbolo, intervalo='1d', rango=None, inicio=None, fin=None):
@@ -158,6 +194,10 @@ def velas(simbolo, intervalo='1d', rango=None, inicio=None, fin=None):
             return onchain.velas(simbolo, intervalo, rango, inicio, fin)
         except onchain.ErrorOnchain as e:
             raise ErrorDatos(str(e))
+    if simbolo.endswith('=F') and not (rango or inicio):
+        v = _nt(simbolo, intervalo)
+        if v:
+            return v
     if intervalo in ('1m', '5m', '15m', '60m') and not (rango or inicio) and es_coinbase(simbolo):
         try:  # intradía de cripto: Coinbase (300 velas, al segundo)
             return _cacheado(('vcb', simbolo, intervalo), 15, lambda: _velas_cb(simbolo, intervalo))

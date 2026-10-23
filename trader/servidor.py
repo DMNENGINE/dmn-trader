@@ -390,6 +390,17 @@ def r_piloto_cfg(q, b):
     return piloto.poner_cfg(b or {})
 
 
+@ruta('POST', '/api/futuros/velas')
+def r_futuros_velas(q, b):
+    """El PC manda las velas en tiempo real de NinjaTrader ({'MES=F': {'1m': [...], '5m': [...]}}): las usa el enjambre."""
+    return datos.recibir_nt(b)
+
+
+@ruta('POST', '/api/enjambre/mercados')
+def r_enjambre_mercados(q, b):
+    return agente.poner_mercados((b or {}).get('mercados') or [])
+
+
 @ruta('POST', '/api/futuros/config')
 def r_futuros_cfg(q, b):
     """Futuros (NinjaTrader): activo, real_activo, cuenta_real, real_perdida_dia, qty, cerrar_todo. Llega al PC en ≤1 min."""

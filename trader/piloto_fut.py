@@ -87,6 +87,31 @@ def _barras(s):
     return {'t': a[:, 0] - 300, 'o': a[:, 1], 'h': a[:, 2], 'l': a[:, 3], 'c': a[:, 4], 'v': a[:, 5]}
 
 
+def reenviar_velas():
+    """Velas de 1 y 5 min de NinjaTrader → la central (Pi), para que el enjambre opere futuros en tiempo real."""
+    import urllib.parse
+    from . import agente, fabrica_fut as ff
+    if not agente.CENTRAL:
+        return 0
+    paquete = {}
+    for s, info in ff.FUT.items():
+        x = {}
+        for m, dias in ((1, 1), (5, 3)):
+            try:
+                d = puente(f'/barras?inst={urllib.parse.quote(info["nt"])}&min={m}&dias={dias}')
+            except SinPuente:
+                continue
+            # NinjaTrader marca la vela con su hora de CIERRE; el resto del sistema usa la de apertura
+            x[f'{m}m'] = [{'t': int(v[0]) - 60 * m, 'o': v[1], 'h': v[2], 'l': v[3], 'c': v[4], 'v': v[5]} for v in d['velas'][-600:]]
+        if x:
+            paquete[s] = x
+    if paquete:
+        rq = urllib.request.Request(agente.CENTRAL + '/api/futuros/velas', data=json.dumps(paquete).encode(), method='POST',
+                                    headers={'content-type': 'application/json', **({'x-token': agente.CENTRAL_TOKEN} if agente.CENTRAL_TOKEN else {})})
+        urllib.request.urlopen(rq, timeout=20).read()
+    return len(paquete)
+
+
 def _pnl_hoy(e):
     hoy = time.strftime('%Y-%m-%d')
     return sum(o.get('pnl') or 0 for o in e.get('ops') or [] if o.get('real') and time.strftime('%Y-%m-%d', time.localtime(o['cerrada'])) == hoy)
@@ -209,6 +234,10 @@ def paso():
 
 def _bucle():
     while True:
+        try:
+            reenviar_velas()
+        except Exception:
+            pass
         try:
             paso()
         except Exception as ex:

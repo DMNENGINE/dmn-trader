@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS ag_nodos (nodo TEXT PRIMARY KEY, visto INTEGER, datos
 """
 CRIPTO = ['BTC-USD', 'ETH-USD', 'SOL-USD', 'XRP-USD', 'DOGE-USD', 'AVAX-USD', 'LINK-USD', 'ADA-USD']
 ACCIONES = ['SPY', 'QQQ', 'TSLA', 'NVDA', 'AAPL', 'AMD', 'META', 'AMZN']
+FUTUROS = ['MES=F', 'MNQ=F', 'MGC=F', 'MCL=F', 'M2K=F', 'MYM=F']  # micros de CME; en vivo con velas de NinjaTrader (datos.NT)
 MARCOS = {'1m': 1, '5m': 5, '15m': 15}
 CUENTA_CFG = {'comision_por_tipo': {'CRYPTOCURRENCY': 0.1, 'EQUITY': 0.0, 'ETF': 0.0}, 'comision_pct': 0.1, 'comision_fija': 0.0, 'deslizamiento_pct': 0.01, 'riesgo_max_pct': 100, 'riesgo_estricto': False,
               'perdida_diaria_max_pct': 0, 'max_posiciones': 3, 'apalancamiento': 1.0, 'exigir_stop': True, 'permitir_cortos': True}
@@ -439,6 +440,18 @@ def crear_agente(e, genoma, padre=None, generacion=0):
     return a
 
 
+def poner_mercados(mercados):
+    """Cambia los mercados del enjambre en marcha sin reiniciarlo (cripto, acciones, futuros)."""
+    validos = [m for m in mercados if m in ('cripto', 'acciones', 'futuros')]
+    if not validos:
+        raise ValueError('ningún mercado válido')
+    e = estado()
+    e['mercados'] = validos
+    guardar(e)
+    log('🌐 mercados del enjambre: ' + ', '.join(validos))
+    return {'ok': True, 'mercados': validos}
+
+
 def iniciar(n=50, capital=1.0, meta=100.0, mercados=('cripto', 'acciones'), hasta=None):
     preparar()
     e = estado() or {}
@@ -566,6 +579,8 @@ def _universo(e, g=None):
         sims += (e.get('universo') or {}).get('cripto') or CRIPTO
     if 'acciones' in e['mercados']:
         sims += ACCIONES
+    if 'futuros' in e['mercados']:
+        sims += FUTUROS
     bloq = set(e.get('bloqueos', {}).get('simbolos', [])) | set((g or {}).get('simbolos_bloqueados', []))
     return [s for s in sims if s not in bloq]
 
@@ -668,7 +683,8 @@ def muestras_historicas(e, maximo=None):
             gens.append(dict(g, filtro_ia=0.0))
         if len(gens) >= 16:
             break
-    sims = ((e.get('universo') or {}).get('cripto') or CRIPTO)[:6] + (ACCIONES[:3] if 'acciones' in e.get('mercados', []) else [])
+    sims = (((e.get('universo') or {}).get('cripto') or CRIPTO)[:6] + (ACCIONES[:3] if 'acciones' in e.get('mercados', []) else [])
+            + (FUTUROS[:4] if 'futuros' in e.get('mercados', []) else []))
     filas, cache = [], {}
     for g in gens:
         for s in rnd.sample(sims, min(3, len(sims))):
@@ -1255,7 +1271,7 @@ def _patrones_globales(e):
     agentes_ = lambda fs: len({x['agente_id'] for x in fs})
     for s_, fs in por_s.items():  # un símbolo: muchos trades de muchos agentes, repartidos en varias horas
         rs = [x['r'] for x in fs]
-        if len(rs) >= 30 and agentes_(fs) >= 8 and horas(fs) >= 4 and statistics.fmean(rs) < -0.35 and s_ not in b['simbolos'] and len(b['simbolos']) < len(CRIPTO + ACCIONES) - 4:
+        if len(rs) >= 30 and agentes_(fs) >= 8 and horas(fs) >= 4 and statistics.fmean(rs) < -0.35 and s_ not in b['simbolos'] and len(b['simbolos']) < len(CRIPTO + ACCIONES + FUTUROS) - 4:
             b['simbolos'].append(s_)
             _leccion(None, None, None, 'compartida', f"Enjambre: {s_} pierde en {len(rs)} operaciones de {agentes_(fs)} agentes a lo largo de {horas(fs)} horas ({statistics.fmean(rs):+.2f}R de media). Nadie lo opera más.", {'simbolo': s_})
     for h, fs in por_h.items():  # una hora: hace falta verlo en al menos 3 días distintos
@@ -1430,10 +1446,10 @@ def _vista_agentes(lim=None):
 
 def precios():
     out = []
-    for s_ in CRIPTO + ACCIONES:
+    for s_ in CRIPTO + ACCIONES + FUTUROS:
         try:
             q = datos.cotizacion(s_)
-            out.append({'simbolo': s_, 'precio': q['precio'], 'cambio_pct': q['cambio_pct'], 'abierto': q['abierto']})
+            out.append({'simbolo': s_, 'precio': q['precio'], 'cambio_pct': q['cambio_pct'], 'abierto': q['abierto'], 'fuente': q.get('fuente')})
         except Exception:
             pass
     return out
