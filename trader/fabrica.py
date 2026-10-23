@@ -1,0 +1,393 @@
+"""FÁBRICA DE ESTRATEGIAS (memecoins de Solana, solo simulado). Tres piezas:
+
+1. MUESTRAS: cada 10 min fotografía el mercado (ranking de GMGN 5m/1h/24h + flujo smart money/KOL del laboratorio) y guarda
+   por token sus rasgos. Pasadas 2 h baja las velas de 5 min y completa la muestra con rasgos de velas (solo velas ANTERIORES
+   a la foto: sin mirar el futuro) y la RUTA de las 2 h siguientes (máximo, mínimo y cierre de cada vela, en % del precio).
+   Al arrancar con la tabla vacía rellena unos días hacia atrás solo con velas (origen 'hist': tiene sesgo de supervivencia).
+2. ESTRATEGIAS: reglas «rasgo > / < umbral» + salida (SL = k × ATR de 5 min, TP = rr × SL, tiempo máximo). Se simulan sobre
+   las rutas con los costes reales medidos (6 % ida y vuelta) y una sola posición por token a la vez.
+3. GENERADOR: algoritmo evolutivo que inventa y cruza reglas. Aprende con el 70 % más viejo de las muestras y se valida con el
+   30 % más reciente; las que superan la validación entran en el SALÓN y desde ese momento se miden en VIVO (muestras que no
+   existían cuando se inventaron), que es la única prueba que cuenta antes de darles dinero real."""
+import json, math, random, threading, time
+import numpy as np
+from . import db, onchain
+
+CADA, CADA_EVO, HORIZONTE, BARRA, COSTES = 600, 1800, 7200, 300, 6.0
+PASOS = HORIZONTE // BARRA  # 24 velas de 5 min
+ESQUEMA = """
+CREATE TABLE IF NOT EXISTS fab_muestras (id INTEGER PRIMARY KEY, ts INTEGER, token TEXT, simbolo TEXT, origen TEXT, precio REAL,
+  f TEXT, ruta TEXT, lista INTEGER DEFAULT 0, UNIQUE(token, ts));
+CREATE INDEX IF NOT EXISTS ix_fab ON fab_muestras(lista, ts);
+"""
+# rasgos de la foto (ranking + smart money) y de las velas (se calculan al completar la muestra)
+RASGOS = ['ch5m', 'ch1h', 'liq_k', 'mcap_k', 'holders', 'top10', 'rug', 'bundler', 'snipers', 'smart_cnt', 'kol_cnt', 'bots',
+          'compras_ventas', 'edad_h', 'sm_n', 'sm_neto', 'ret4h', 'ch4h', 'rsi', 'atr', 'tend', 'volr']
+MANUALES = [
+    {'nombre': 'Retroceso en tendencia', 'conds': [['tend', '>', 0], ['ret4h', '<', -6], ['ret4h', '>', -25], ['rsi', '<', 52], ['rsi', '>', 35]], 'sl_k': 3, 'rr': 2, 'hold': 24},
+    {'nombre': 'Ruptura con volumen', 'conds': [['ret4h', '>', -2], ['ch1h', '>', 8], ['volr', '>', 1.5]], 'sl_k': 3, 'rr': 2, 'hold': 12},
+    {'nombre': 'Smart money compra', 'conds': [['sm_n', '>', 1.5], ['sm_neto', '>', 300], ['edad_h', '>', 1]], 'sl_k': 3, 'rr': 2, 'hold': 24},
+    {'nombre': 'Smart money en lanzamiento', 'conds': [['sm_n', '>', 1.5], ['sm_neto', '>', 300], ['edad_h', '<', 1]], 'sl_k': 3, 'rr': 2.5, 'hold': 12},
+    {'nombre': 'Rebote de sobreventa', 'conds': [['rsi', '<', 25], ['ch4h', '<', -15], ['volr', '>', 1]], 'sl_k': 2.5, 'rr': 1.5, 'hold': 12},
+    {'nombre': 'Recién graduada con fuerza', 'conds': [['edad_h', '<', 3], ['liq_k', '>', 30], ['compras_ventas', '>', 1.2], ['top10', '<', 0.35]], 'sl_k': 3, 'rr': 2.5, 'hold': 18},
+]
+_hilo, _ultimo = {'t': None}, {'evo': 0, 'msg': '', 'gen': 0}
+
+
+def preparar():
+    db.con().executescript(ESQUEMA)
+
+# ---------------- muestras ----------------
+
+
+def _num(x, d=None):
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return d
+
+
+def foto():
+    """Guarda una muestra por token del ranking (5m, 1h y 24h) con sus rasgos de la foto."""
+    from . import laboratorio_ia
+    filas = {}
+    for iv in ('5m', '1h', '24h'):
+        try:
+            d = onchain._api('/v1/market/rank', chain='sol', interval=iv, limit=100, order_by='volume', direction='desc',
+                             filters=['not_wash_trading'], min_liquidity=10_000, min_volume=20_000)
+            for t in (d or {}).get('rank') or []:
+                filas.setdefault(t['address'], t)
+        except onchain.ErrorOnchain:
+            pass
+    sm = {}
+    for ts, tok, usd, w, _ in list(laboratorio_ia._feed.values()):
+        if time.time() - ts <= 3600:
+            a = sm.setdefault(tok, [set(), 0.0])
+            a[1] += usd
+            if usd > 0:
+                a[0].add(w)
+    ahora = int(time.time()) // 60 * 60
+    n = 0
+    for tok, t in filas.items():
+        if tok in laboratorio_ia.NO_MEME or not _num(t.get('price')):
+            continue
+        b, s = _num(t.get('buys'), 0), _num(t.get('sells'), 0)
+        f = {'ch5m': _num(t.get('price_change_percent5m')), 'ch1h': _num(t.get('price_change_percent1h')),
+             'liq_k': _num(t.get('liquidity'), 0) / 1e3, 'mcap_k': _num(t.get('market_cap'), 0) / 1e3, 'holders': _num(t.get('holder_count')),
+             'top10': _num(t.get('top_10_holder_rate')), 'rug': _num(t.get('rug_ratio')), 'bundler': _num(t.get('bundler_rate')),
+             'snipers': _num(t.get('sniper_count')), 'smart_cnt': _num(t.get('smart_degen_count')), 'kol_cnt': _num(t.get('renowned_count')),
+             'bots': _num(t.get('bot_degen_rate')), 'compras_ventas': b / s if s else None,
+             'edad_h': (time.time() - (t.get('open_timestamp') or t.get('creation_timestamp') or time.time())) / 3600,
+             'sm_n': len(sm.get(tok, [()])[0]), 'sm_neto': round(sm.get(tok, [0, 0.0])[1])}
+        try:
+            db.ex('INSERT OR IGNORE INTO fab_muestras(ts,token,simbolo,origen,precio,f) VALUES(?,?,?,?,?,?)',
+                  (ahora, tok, t.get('symbol') or '', 'vivo', float(t['price']), json.dumps(f)))
+            n += 1
+        except Exception:
+            pass
+    return n
+
+
+def _rasgos_velas(v, i, p):
+    """Rasgos con las velas ANTERIORES a la i (la foto es al abrir la vela i)."""
+    pre = v[max(0, i - 48):i]
+    if len(pre) < 12:
+        return {}
+    c = [x['c'] for x in pre]
+    g = [max(0, b - a) for a, b in zip(c[-15:-1], c[-14:])]
+    pe = [max(0, a - b) for a, b in zip(c[-15:-1], c[-14:])]
+    e, k = c[0], 2 / 21
+    for x in c[1:]:
+        e = x * k + e * (1 - k)
+    vol_reciente = sum(x['v'] for x in pre[-6:]) / 6
+    vol_antes = sum(x['v'] for x in pre[:-6]) / max(1, len(pre) - 6)
+    return {'ret4h': (p / max(x['h'] for x in pre) - 1) * 100, 'ch4h': (p / pre[0]['o'] - 1) * 100,
+            'rsi': 100 - 100 / (1 + (sum(g) / 14) / ((sum(pe) / 14) or 1e-12)) if len(c) >= 15 else None,
+            'atr': sum((x['h'] - x['l']) / x['c'] for x in pre[-12:]) / len(pre[-12:]) * 100,
+            'tend': (p / e - 1) * 100, 'volr': vol_reciente / vol_antes if vol_antes else None}
+
+
+def _ruta(v, i, p):
+    fut = v[i:i + PASOS]
+    return [[round((x['h'] / p - 1) * 100, 2), round((x['l'] / p - 1) * 100, 2), round((x['c'] / p - 1) * 100, 2)] for x in fut]
+
+
+def completar(max_tokens=30):
+    """Pone rasgos de velas y ruta a las muestras de hace más de 2 h (una petición de velas por token)."""
+    lim = int(time.time()) - HORIZONTE - BARRA
+    toks = db.q('SELECT token, simbolo, MIN(ts) a, MAX(ts) b FROM fab_muestras WHERE lista=0 AND ts<? GROUP BY token LIMIT ?', (lim, max_tokens))
+    hechos = 0
+    for t in toks:
+        filas = db.q('SELECT id, ts, precio, f FROM fab_muestras WHERE lista=0 AND token=? AND ts<?', (t['token'], lim))
+        try:
+            s = onchain.registrar('SOL', t['token'], t['simbolo'])
+            v = onchain.velas(s, '5m', inicio=t['a'] - 4 * 3600 - BARRA, fin=t['b'] + HORIZONTE + BARRA)
+        except onchain.ErrorOnchain as e:
+            if 'límite' in str(e):
+                break
+            v = []
+        idx = {x['t']: n for n, x in enumerate(v)}
+        for fl in filas:
+            i = idx.get((fl['ts'] + BARRA - 1) // BARRA * BARRA)  # primera vela que abre en o tras la foto
+            if i is None or len(v) - i < PASOS // 2:
+                # sin velas: si ya pasó mucho, se descarta
+                if fl['ts'] < lim - 6 * 3600:
+                    db.ex('UPDATE fab_muestras SET lista=-1 WHERE id=?', (fl['id'],))
+                continue
+            f = {**json.loads(fl['f']), **_rasgos_velas(v, i, fl['precio'])}
+            db.ex('UPDATE fab_muestras SET f=?, ruta=?, lista=1 WHERE id=?', (json.dumps(f), json.dumps(_ruta(v, i, fl['precio'])), fl['id']))
+            hechos += 1
+        time.sleep(0.5)
+    return hechos
+
+
+def relleno_historico(dias=3, cada=1800, n_tokens=60):
+    """Primer arranque: muestras de los últimos días solo con velas, para que el generador no empiece de cero."""
+    try:
+        d = onchain._api('/v1/market/rank', chain='sol', interval='24h', limit=100, order_by='volume', direction='desc',
+                         filters=['not_wash_trading'], min_liquidity=50_000, min_volume=200_000)
+    except onchain.ErrorOnchain:
+        return 0
+    from . import laboratorio_ia
+    n = 0
+    for t in ((d or {}).get('rank') or [])[:n_tokens]:
+        if t['address'] in laboratorio_ia.NO_MEME:
+            continue
+        try:
+            s = onchain.registrar('SOL', t['address'], t.get('symbol'), t.get('name'))
+            v = onchain.velas(s, '5m', inicio=int(time.time()) - dias * 86400, fin=int(time.time()))
+        except onchain.ErrorOnchain:
+            time.sleep(5)
+            continue
+        for i in range(48, len(v) - PASOS, cada // BARRA):
+            p = v[i]['o']
+            if p <= 0:
+                continue
+            f = {'edad_h': (v[i]['t'] - (t.get('open_timestamp') or v[0]['t'])) / 3600, **_rasgos_velas(v, i, p)}
+            db.ex('INSERT OR IGNORE INTO fab_muestras(ts,token,simbolo,origen,precio,f,ruta,lista) VALUES(?,?,?,?,?,?,?,1)',
+                  (v[i]['t'], t['address'], t.get('symbol') or '', 'hist', p, json.dumps(f), json.dumps(_ruta(v, i, p))))
+            n += 1
+        time.sleep(1)
+    return n
+
+# ---------------- simulación ----------------
+
+
+class Datos:
+    """Muestras listas en matrices: rasgos (NaN si falta), ruta (máx/mín/cierre por vela), ts y token."""
+
+    def __init__(self):
+        filas = db.q('SELECT ts, token, origen, f, ruta FROM fab_muestras WHERE lista=1 ORDER BY ts')
+        self.n = len(filas)
+        self.ts = np.array([r['ts'] for r in filas], dtype=np.int64)
+        tok = {}
+        self.tok = np.array([tok.setdefault(r['token'], len(tok)) for r in filas], dtype=np.int64)
+        self.vivo = np.array([r['origen'] == 'vivo' for r in filas], dtype=bool)
+        self.F = np.full((self.n, len(RASGOS)), np.nan)
+        self.H = np.full((self.n, PASOS), np.nan)
+        self.L = np.full((self.n, PASOS), np.nan)
+        self.C = np.full((self.n, PASOS), np.nan)
+        for k, r in enumerate(filas):
+            f = json.loads(r['f'])
+            for j, nom in enumerate(RASGOS):
+                x = f.get(nom)
+                if x is not None:
+                    self.F[k, j] = x
+            ru = json.loads(r['ruta'] or '[]')[:PASOS]
+            if ru:
+                a = np.array(ru, dtype=float)
+                self.H[k, :len(a)], self.L[k, :len(a)], self.C[k, :len(a)] = a[:, 0], a[:, 1], a[:, 2]
+        # lo que no llega a 24 velas se rellena con la última conocida (se cierra ahí)
+        for M in (self.H, self.L, self.C):
+            for j in range(1, PASOS):
+                hueco = np.isnan(M[:, j])
+                M[hueco, j] = M[hueco, j - 1]
+        self.corte = int(np.quantile(self.ts, 0.7)) if self.n else 0
+        self.col = {nom: j for j, nom in enumerate(RASGOS)}
+
+
+def simular(e, D, mascara=None):
+    """Operaciones de la estrategia e: lista de (ts, resultado neto %)."""
+    m = np.ones(D.n, dtype=bool) if mascara is None else mascara.copy()
+    for nom, op, u in e['conds']:
+        x = D.F[:, D.col[nom]]
+        with np.errstate(invalid='ignore'):
+            m &= (x > u) if op == '>' else (x < u)
+    idx = np.nonzero(m)[0]
+    if not len(idx):
+        return []
+    atr = np.nan_to_num(D.F[idx, D.col['atr']], nan=3.0)
+    sl = np.clip(e['sl_k'] * atr, 4, 30)
+    tp = sl * e['rr']
+    h = int(e['hold'])
+    L, H, C = D.L[idx, :h], D.H[idx, :h], D.C[idx, :h]
+    toca_sl = L <= -sl[:, None]
+    toca_tp = H >= tp[:, None]
+    i_sl = np.where(toca_sl.any(1), toca_sl.argmax(1), h)
+    i_tp = np.where(toca_tp.any(1), toca_tp.argmax(1), h)
+    res = np.where(i_sl <= i_tp, np.where(i_sl < h, -sl, np.nan), tp)  # si la misma vela toca los dos: stop (lo peor)
+    res = np.where(np.isnan(res), C[:, -1], res) - COSTES
+    salida = np.minimum(np.minimum(i_sl, i_tp), h - 1)
+    ops, libre = [], {}
+    for k, n in enumerate(idx):  # una posición por token a la vez
+        tk = D.tok[n]
+        if D.ts[n] < libre.get(tk, 0):
+            continue
+        libre[tk] = D.ts[n] + (salida[k] + 1) * BARRA
+        ops.append((int(D.ts[n]), float(res[k])))
+    return ops
+
+
+def stats(ops):
+    if not ops:
+        return {'n': 0, 'medio': None, 'total': 0, 'gana_pct': None}
+    r = [x for _, x in ops]
+    return {'n': len(r), 'medio': round(sum(r) / len(r), 2), 'total': round(sum(r), 1), 'gana_pct': round(100 * sum(x > 0 for x in r) / len(r))}
+
+
+def evaluar(e, D, desde=None):
+    ops = simular(e, D)
+    tr = [o for o in ops if o[0] < D.corte]
+    te = [o for o in ops if o[0] >= D.corte]
+    vi = [o for o in ops if desde and o[0] >= desde]
+    return {'entreno': stats(tr), 'prueba': stats(te), 'vivo': stats(vi), 'todo': stats(ops)}
+
+
+def _aptitud(e, D):
+    tr = [x for t, x in simular(e, D) if t < D.corte]
+    if len(tr) < 15:
+        return -99
+    m, s = sum(tr) / len(tr), float(np.std(tr)) or 1
+    return m / s * math.sqrt(len(tr))  # t de Student: gana de forma constante, no por una sola operación
+
+# ---------------- generador ----------------
+
+
+def _umbral(D, nom):
+    x = D.F[:, D.col[nom]]
+    x = x[~np.isnan(x)]
+    return round(float(np.quantile(x, random.uniform(0.05, 0.95))), 4) if len(x) > 20 else None
+
+
+def _al_azar(D):
+    e = {'conds': [], 'sl_k': round(random.uniform(1.5, 6), 2), 'rr': round(random.uniform(1, 4), 2), 'hold': random.choice([6, 12, 18, 24])}
+    for nom in random.sample(RASGOS, random.randint(1, 3)):
+        u = _umbral(D, nom)
+        if u is not None:
+            e['conds'].append([nom, random.choice('<>'), u])
+    return e
+
+
+def _mutar(e, D):
+    e = json.loads(json.dumps(e))
+    r = random.random()
+    if r < 0.4 and e['conds']:
+        c = random.choice(e['conds'])
+        c[2] = _umbral(D, c[0]) if random.random() < 0.5 else round(c[2] * random.uniform(0.8, 1.2), 4)
+    elif r < 0.55 and len(e['conds']) < 5:
+        nom = random.choice(RASGOS)
+        u = _umbral(D, nom)
+        if u is not None:
+            e['conds'].append([nom, random.choice('<>'), u])
+    elif r < 0.65 and len(e['conds']) > 1:
+        e['conds'].pop(random.randrange(len(e['conds'])))
+    else:
+        k = random.choice(['sl_k', 'rr', 'hold'])
+        e[k] = random.choice([6, 12, 18, 24]) if k == 'hold' else round(max(0.8, e[k] * random.uniform(0.75, 1.3)), 2)
+    return e
+
+
+def _cruzar(a, b):
+    conds, vistos = [], set()
+    for c in a['conds'] + b['conds']:
+        if random.random() < 0.5 and (c[0], c[1]) not in vistos and len(conds) < 5:
+            vistos.add((c[0], c[1]))
+            conds.append(c)
+    conds = conds or a['conds'][:1]
+    return {'conds': json.loads(json.dumps(conds)), 'sl_k': random.choice([a, b])['sl_k'], 'rr': random.choice([a, b])['rr'], 'hold': random.choice([a, b])['hold']}
+
+
+def describir(e):
+    return ' y '.join(f"{n} {o} {u:g}" for n, o, u in e['conds']) + f" → SL {e['sl_k']:g}×ATR, TP {e['rr']:g}×SL, máx. {e['hold'] * 5} min"
+
+
+def evolucionar(poblacion=160, generaciones=20):
+    D = Datos()
+    if D.n < 300:
+        _ultimo['msg'] = f'Esperando datos: {D.n} muestras listas (mínimo 300)'
+        return None
+    salon = db.ajuste('fabrica_salon') or []
+    pob = [json.loads(json.dumps(x)) for x in salon] + [{k: m[k] for k in ('conds', 'sl_k', 'rr', 'hold')} for m in MANUALES]
+    pob += [_al_azar(D) for _ in range(poblacion - len(pob))]
+    for g in range(generaciones):
+        punt = sorted(((_aptitud(e, D), i) for i, e in enumerate(pob)), reverse=True)
+        elite = [pob[i] for _, i in punt[:poblacion // 8]]
+        hijos = list(elite)
+        while len(hijos) < poblacion:
+            a, b = random.sample(elite, 2) if len(elite) > 1 else (elite[0], elite[0])
+            h = _cruzar(a, b) if random.random() < 0.5 else _mutar(a, D)
+            hijos.append(_mutar(h, D) if random.random() < 0.3 else h)
+        pob = hijos
+    # al salón entran las que también ganan con datos que no vieron (el 30 % reciente), sin repetir reglas
+    ahora, nuevo, vistos = int(time.time()), [], set()
+    for e in salon + pob:
+        if len({(c[0], c[1]) for c in e['conds']}) < len(e['conds']):
+            continue
+        clave = tuple(t for t, _ in simular(e, D))  # mismas operaciones = misma estrategia aunque la regla se escriba distinto
+        if clave in vistos:
+            continue
+        vistos.add(clave)
+        ev = evaluar(e, D, e.get('desde'))
+        if ev['entreno']['n'] >= 15 and (ev['entreno']['medio'] or 0) > 0 and ev['prueba']['n'] >= 8 and (ev['prueba']['medio'] or 0) > 0:
+            nuevo.append({**{k: e[k] for k in ('conds', 'sl_k', 'rr', 'hold')}, 'desde': e.get('desde') or ahora, 'id': e.get('id') or f'G{ahora % 100000}-{len(nuevo)}'})
+    nuevo.sort(key=lambda e: -_aptitud(e, D))
+    db.poner_ajuste('fabrica_salon', nuevo[:20])
+    _ultimo.update(evo=ahora, gen=_ultimo['gen'] + 1, msg=f'{D.n} muestras · {len(nuevo)} estrategias pasan la validación')
+    return nuevo
+
+
+def resumen():
+    return onchain._cacheado(('fabrica',), 60, _resumen)
+
+
+def _resumen():
+    try:
+        D = Datos()
+    except Exception as ex:
+        return {'error': str(ex)[:120]}
+    man = [{'nombre': m['nombre'], 'regla': describir(m), **evaluar(m, D)} for m in MANUALES]
+    salon = [{'id': e['id'], 'regla': describir(e), 'desde': e['desde'], **evaluar(e, D, e['desde'])} for e in (db.ajuste('fabrica_salon') or [])[:10]]
+    cnt = {r['lista']: r['n'] for r in db.q('SELECT lista, COUNT(*) n FROM fab_muestras GROUP BY lista')}
+    return {'muestras': {'listas': cnt.get(1, 0), 'pendientes': cnt.get(0, 0), 'vivas': int(D.vivo.sum()), 'tokens': int(len(set(D.tok.tolist())))},
+            'corte': D.corte, 'manuales': man, 'salon': salon, 'evo': _ultimo['evo'], 'rondas': _ultimo['gen'], 'msg': _ultimo['msg']}
+
+
+def _bucle():
+    if not db.uno('SELECT 1 x FROM fab_muestras LIMIT 1'):
+        try:
+            _ultimo['msg'] = 'Rellenando histórico de 3 días…'
+            n = relleno_historico()
+            _ultimo['msg'] = f'Histórico: {n} muestras'
+        except Exception as ex:
+            _ultimo['msg'] = f'Histórico falló: {ex}'[:120]
+    while True:
+        t0 = time.time()
+        for fn in (foto, completar):
+            try:
+                fn()
+            except Exception:
+                pass
+        if time.time() - _ultimo['evo'] > CADA_EVO:
+            try:
+                evolucionar()
+            except Exception as ex:
+                _ultimo['msg'] = f'Evolución falló: {ex}'[:120]
+                _ultimo['evo'] = time.time()
+        time.sleep(max(30, CADA - (time.time() - t0)))
+
+
+def arrancar():
+    preparar()
+    if not (_hilo['t'] and _hilo['t'].is_alive()):
+        _hilo['t'] = threading.Thread(target=_bucle, daemon=True)
+        _hilo['t'].start()

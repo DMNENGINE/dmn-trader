@@ -450,6 +450,13 @@ async function cargarPiloto() {
     + (L.smart_nuevo ? labTabla(L.smart_nuevo, '🎯 Smart money (lanzamiento recién salido)') : '')
     + (L.smart && (L.smart.senales || []).length ? `<div class="tenue chico">Últimas señales: ${L.smart.senales.slice(0, 8).map(x => `${esc(x.simbolo)} (${x.pts} wallets, +${x.neto} $, ${x.estrategia === 'smart' ? 'asentada' : 'nueva'})`).join(' · ')}</div>` : '')
     + `<div class="tenue chico">Modelos: ${(L.instalados || []).map(esc).join(', ')}</div>` : '<div class="tenue chico">Solo en el PC.</div>';
+  const F = p.fabrica, est = x => x && x.n ? `${x.n} · ${sg(x.medio, 1)} % · ${x.gana_pct} % gana` : '—';
+  $('#piFab').innerHTML = F && F.muestras ? `<div class="tenue chico">${F.muestras.listas} muestras listas (${F.muestras.vivas} en vivo, ${F.muestras.tokens} tokens) · ${F.muestras.pendientes} esperando su resultado · entrena con lo anterior a ${fecha(F.corte)} y valida con lo posterior · ${esc(F.msg || '')}${F.evo ? ` · última evolución ${fecha(F.evo)}` : ''}</div>`
+    + `<div class="chico" style="margin-top:6px"><b>Estrategias manuales</b> (operaciones · media neta con costes · % ganadoras)</div>`
+    + tabla([['Estrategia', x => `<b>${esc(x.nombre)}</b><div class="tenue chico">${esc(x.regla)}</div>`], ['Entreno', x => est(x.entreno)], ['Validación', x => est(x.prueba)]], F.manuales || [], '')
+    + `<div class="chico" style="margin-top:6px"><b>🏆 Salón del generador</b>: inventadas que ganan también con datos que no vieron. «En vivo» = desde que se descubrieron: es la prueba que cuenta.</div>`
+    + tabla([['Id', x => esc(x.id)], ['Regla', x => `<span class="chico">${esc(x.regla)}</span>`], ['Entreno', x => est(x.entreno)], ['Validación', x => est(x.prueba)], ['En vivo', x => est(x.vivo)]], F.salon || [], 'Ninguna pasa la validación todavía.')
+    : `<div class="tenue chico">${F && F.error ? esc(F.error) : 'Solo en el PC.'}</div>`;
   $('#piLog').textContent = (p.log || []).slice().reverse().map(([t, l]) => `${fecha(t)}  ${l}`).join('\n');
 }
 async function guardarPiloto(extra = {}) {

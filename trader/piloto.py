@@ -42,7 +42,12 @@ def estado():
         lab = laboratorio_ia.informe() if _hilo['t'] else None
     except Exception:
         lab = None
-    return {**(db.ajuste(EST) or {}), 'cfg': cfg(), 'lab': lab}
+    from . import fabrica
+    try:
+        fab = fabrica.resumen() if _hilo['t'] else None
+    except Exception:
+        fab = None
+    return {**(db.ajuste(EST) or {}), 'cfg': cfg(), 'lab': lab, 'fabrica': fab}
 
 
 def _est():
@@ -426,4 +431,6 @@ def arrancar():
         _hilo['t'].start()
         from . import laboratorio_ia
         laboratorio_ia.arrancar()
+        from . import fabrica
+        fabrica.arrancar()
     return bool(_hilo['t'])
