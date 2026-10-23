@@ -428,6 +428,14 @@ function velasReal(r, P, pend) {
   if (GR.ult !== GR.tok) { GR.c.timeScale().fitContent(); GR.ult = GR.tok; }
 }
 // ---------- piloto automático real ----------
+function pintarConciencia(C) {
+  $('#piCon').innerHTML = C ? `<div class="chico">Nivel <b style="font-size:1.3em">${n(C.nivel, 0)}</b>/100 · ${C.velas_total} muestras aprendidas · grafo: ${Object.entries(C.nodos || {}).map(([k, v]) => `${v} ${esc(k)}`).join(', ')}, ${C.aristas} enlaces${C.apolo_pendientes ? ` · <span class="tenue">${C.apolo_pendientes} hitos esperando a APOLO</span>` : ''}</div>`
+    + lineaConciencia(C.linea || [], 'Memecoins') + lineaConciencia(C.linea_futuros || [], 'Futuros')
+    + `<div class="tenue chico" style="margin-top:4px">${(C.eventos || []).map(e => `${fecha(e.ts)} · ${{ ronda: '🔁', record: '🏅', promocion: '💰', real: '💸', diario: '📔' }[e.tipo] || '•'} ${esc(e.titulo)}${e.apolo && e.apolo !== 'pendiente' ? ' 🧩' : ''}`).join('<br>')}</div>`
+    : '<div class="tenue chico">Solo en el PC.</div>';
+}
+async function cargarConciencia() { try { pintarConciencia((await api('/piloto')).conciencia); } catch (e) { $('#piCon').innerHTML = `<div class="tenue chico">${esc(e.message)}</div>`; } }
+setInterval(() => { if (!document.hidden && E.pag === 'agente') cargarConciencia(); }, 30000);
 async function cargarPiloto() {
   let p;
   try { p = await api('/piloto'); } catch (e) { $('#piEstado').textContent = e.message; return; }
@@ -458,11 +466,7 @@ async function cargarPiloto() {
     + `<div class="chico" style="margin-top:6px"><b>🏆 Salón del generador</b>: inventadas que ganan también con datos que no vieron. «En vivo» = desde que se descubrieron: es la prueba que cuenta.</div>`
     + tabla([['Id', x => esc(x.id)], ['Regla', x => `<span class="chico">${esc(x.regla)}</span>`], ['Entreno', x => est(x.entreno)], ['Validación', x => est(x.prueba)], ['En vivo', x => est(x.vivo)]], F.salon || [], 'Ninguna pasa la validación todavía.')
     : `<div class="tenue chico">${F && F.error ? esc(F.error) : 'Solo en el PC.'}</div>`;
-  const C = p.conciencia;
-  $('#piCon').innerHTML = C ? `<div class="chico">Nivel <b style="font-size:1.3em">${n(C.nivel, 0)}</b>/100 · ${C.velas_total} muestras aprendidas · grafo: ${Object.entries(C.nodos || {}).map(([k, v]) => `${v} ${esc(k)}`).join(', ')}, ${C.aristas} enlaces${C.apolo_pendientes ? ` · <span class="tenue">${C.apolo_pendientes} hitos esperando a APOLO</span>` : ''}</div>`
-    + lineaConciencia(C.linea || [])
-    + `<div class="tenue chico" style="margin-top:4px">${(C.eventos || []).map(e => `${fecha(e.ts)} · ${{ ronda: '🔁', record: '🏅', promocion: '💰', real: '💸', diario: '📔' }[e.tipo] || '•'} ${esc(e.titulo)}${e.apolo && e.apolo !== 'pendiente' ? ' 🧩' : ''}`).join('<br>')}</div>`
-    : '<div class="tenue chico">Solo en el PC.</div>';
+  pintarConciencia(p.conciencia);
   const U = p.futuros, FF = U && U.fabrica, usd = x => x && x.n ? `${x.n} · ${sg(x.medio, 1)} $ · ${x.gana_pct} % gana` : '—';
   if (U && U.cfg && document.activeElement?.closest?.('#fuCuenta,#fuFreno,#fuQty') == null) {
     const fc = U.cfg, reales = (U.cuentas || []).filter(x => !x.simulada).map(x => x.nombre);
@@ -539,7 +543,7 @@ setInterval(() => { if (!document.hidden && E.pag === 'updown') cargarUpdown(); 
 
 // ---------- navegación ----------
 function irA(p) { $$('#pestanas button').forEach(b => b.classList.toggle('on', b.dataset.p === p)); $$('.pag').forEach(s => s.classList.toggle('on', s.id === 'p-' + p)); E.pag = p;
-  ({ agente: cargarAgente, real: () => { cargarReal(); cargarPiloto(); }, updown: cargarUpdown, diario: cargarDiario, stats: cargarStats, practica: cargarPracticas, escaner: cargarAlertas, ajustes: pintarCfg })[p]?.(); }
+  ({ agente: () => { cargarAgente(); cargarConciencia(); }, real: () => { cargarReal(); cargarPiloto(); }, updown: cargarUpdown, diario: cargarDiario, stats: cargarStats, practica: cargarPracticas, escaner: cargarAlertas, ajustes: pintarCfg })[p]?.(); }
 $$('#pestanas button').forEach(b => b.onclick = () => irA(b.dataset.p));
 async function cambiarCuenta() { localStorage.setItem('dmn.cuenta', $('#selCuenta').value); pararAuto(); await cargarCuenta(); limpiarTicket(); await cargarGrafico(); cargarCotizacion(); cargarAnalisis(); if (E.pag && E.pag !== 'mesa') irA(E.pag); }
 $('#selCuenta').onchange = cambiarCuenta;
@@ -560,12 +564,13 @@ document.addEventListener('keydown', e => { if (!esReplay() || e.target.matches(
   setInterval(() => { if (!document.hidden && !esReplay() && ['5m', '15m'].includes(E.intervalo)) cargarGrafico(false); }, 60000);
 })();
 
-function lineaConciencia(L) {
-  if (L.length < 2) return '<div class="tenue chico">La línea aparece a partir de la segunda ronda de entrenamiento (cada 30 min).</div>';
+function lineaConciencia(L, titulo = '') {
+  const cab = titulo ? `<div class="chico" style="margin-top:8px"><b>${titulo}</b> · nivel ${L.length ? n(L[L.length - 1].nivel, 0) : '—'}/100</div>` : '';
+  if (L.length < 2) return cab + '<div class="tenue chico">La línea aparece a partir de la segunda ronda de entrenamiento (cada 30 min).</div>';
   const W = 600, H = 120, x = i => 4 + i * (W - 8) / (L.length - 1), y = v => H - 4 - (Math.max(0, Math.min(100, v)) / 100) * (H - 8);
   const pts = L.map((r, i) => `${x(i).toFixed(1)},${y(r.nivel).toFixed(1)}`).join(' ');
   const ult = L[L.length - 1];
-  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:120px;margin-top:6px;background:rgba(127,127,127,.06);border-radius:6px">`
+  return cab + `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:120px;margin-top:6px;background:rgba(127,127,127,.06);border-radius:6px">`
     + [25, 50, 75].map(v => `<line x1="0" x2="${W}" y1="${y(v)}" y2="${y(v)}" stroke="currentColor" opacity=".12"/>`).join('')
     + `<polyline points="${pts}" fill="none" stroke="var(--verde)" stroke-width="2"/>`
     + L.map((r, i) => r.mejor_vivo != null ? `<circle cx="${x(i)}" cy="${y(r.nivel)}" r="3" fill="var(--verde)"><title>en vivo ${r.mejor_vivo} %/op</title></circle>` : '').join('')
@@ -597,11 +602,11 @@ function dibujarGrafo(g) {
       const k = 0.02 * (1 - paso / 420);
       for (let i = 0; i < N.length; i++) for (let j = i + 1; j < N.length; j++) {
         const a = N[i], b = N[j]; let dx = a.x - b.x, dy = a.y - b.y, d2 = dx * dx + dy * dy + 0.01;
-        if (d2 > 40000) continue; const f = 600 / d2; dx *= f; dy *= f; a.vx += dx; a.vy += dy; b.vx -= dx; b.vy -= dy;
+        if (d2 > 22500) continue; const f = 90 / d2; dx *= f; dy *= f; a.vx += dx; a.vy += dy; b.vx -= dx; b.vy -= dy;
       }
-      for (const e of A) { const a = N[e.s], b = N[e.t], dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy) || 1, f = (d - (e.tipo === 'sigue_a' ? 30 : 55)) * 0.02;
+      for (const e of A) { const a = N[e.s], b = N[e.t], dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy) || 1, f = (d - (e.tipo === 'sigue_a' ? 26 : 38)) * 0.03;
         a.vx += dx / d * f; a.vy += dy / d * f; b.vx -= dx / d * f; b.vy -= dy / d * f; }
-      for (const n of N) { n.vx += (W / 2 - n.x) * 0.002; n.vy += (H / 2 - n.y) * 0.002; n.x += Math.max(-8, Math.min(8, n.vx * k * 50)); n.y += Math.max(-8, Math.min(8, n.vy * k * 50));
+      for (const n of N) { n.vx += (W / 2 - n.x) * 0.006; n.vy += (H / 2 - n.y) * 0.009; n.x += Math.max(-8, Math.min(8, n.vx * k * 50)); n.y += Math.max(-8, Math.min(8, n.vy * k * 50));
         n.vx *= 0.5; n.vy *= 0.5; n.x = Math.max(8, Math.min(W - 8, n.x)); n.y = Math.max(8, Math.min(H - 8, n.y)); }
     }
     cx.clearRect(0, 0, W, H);

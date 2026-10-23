@@ -79,11 +79,13 @@
 
 <!-- ENJAMBRE -->
 <section id="p-agente" class="pag">
+  <div class="panel"><div class="cab">🧠 Conciencia y grafo de DMN Trader <span class="tenue chico">— cada entrenamiento (velas, rondas, estrategias, operaciones) queda en el grafo; los hitos van a la memoria de APOLO</span></div>
+    <div id="piCon"></div><button id="grVer" style="margin-top:6px">🕸️ Ver el grafo</button><div id="grCaja" style="display:none;position:relative;margin-top:6px"><canvas id="grLienzo" style="width:100%;height:460px;background:rgba(127,127,127,.06);border-radius:8px"></canvas><div id="grInfo" class="chico" style="position:absolute;left:8px;top:6px;pointer-events:none"></div><div id="grLeyenda" class="tenue chico"></div></div></div>
   <div id="agKpis" class="tiles"></div>
   <div class="dos">
     <div class="panel form"><div class="cab">Enjambre de APOLO <span id="agEstado" class="tenue"></span></div>
       <p class="tenue chico">Muchos agentes operan solos con microoperaciones simuladas. Cada pérdida pasa una autopsia con su arreglo; al quebrar, cada agente prueba soluciones en datos reales; cada 2 h el 20 % peor se reemplaza por hijos de los mejores; lo que pierde para todos se bloquea para todos.</p>
-      <div class="fila2"><div><small class="tenue">Agentes por equipo (0 = parado)</small><div id="agPorNodo" class="fila2"></div></div><label>Mercados <select id="agMerc"><option value="cripto,acciones">Cripto + acciones</option><option value="cripto">Solo cripto</option><option value="acciones">Solo acciones</option></select></label></div>
+      <div class="fila2"><div><small class="tenue">Agentes por equipo (0 = parado)</small><div id="agPorNodo" class="fila2"></div></div><label>Mercados <select id="agMerc"><option value="cripto,acciones,futuros">Cripto + acciones + futuros</option><option value="cripto,acciones">Cripto + acciones</option><option value="futuros">Solo futuros</option><option value="cripto">Solo cripto</option><option value="acciones">Solo acciones</option></select></label></div>
       <div class="fila2"><label>Cada uno empieza con ($) <input id="agCap" type="number" step="any" value="1"></label><label>Meta ($) <input id="agMeta" type="number" step="any" value="100"></label></div>
       <label>Hasta (hora, vacío = sin fin) <input id="agHasta" placeholder="07:00"></label>
       <div class="fila2"><button id="agIniciar" class="enviar">▶ Empezar / redimensionar</button><button id="agParar" class="enviar venta">⏹ Parar todos</button></div>
@@ -115,7 +117,6 @@
     <details style="margin-top:6px"><summary class="chico">Último escaneo</summary><div id="piScan"></div></details>
     <details style="margin-top:6px"><summary class="chico">🧪 Laboratorio de modelos (qué IA acierta más)</summary><div id="piLab"></div></details>
     <details style="margin-top:6px" open><summary class="chico">🏭 Fábrica de estrategias (simulado: manuales + generador evolutivo)</summary><div id="piFab"></div></details>
-    <details style="margin-top:6px" open><summary class="chico">🧠 Conciencia del trader (línea de progreso; los hitos van a la memoria de APOLO)</summary><div id="piCon"></div><button id="grVer" style="margin-top:6px">🕸️ Ver el grafo</button><div id="grCaja" style="display:none;position:relative;margin-top:6px"><canvas id="grLienzo" style="width:100%;height:460px;background:rgba(127,127,127,.06);border-radius:8px"></canvas><div id="grInfo" class="chico" style="position:absolute;left:8px;top:6px;pointer-events:none"></div><div id="grLeyenda" class="tenue chico"></div></div></details>
     <details style="margin-top:6px" open><summary class="chico">📈 Futuros con NinjaTrader (micros de CME: Sim101 prueba todo; la real solo lo promovido, freno −20 $/día)</summary><div class="fila" style="flex-wrap:wrap;gap:8px;align-items:end;margin:6px 0">
         <label class="chico"><input id="fuSim" type="checkbox"> Sim operando</label>
         <label class="chico">Cuenta real<br><select id="fuCuenta" style="min-width:120px"><option value="">— ninguna —</option></select></label>
