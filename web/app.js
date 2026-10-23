@@ -377,7 +377,7 @@ async function cargarReal() {
       <div class="re-barra">${p.sl ? `<span class="ab" style="left:${x(p.sl)}">SL ${np(p.sl)}</span>` : ''}${p.tp ? `<span class="ab" style="left:${x(p.tp)}">TP ${np(p.tp)}</span>` : ''}${p.entrada ? `<i class="ent" style="left:${x(p.entrada)}"></i><span class="ar" style="left:${x(p.entrada)}">entrada ${np(p.entrada)}</span>` : ''}<i class="act" style="left:${x(p.precio)}" title="ahora"></i></div></div>`; }).join('') : '<div class="tenue">Nada abierto.</div>';
   $('#reEv').textContent = (r.eventos || []).slice().reverse().map(([ts, txt]) => `${fecha(ts)}  ${txt}`).join('\n') || 'Sin eventos todavía: aparecerán aquí las compras, ventas y los TP/SL que salten.';
   $('#reAct').innerHTML = tabla([['Hora', a => fecha(a.ts)], ['Tipo', a => a.tipo === 'buy' ? '<span class="verde">compra</span>' : a.tipo === 'sell' ? '<span class="rojo">venta</span>' : esc(a.tipo)],
-    ['Token', a => esc(a.simbolo)], ['Cantidad', a => n(a.cantidad, 2)], ['$', a => n(a.usd, 3)], ['Precio', a => np(a.precio)], ['Costes $', a => n((a.gas_usd || 0) + (a.dex_usd || 0), 3)],
+    ['Token', a => esc(a.simbolo) + (a.ruta && a.ruta.length ? ` <span class="tenue chico">vía ${a.ruta.map(esc).join(' → ')}</span>` : '')], ['Cantidad', a => n(a.cantidad, 2)], ['$', a => n(a.usd, 3)], ['Precio', a => np(a.precio)], ['Costes $', a => n((a.gas_usd || 0) + (a.dex_usd || 0), 3)],
     ['Tx', a => `<a href="https://solscan.io/tx/${esc(a.tx)}" target="_blank" rel="noopener">${esc((a.tx || '').slice(0, 8))}…</a>`]], r.actividad || [], 'Sin actividad.');
 }
 setInterval(() => { if (!document.hidden && E.pag === 'real') cargarReal(); }, 5000);

@@ -12,8 +12,11 @@ CADENAS = {'SOL': 'sol'}
 RESOL = {'1m': '1m', '5m': '5m', '15m': '15m', '60m': '1h', '1h': '1h', '1d': '1d'}
 VENTANA = {'1m': 6 * 3600, '5m': 2 * 86400, '15m': 5 * 86400, '1h': 20 * 86400, '1d': 365 * 86400}
 TTL = {'1m': 15, '5m': 45, '15m': 90, '1h': 300, '1d': 3600}
-SPREAD_PCT = 0.6        # spread + impacto supuesto en un pool de ≥150 k$ de liquidez (ida y vuelta lo paga entero)
-COMISION_PCT = 1.0      # comisión por lado: la de GMGN/DEX + prioridad; mejor pasarse que quedarse corto
+# Costes MEDIDOS en la primera operación real (2026-10-22, DACITY con 1 $): el precio subió un 15,1 % y la wallet ganó ≈ 9 %
+# (recuperando el alquiler de las cuentas de token) → ≈ 6 % ida y vuelta. Por lado: 1 % de GMGN + ≈ 1-3 % de comisiones del
+# DEX/launchpad + prioridad y propina, que con importes tan pequeños pesan. Rutas raras (DACITY → TTWO → USDC → SOL) suman más.
+SPREAD_PCT = 1.0        # spread + impacto + rutas (ida y vuelta lo paga entero)
+COMISION_PCT = 2.5      # por lado → 2 × (2,5 + 0,01) + 1,0 ≈ 6 % ida y vuelta, como lo medido
 N_TOKENS, CADA, PAGINAS = 8, 900, 12
 FILTRO = {'liquidez_min': 150_000, 'volumen_min': 500_000, 'rug_max': 0.3, 'top10_max': 0.4, 'edad_min_h': 3}
 SMART_VENTANA = 3600

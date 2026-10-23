@@ -117,14 +117,33 @@ def foto():
                     'tp': tp, 'sl': sl, 'condiciones': conds,
                     'dist_tp': (tp / precio - 1) * 100 if tp and precio else None, 'dist_sl': (sl / precio - 1) * 100 if sl and precio else None,
                     'caduca': int(st['expire_time'] / 1000) if st and st.get('expire_time') else None})
-    act = [{'tx': a.get('tx_hash'), 'ts': a.get('timestamp'), 'tipo': a.get('event_type'), 'simbolo': (a.get('token') or {}).get('symbol'),
-            'cantidad': _f(a.get('token_amount')), 'usd': _f(a.get('cost_usd')), 'precio': _f(a.get('price_usd')), 'sol': _f(a.get('quote_amount')),
-            'gas_usd': _f(a.get('gas_usd')), 'dex_usd': _f(a.get('dex_usd'))} for a in _ultimo['actividad'][:30]]
+    act = actividad(_ultimo['actividad'][:40])
     return {'ts': int(ahora), 'wallet': w, 'sol': sol, 'sol_usd': sol_usd, 'posiciones': pos, 'actividad': act,
             'estrategias': [{'token': o.get('base_token'), 'estado': o.get('status'), 'creada': int(_f(o.get('create_time')) / 1000),
                              'cerrada': int(_f(o.get('close_time')) / 1000) or None, 'condiciones': [
                                  {'tipo': c['order_type'], 'estado': c.get('status'), 'precio': _f(c.get('check_price')), 'pct': _f(c.get('price_scale'))}
                                  for c in o.get('condition_orders') or []]} for o in ords][:20]}
+
+
+def actividad(lista):
+    """Una fila por operación. Si GMGN enruta por tokens intermedios (p. ej. DACITY → TTWO → USDC → SOL), el indexador da
+    una fila por tramo en la misma tx: se quitan los tramos cuyo token es la moneda de cotización de otro tramo y se
+    guarda la ruta."""
+    por_tx = {}
+    for a in lista:
+        por_tx.setdefault(a.get('tx_hash'), []).append(a)
+    out = []
+    for tx, tramos in por_tx.items():
+        intermedios = {a.get('quote_address') or (a.get('quote_token') or {}).get('token_address') for a in tramos}
+        for a in tramos:
+            tk = a.get('token') or {}
+            if len(tramos) > 1 and tk.get('address') in intermedios:
+                continue
+            ruta = [(x.get('token') or {}).get('symbol') for x in tramos if (x.get('token') or {}).get('address') in intermedios]
+            out.append({'tx': tx, 'ts': a.get('timestamp'), 'tipo': a.get('event_type'), 'simbolo': tk.get('symbol'), 'token': tk.get('address'),
+                        'cantidad': _f(a.get('token_amount')), 'usd': _f(a.get('cost_usd')), 'precio': _f(a.get('price_usd')),
+                        'gas_usd': _f(a.get('gas_usd')), 'dex_usd': _f(a.get('dex_usd')), 'ruta': ruta})
+    return out
 
 
 def _eventos(viejo, nuevo):
@@ -134,7 +153,8 @@ def _eventos(viejo, nuevo):
     for a in reversed(nuevo.get('actividad') or []):
         if viejo and a['tx'] not in vistos:
             verbo = {'buy': '🟢 Compra', 'sell': '🔴 Venta'}.get(a['tipo'], a['tipo'])
-            ev.append(f"{verbo} de {a['cantidad']:,.2f} {a['simbolo']} por {a['usd']:.2f} $ (a {a['precio']:.6g} $)")
+            via = f" · vía {' → '.join(a['ruta'])}" if a.get('ruta') else ''
+            ev.append(f"{verbo} de {a['cantidad']:,.2f} {a['simbolo']} por {a['usd']:.2f} $ (a {a['precio']:.6g} $){via}")
     antes = {(e['token'], c['tipo']): c['estado'] for e in (viejo or {}).get('estrategias') or [] for c in e['condiciones']}
     for e in nuevo.get('estrategias') or []:
         for c in e['condiciones']:

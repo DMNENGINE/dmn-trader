@@ -33,7 +33,7 @@ GENOMA_BASE = {'marco': '1m', 'estrategia': 'ema_cruce', 'p': dict(ESTRATEGIAS['
                'parcial_r': 1.0, 'parcial_frac': 0.5, 'sin_avance': 0, 'regimen': 1, 'confirmar_1h': 0, 'flujo': 0, 'veto_llm': 0,
                'onchain': 0, 'smart_money': 0}
 # onchain = 1: especialista en memecoins de Solana (datos de GMGN, solo en el equipo con la key): opera SOLO esos tokens, solo en largo
-#   (en un DEX no hay cortos) y paga costes de DEX (1 % por lado + 0,6 % de spread). smart_money = 1: no compra un token que las
+#   (en un DEX no hay cortos) y paga los costes medidos en real (≈ 6 % ida y vuelta, ver onchain.py). smart_money = 1: no compra un token que las
 #   wallets smart money estén vendiendo en la última hora.
 # parcial_r: en +parcial_r R cierra parcial_frac de la posición y sube el stop a la entrada (no devolver lo ganado); 0 = no.
 # sin_avance: si en N velas no ha ido ni +0,3R a favor, cierra (stop por tiempo); 0 = no.
@@ -641,7 +641,7 @@ def _migrar_onchain(e):
     e['onchain_v1'] = 1
     guardar(e)
     _leccion(None, None, None, 'evolucion', f'On-chain: {len(vivos) // 5} agentes pasan a operar memecoins de Solana con datos de GMGN '
-             '(filtro anti-rug, solo largos, costes de DEX de 1 % por lado + 0,6 % de spread; la mitad, además, sin comprar lo que vende el smart money).', {})
+             '(filtro anti-rug, solo largos, costes medidos en real de ≈ 6 % ida y vuelta; la mitad, además, sin comprar lo que vende el smart money).', {})
 
 
 def _jefe(e):
