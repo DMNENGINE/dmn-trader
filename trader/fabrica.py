@@ -31,6 +31,8 @@ MANUALES = [
     {'nombre': 'Rebote de sobreventa', 'conds': [['rsi', '<', 25], ['ch4h', '<', -15], ['volr', '>', 1]], 'sl_k': 2.5, 'rr': 1.5, 'hold': 12},
     {'nombre': 'Recién graduada con fuerza', 'conds': [['edad_h', '<', 3], ['liq_k', '>', 30], ['compras_ventas', '>', 1.2], ['top10', '<', 0.35]], 'sl_k': 3, 'rr': 2.5, 'hold': 18},
 ]
+# para dar dinero real a una estrategia tiene que ganar EN VIVO (datos que no existían al diseñarla o descubrirla)
+PROMO = {'vivo_n': 10, 'vivo_medio': 1.5, 'vivo_gana': 35}
 _hilo, _ultimo = {'t': None}, {'evo': 0, 'msg': '', 'gen': 0}
 
 
@@ -346,6 +348,73 @@ def evolucionar(poblacion=160, generaciones=20):
     return nuevo
 
 
+def _inicio_vivo(D):
+    return int(D.ts[D.vivo].min()) if D.vivo.any() else None
+
+
+def _candidatas(D):
+    ini = _inicio_vivo(D)
+    return ([{**m, 'id': f'M{i + 1}', 'desde': ini} for i, m in enumerate(MANUALES)]
+            + [{**e, 'nombre': f"Generada {e['id']}"} for e in db.ajuste('fabrica_salon') or []])
+
+
+def promovidas():
+    """Estrategias con ventaja demostrada en vivo, de mejor a peor (cacheado 5 min)."""
+    def calc():
+        D, out = Datos(), []
+        for e in _candidatas(D):
+            if not e.get('desde'):
+                continue
+            ev = evaluar(e, D, e['desde'])
+            v = ev['vivo']
+            if (v['n'] >= PROMO['vivo_n'] and (v['medio'] or 0) >= PROMO['vivo_medio'] and (v['gana_pct'] or 0) >= PROMO['vivo_gana']
+                    and (ev['prueba']['medio'] or 0) > 0):
+                out.append({**e, 'vivo': v})
+        return sorted(out, key=lambda e: -e['vivo']['medio'] * math.sqrt(e['vivo']['n']))
+    return onchain._cacheado(('fab_promo',), 300, calc)
+
+
+def _cumple(f, c):
+    x = f.get(c[0])
+    return x is not None and (x > c[2] if c[1] == '>' else x < c[2])
+
+
+def senales_ahora(estrategias, evitar=(), max_velas=15):
+    """Tokens de la última foto (≤15 min) que cumplen ahora alguna estrategia promovida. Los rasgos de velas se calculan
+    en el momento, solo para los tokens que ya pasan las condiciones de la foto."""
+    ult = db.uno("SELECT MAX(ts) t FROM fab_muestras WHERE origen='vivo'")
+    if not ult or not ult['t'] or time.time() - ult['t'] > 900:
+        return []
+    filas = db.q("SELECT token, simbolo, precio, f FROM fab_muestras WHERE origen='vivo' AND ts=?", (ult['t'],))
+    velas_, out, usados = {}, [], set()
+    for e in estrategias:
+        for fl in filas:
+            if fl['token'] in evitar or fl['token'] in usados:
+                continue
+            f = json.loads(fl['f'])
+            if (f.get('liq_k') or 0) < 30 or (f.get('top10') or 1) > 0.45 or (f.get('rug') or 0) > 0.3:  # dinero real: mínimo de seguridad
+                continue
+            if not all(_cumple(f, c) for c in e['conds'] if c[0] in f):
+                continue
+            if fl['token'] not in velas_:
+                if len(velas_) >= max_velas:
+                    continue
+                try:
+                    v = onchain.velas(onchain.registrar('SOL', fl['token'], fl['simbolo']), '5m')
+                    velas_[fl['token']] = _rasgos_velas(v, len(v) - 1, fl['precio'])  # sin la vela que aún se está formando
+                except onchain.ErrorOnchain:
+                    velas_[fl['token']] = {}
+            f.update(velas_[fl['token']])
+            if not all(_cumple(f, c) for c in e['conds']) or not f.get('atr'):
+                continue
+            sl = float(np.clip(e['sl_k'] * f['atr'], 4, 30))
+            usados.add(fl['token'])
+            out.append({'token': fl['token'], 'simbolo': fl['simbolo'], 'precio': fl['precio'], 'atr': round(f['atr'], 2), 'pts': 0,
+                        'estrategia': e['nombre'], 'est_id': e['id'], 'vivo': e['vivo'], 'regla': describir(e),
+                        'sl': round(sl, 1), 'tp': round(sl * e['rr'], 1), 'hold': int(e['hold'])})
+    return out
+
+
 def resumen():
     return onchain._cacheado(('fabrica',), 60, _resumen)
 
@@ -355,11 +424,12 @@ def _resumen():
         D = Datos()
     except Exception as ex:
         return {'error': str(ex)[:120]}
-    man = [{'nombre': m['nombre'], 'regla': describir(m), **evaluar(m, D)} for m in MANUALES]
+    man = [{'nombre': m['nombre'], 'regla': describir(m), **evaluar(m, D, _inicio_vivo(D))} for m in MANUALES]
     salon = [{'id': e['id'], 'regla': describir(e), 'desde': e['desde'], **evaluar(e, D, e['desde'])} for e in (db.ajuste('fabrica_salon') or [])[:10]]
     cnt = {r['lista']: r['n'] for r in db.q('SELECT lista, COUNT(*) n FROM fab_muestras GROUP BY lista')}
     return {'muestras': {'listas': cnt.get(1, 0), 'pendientes': cnt.get(0, 0), 'vivas': int(D.vivo.sum()), 'tokens': int(len(set(D.tok.tolist())))},
-            'corte': D.corte, 'manuales': man, 'salon': salon, 'evo': _ultimo['evo'], 'rondas': _ultimo['gen'], 'msg': _ultimo['msg']}
+            'corte': D.corte, 'manuales': man, 'promo': PROMO,
+            'promovidas': [{'id': e['id'], 'nombre': e['nombre'], 'regla': describir(e), 'vivo': e['vivo']} for e in promovidas()], 'salon': salon, 'evo': _ultimo['evo'], 'rondas': _ultimo['gen'], 'msg': _ultimo['msg']}
 
 
 def _bucle():

@@ -15,7 +15,8 @@ CADA_IA = 300         # revisión de la posición por el modelo
 CADA_VELAS = 300
 DEFECTO = {'activo': False, 'tarea': 'memes_sol', 'por_op_sol': 0.01, 'perdida_max_sol': 0.008, 'reserva_sol': 0.005,
            'max_ops_dia': 6, 'umbral': 6, 'atr_max': 8.0, 'espera_min': 45, 'pausa_stops_h': 3, 'enfriar_token_h': 6,
-           'gestion': True, 'ia': True, 'smart_salida_usd': 300.0, 'ia_conf_min': 0.7}
+           'gestion': True, 'ia': True, 'smart_salida_usd': 300.0, 'ia_conf_min': 0.7, 'fuente': 'fabrica'}
+# fuente 'fabrica': solo opera las estrategias que la fábrica ha PROMOVIDO (ganan en vivo); 'retroceso': el escáner antiguo
 _hilo = {'t': None}
 _ult = {'scan': 0, 'smart': 0}
 
@@ -125,10 +126,10 @@ def candidatos(evitar=()):
 
 # ---------------- órdenes ----------------
 
-def _crear(w, c, precio):
-    sl = max(8.0, min(2.5 * c['atr'], 18.0))
-    tp = 2 * sl
-    compra = precio * (1 - c['atr'] / 200)  # medio ATR por debajo: no perseguir
+def _crear(w, c, precio, compra=None, tp=None, sl=None):
+    sl = sl or max(8.0, min(2.5 * c['atr'], 18.0))
+    tp = tp or 2 * sl
+    compra = compra or precio * (1 - c['atr'] / 200)  # medio ATR por debajo: no perseguir
     lam = str(int(cfg()['por_op_sol'] * 1e9))
     bp = '{"slippage":10,"priority_fee":"0.00001","tip_fee":"0.00001"}'
     co = ('[{"order_type":"buy_low","side":"buy","check_price":"%.10g"},'
@@ -234,9 +235,15 @@ def _ia_entrada(c, b):
     if not c['ia'] or not llm.disponible():
         return True, 'sin IA'
     sl = max(8, min(2.5 * b['atr'], 18))
+    if b.get('estrategia'):
+        v = b['vivo']
+        prop = (f"La estrategia «{b['estrategia']}» ({b['regla']}) propone COMPRAR YA; en simulación en vivo lleva {v['n']} operaciones, "
+                f"{v['medio']:+.1f} % neto de media, {v['gana_pct']} % ganadoras. TP +{b['tp']:.0f} %, SL −{b['sl']:.0f} %.")
+    else:
+        prop = (f"El escáner propone COMPRAR en retroceso ({b['pts']}/9 puntos, ATR15 {b['atr']} %, compra límite medio ATR "
+                f"por debajo, TP +{2 * sl:.0f} %, SL −{sl:.0f} %).")
     try:
-        r = llm.preguntar(f"{REGLAS_IA}\nEl escáner propone COMPRAR en retroceso ({b['pts']}/9 puntos, ATR15 {b['atr']} %, compra límite medio ATR "
-                          f"por debajo, TP +{2 * sl:.0f} %, SL −{sl:.0f} %).\nDatos: {_contexto(b['token'], b['simbolo'])}\n"
+        r = llm.preguntar(f"{REGLAS_IA}\n{prop}\nDatos: {_contexto(b['token'], b['simbolo'])}\n"
                           'Contesta {"decision":"entrar"|"vetar","confianza":0-1,"motivo":"una frase en español"}', timeout=90)
     except Exception as ex:
         return True, f'IA no contestó ({str(ex)[:40]})'
@@ -255,6 +262,8 @@ def _gestionar(e, c, o):
     ent = o.get('precio_entrada') or o['compra']
     o['precio'], o['max'] = pr, max(o.get('max') or ent, pr)
     o['pnl_pct'] = round((pr / ent - 1) * 100, 2)
+    if o.get('hold') and ahora - o['entro'] > o['hold'] * 300:
+        return _salir(e, o, f"tiempo máximo de la estrategia ({o['hold'] * 5} min, {o['pnl_pct']:+.1f} %)")
     if not c['gestion']:
         return
     # 1) stop que sube: a mitad de camino del TP protege la entrada (+2 %); a 3/4 persigue el máximo a 1,5 ATR
@@ -387,9 +396,16 @@ def paso():
             _ult['scan'] = ahora
             e['motivo'] = None
             evitar = {k for k, v in (e.get('enfriar') or {}).items() if v > ahora}
-            cand = candidatos(evitar)
-            e['ultimo_scan'] = {'ts': ahora, 'top': cand[:6]}
-            buenos = [x for x in cand if x['pts'] >= c['umbral'] and x['atr'] <= c['atr_max']]
+            if c.get('fuente', 'fabrica') == 'fabrica':
+                from . import fabrica
+                prom = fabrica.promovidas()
+                cand = fabrica.senales_ahora(prom, evitar) if prom else []
+                e['ultimo_scan'] = {'ts': ahora, 'top': cand[:6], 'promovidas': len(prom)}
+                buenos = cand
+            else:
+                cand = candidatos(evitar)
+                e['ultimo_scan'] = {'ts': ahora, 'top': cand[:6]}
+                buenos = [x for x in cand if x['pts'] >= c['umbral'] and x['atr'] <= c['atr_max']]
             b = None
             for x in buenos[:3]:
                 ok, motivo = _ia_entrada(c, x)
@@ -400,7 +416,15 @@ def paso():
                     break
                 _log(e, f"🧠 IA veta {x['simbolo']}: {motivo}")
                 e.setdefault('enfriar', {})[x['token']] = ahora + 3600
-            if b:
+            if b and b.get('estrategia'):
+                # estrategia de la fábrica: entra ya (compra límite un 1 % por ENCIMA = se ejecuta al momento) con su TP/SL/tiempo
+                oid, compra, tp, sl = _crear(w, b, b['precio'], compra=b['precio'] * 1.01, tp=b['tp'], sl=b['sl'])
+                e['orden'] = {'id': oid, 'token': b['token'], 'simbolo': b['simbolo'], 'creada': ahora, 'wallet': w, 'compra': compra,
+                              'tp': tp, 'sl': sl, 'pts': 0, 'atr': b['atr'], 'sol': c['por_op_sol'], 'saldo_antes': saldo,
+                              'estrategia': b['estrategia'], 'est_id': b['est_id'], 'hold': b['hold']}
+                _log(e, f"📝 {b['simbolo']} por «{b['estrategia']}» (en vivo {b['vivo']['medio']:+.1f} %/op en {b['vivo']['n']}): compra con {c['por_op_sol']} SOL, "
+                        f"TP +{tp:.0f} % / SL −{sl:.0f} % / máx. {b['hold'] * 5} min")
+            elif b:
                 oid, compra, tp, sl = _crear(w, b, b['precio'])
                 e['orden'] = {'id': oid, 'token': b['token'], 'simbolo': b['simbolo'], 'creada': ahora, 'wallet': w, 'compra': compra,
                               'tp': tp, 'sl': sl, 'pts': b['pts'], 'atr': b['atr'], 'sol': c['por_op_sol'], 'saldo_antes': saldo}
@@ -408,7 +432,11 @@ def paso():
             elif not e.get('ultimo_sin') or ahora - e['ultimo_sin'] > 3600:
                 e['ultimo_sin'] = ahora
                 mejor = cand[0] if cand else None
-                _log(e, '🔎 Sin entrada buena' + (f" (mejor: {mejor['simbolo']} {mejor['pts']} pts)" if mejor else ''))
+                if c.get('fuente', 'fabrica') == 'fabrica':
+                    _log(e, f"🏭 {e['ultimo_scan']['promovidas']} estrategias con ventaja en vivo" + (f"; ninguna da señal ahora" if e['ultimo_scan']['promovidas'] else
+                            ': ninguna ha demostrado ganar todavía, el dinero real espera'))
+                else:
+                    _log(e, '🔎 Sin entrada buena' + (f" (mejor: {mejor['simbolo']} {mejor['pts']} pts)" if mejor else ''))
     e['ts'] = ahora
     db.poner_ajuste(EST, e)
     return e
