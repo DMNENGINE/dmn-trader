@@ -6,7 +6,7 @@ Frenos duros: pérdida máxima del total (se apaga), pausa tras 2 stops seguidos
 para comisiones, enfriamiento por token tras un stop. Corre donde está gmgn-cli con la key (el PC); la configuración la
 pone el panel de la central y llega aquí con la respuesta de la sincronía de real.py."""
 import threading, time
-from . import db, llm, onchain, real
+from . import conciencia, db, llm, onchain, real
 
 CFG, EST = 'piloto_cfg', 'piloto_estado'
 CADA = 300            # escaneo
@@ -48,7 +48,11 @@ def estado():
         fab = fabrica.resumen() if _hilo['t'] else None
     except Exception:
         fab = None
-    return {**(db.ajuste(EST) or {}), 'cfg': cfg(), 'lab': lab, 'fabrica': fab}
+    try:
+        con = conciencia.resumen() if _hilo['t'] else None
+    except Exception:
+        con = None
+    return {**(db.ajuste(EST) or {}), 'cfg': cfg(), 'lab': lab, 'fabrica': fab, 'conciencia': con}
 
 
 def _est():
@@ -344,6 +348,11 @@ def _seguir(e, c):
         pnl = saldo - o['saldo_antes'] if res in ('tp', 'sl', 'cerrada', 'salida') else 0.0
         op = {**o, 'cerrada': int(time.time()), 'resultado': res, 'pnl_sol': round(pnl, 6)}
         e['ops'] = (e.get('ops') or [])[-199:] + [op]
+        if res in ('tp', 'sl', 'cerrada', 'salida'):
+            try:
+                conciencia.operacion_real(op)
+            except Exception:
+                pass
         e['orden'] = None
         # el saldo incluye ≈0,002 SOL de alquiler de la cuenta del token (recuperable al cerrarla): para contar stops manda el precio
         if res == 'sl' or (res in ('salida', 'cerrada') and (o['pnl_pct'] if o.get('pnl_pct') is not None else pnl) < 0):

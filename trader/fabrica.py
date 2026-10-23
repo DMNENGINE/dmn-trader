@@ -11,7 +11,7 @@
    existían cuando se inventaron), que es la única prueba que cuenta antes de darles dinero real."""
 import json, math, random, threading, time
 import numpy as np
-from . import db, onchain
+from . import conciencia, db, onchain
 
 CADA, CADA_EVO, HORIZONTE, BARRA, COSTES = 600, 1800, 7200, 300, 6.0
 PASOS = HORIZONTE // BARRA  # 24 velas de 5 min
@@ -118,8 +118,9 @@ def completar(max_tokens=30):
     """Pone rasgos de velas y ruta a las muestras de hace más de 2 h (una petición de velas por token)."""
     lim = int(time.time()) - HORIZONTE - BARRA
     toks = db.q('SELECT token, simbolo, MIN(ts) a, MAX(ts) b FROM fab_muestras WHERE lista=0 AND ts<? GROUP BY token LIMIT ?', (lim, max_tokens))
-    hechos = 0
+    hechos, lote = 0, []
     for t in toks:
+        ap = {'token': t['token'], 'simbolo': t['simbolo'], 'n': 0, 'mx': 0.0, 'ci': 0.0}
         filas = db.q('SELECT id, ts, precio, f FROM fab_muestras WHERE lista=0 AND token=? AND ts<?', (t['token'], lim))
         try:
             s = onchain.registrar('SOL', t['token'], t['simbolo'])
@@ -137,9 +138,20 @@ def completar(max_tokens=30):
                     db.ex('UPDATE fab_muestras SET lista=-1 WHERE id=?', (fl['id'],))
                 continue
             f = {**json.loads(fl['f']), **_rasgos_velas(v, i, fl['precio'])}
-            db.ex('UPDATE fab_muestras SET f=?, ruta=?, lista=1 WHERE id=?', (json.dumps(f), json.dumps(_ruta(v, i, fl['precio'])), fl['id']))
+            ru = _ruta(v, i, fl['precio'])
+            db.ex('UPDATE fab_muestras SET f=?, ruta=?, lista=1 WHERE id=?', (json.dumps(f), json.dumps(ru), fl['id']))
             hechos += 1
+            ap['n'] += 1
+            ap['mx'] += max(x[0] for x in ru)
+            ap['ci'] += ru[-1][2]
+        if ap['n']:
+            lote.append({'token': ap['token'], 'simbolo': ap['simbolo'], 'n': ap['n'],
+                         'max_med': round(ap['mx'] / ap['n'], 1), 'cierre_med': round(ap['ci'] / ap['n'], 1)})
         time.sleep(0.5)
+    try:
+        conciencia.velas(lote)
+    except Exception:
+        pass
     return hechos
 
 
@@ -184,6 +196,7 @@ class Datos:
         self.ts = np.array([r['ts'] for r in filas], dtype=np.int64)
         tok = {}
         self.tok = np.array([tok.setdefault(r['token'], len(tok)) for r in filas], dtype=np.int64)
+        self.tokens = list(tok)
         self.vivo = np.array([r['origen'] == 'vivo' for r in filas], dtype=bool)
         self.F = np.full((self.n, len(RASGOS)), np.nan)
         self.H = np.full((self.n, PASOS), np.nan)
@@ -208,8 +221,8 @@ class Datos:
         self.col = {nom: j for j, nom in enumerate(RASGOS)}
 
 
-def simular(e, D, mascara=None):
-    """Operaciones de la estrategia e: lista de (ts, resultado neto %)."""
+def simular(e, D, mascara=None, con_idx=False):
+    """Operaciones de la estrategia e: lista de (ts, resultado neto %) [, índice de la muestra]."""
     m = np.ones(D.n, dtype=bool) if mascara is None else mascara.copy()
     for nom, op, u in e['conds']:
         x = D.F[:, D.col[nom]]
@@ -236,7 +249,7 @@ def simular(e, D, mascara=None):
         if D.ts[n] < libre.get(tk, 0):
             continue
         libre[tk] = D.ts[n] + (salida[k] + 1) * BARRA
-        ops.append((int(D.ts[n]), float(res[k])))
+        ops.append((int(D.ts[n]), float(res[k]), int(n)) if con_idx else (int(D.ts[n]), float(res[k])))
     return ops
 
 
@@ -345,7 +358,38 @@ def evolucionar(poblacion=160, generaciones=20):
     nuevo.sort(key=lambda e: -_aptitud(e, D))
     db.poner_ajuste('fabrica_salon', nuevo[:20])
     _ultimo.update(evo=ahora, gen=_ultimo['gen'] + 1, msg=f'{D.n} muestras · {len(nuevo)} estrategias pasan la validación')
+    try:
+        _grabar_ronda(D, pob, nuevo, poblacion * generaciones)
+    except Exception as ex:
+        _ultimo['msg'] += f' (conciencia: {str(ex)[:60]})'
     return nuevo
+
+
+def _grabar_ronda(D, pob, nuevo, probadas):
+    """Lo simulado en la ronda: salón + manuales + las 5 mejores de la población (con sus operaciones simuladas)."""
+    sim = {r['token']: r['simbolo'] for r in db.q('SELECT DISTINCT token, simbolo FROM fab_muestras')}
+    ini = _inicio_vivo(D)
+    mejores = sorted(pob, key=lambda e: -_aptitud(e, D))[:5]
+    lista = ([{**e, 'nombre': f"Generada {e['id']}"} for e in nuevo[:10]]
+             + [{**m, 'id': f'M{i + 1}', 'desde': ini} for i, m in enumerate(MANUALES)]
+             + [{**e, 'id': 'P' + str(abs(hash(describir(e))) % 10 ** 6), 'nombre': 'Candidata de la población'} for e in mejores])
+    top, vistos = [], set()
+    for e in lista:
+        if e['id'] in vistos:
+            continue
+        vistos.add(e['id'])
+        ops = simular(e, D, con_idx=True)
+        st = evaluar(e, D, e.get('desde'))
+        top.append({'id': e['id'], 'nombre': e.get('nombre'), 'regla': describir(e), **{k: st[k] for k in ('entreno', 'prueba', 'vivo')},
+                    'ops': [{'token': D.tokens[D.tok[n]], 'simbolo': sim.get(D.tokens[D.tok[n]], ''), 'ts': t, 'res': round(x, 2)} for t, x, n in ops[-200:]]})
+    conciencia.ronda({'gen': _ultimo['gen'], 'muestras': D.n, 'vivas': int(D.vivo.sum()), 'tokens': len(D.tokens),
+                      'probadas': probadas, 'pasan': len(nuevo), 'top': top})
+    ya = set(db.ajuste('con_promovidas') or [])
+    prom = promovidas()
+    for e in prom:
+        if e['id'] not in ya:
+            conciencia.promocion({**e, 'regla': describir(e)})
+    db.poner_ajuste('con_promovidas', sorted(ya | {e['id'] for e in prom}))
 
 
 def _inicio_vivo(D):
@@ -458,6 +502,7 @@ def _bucle():
 
 def arrancar():
     preparar()
+    conciencia.preparar()
     if not (_hilo['t'] and _hilo['t'].is_alive()):
         _hilo['t'] = threading.Thread(target=_bucle, daemon=True)
         _hilo['t'].start()

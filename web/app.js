@@ -458,6 +458,11 @@ async function cargarPiloto() {
     + `<div class="chico" style="margin-top:6px"><b>🏆 Salón del generador</b>: inventadas que ganan también con datos que no vieron. «En vivo» = desde que se descubrieron: es la prueba que cuenta.</div>`
     + tabla([['Id', x => esc(x.id)], ['Regla', x => `<span class="chico">${esc(x.regla)}</span>`], ['Entreno', x => est(x.entreno)], ['Validación', x => est(x.prueba)], ['En vivo', x => est(x.vivo)]], F.salon || [], 'Ninguna pasa la validación todavía.')
     : `<div class="tenue chico">${F && F.error ? esc(F.error) : 'Solo en el PC.'}</div>`;
+  const C = p.conciencia;
+  $('#piCon').innerHTML = C ? `<div class="chico">Nivel <b style="font-size:1.3em">${n(C.nivel, 0)}</b>/100 · ${C.velas_total} muestras aprendidas · grafo: ${Object.entries(C.nodos || {}).map(([k, v]) => `${v} ${esc(k)}`).join(', ')}, ${C.aristas} enlaces${C.apolo_pendientes ? ` · <span class="tenue">${C.apolo_pendientes} hitos esperando a APOLO</span>` : ''}</div>`
+    + lineaConciencia(C.linea || [])
+    + `<div class="tenue chico" style="margin-top:4px">${(C.eventos || []).map(e => `${fecha(e.ts)} · ${{ ronda: '🔁', record: '🏅', promocion: '💰', real: '💸', diario: '📔' }[e.tipo] || '•'} ${esc(e.titulo)}${e.apolo && e.apolo !== 'pendiente' ? ' 🧩' : ''}`).join('<br>')}</div>`
+    : '<div class="tenue chico">Solo en el PC.</div>';
   $('#piLog').textContent = (p.log || []).slice().reverse().map(([t, l]) => `${fecha(t)}  ${l}`).join('\n');
 }
 async function guardarPiloto(extra = {}) {
@@ -523,3 +528,15 @@ document.addEventListener('keydown', e => { if (!esReplay() || e.target.matches(
   setInterval(() => { if (!document.hidden && !esReplay()) cargarVig(); }, 30000);
   setInterval(() => { if (!document.hidden && !esReplay() && ['5m', '15m'].includes(E.intervalo)) cargarGrafico(false); }, 60000);
 })();
+
+function lineaConciencia(L) {
+  if (L.length < 2) return '<div class="tenue chico">La línea aparece a partir de la segunda ronda de entrenamiento (cada 30 min).</div>';
+  const W = 600, H = 120, x = i => 4 + i * (W - 8) / (L.length - 1), y = v => H - 4 - (Math.max(0, Math.min(100, v)) / 100) * (H - 8);
+  const pts = L.map((r, i) => `${x(i).toFixed(1)},${y(r.nivel).toFixed(1)}`).join(' ');
+  const ult = L[L.length - 1];
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:120px;margin-top:6px;background:rgba(127,127,127,.06);border-radius:6px">`
+    + [25, 50, 75].map(v => `<line x1="0" x2="${W}" y1="${y(v)}" y2="${y(v)}" stroke="currentColor" opacity=".12"/>`).join('')
+    + `<polyline points="${pts}" fill="none" stroke="var(--verde)" stroke-width="2"/>`
+    + L.map((r, i) => r.mejor_vivo != null ? `<circle cx="${x(i)}" cy="${y(r.nivel)}" r="3" fill="var(--verde)"><title>en vivo ${r.mejor_vivo} %/op</title></circle>` : '').join('')
+    + `</svg><div class="tenue chico">${L.length} rondas · desde ${fecha(L[0].ts)} · ahora: ${ult.pasan} pasan la validación${ult.mejor_prueba != null ? `, mejor ${sg(ult.mejor_prueba, 1)} %/op fuera de muestra` : ''}. Hasta 40 = solo datos y exploración; por encima solo sube con ventaja demostrada.</div>`;
+}
