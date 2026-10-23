@@ -427,7 +427,33 @@ function velasReal(r, P, pend) {
     text: `${a.tipo === 'buy' ? 'compra' : 'venta'} ${n(a.usd, 2)} $` })));
   if (GR.ult !== GR.tok) { GR.c.timeScale().fitContent(); GR.ult = GR.tok; }
 }
-setInterval(() => { if (!document.hidden && E.pag === 'real') cargarReal(); }, 5000);
+// ---------- piloto automático real ----------
+async function cargarPiloto() {
+  let p;
+  try { p = await api('/piloto'); } catch (e) { $('#piEstado').textContent = e.message; return; }
+  const c = p.cfg || {}, ahora = Date.now() / 1000;
+  if (document.activeElement?.closest?.('#piPorOp,#piPerd,#piOps,#piUmbral') == null) {
+    $('#piPorOp').value = c.por_op_sol; $('#piPerd').value = c.perdida_max_sol; $('#piOps').value = c.max_ops_dia; $('#piUmbral').value = c.umbral; }
+  const vivo = p.ts && ahora - p.ts < 120;
+  $('#piEstado').innerHTML = `${c.activo ? '<span class="verde">● ACTIVO</span>' : '<span class="tenue">○ parado</span>'}${p.ts ? ` · ${vivo ? 'PC conectado' : '<span class="ambar">PC sin responder</span>'}` : ' · <span class="ambar">esperando al PC</span>'}${p.motivo ? ` · <span class="ambar">${esc(p.motivo)}</span>` : ''}${p.saldo_inicio ? ` · resultado ${sg(((p.saldo || p.saldo_inicio) - p.saldo_inicio), 4)} SOL` : ''}${p.error && p.error_ts > (p.ts || 0) - 60 ? ` · <span class="rojo">${esc(p.error)}</span>` : ''}`;
+  const o = p.orden;
+  $('#piOrden').innerHTML = o ? `<div class="re-bot" style="border-left-color:var(--ambar)">${o.entro ? `Dentro de <b>${esc(o.simbolo)}</b> desde ${fecha(o.entro)} a ${np(o.precio_entrada)} $` : `Esperando comprar <b>${esc(o.simbolo)}</b> a ${np(o.compra)} $ (${o.pts} pts)`} con ${n(o.sol, 3)} SOL · TP +${n(o.tp, 0)} % / SL −${n(o.sl, 0)} %</div>` : '<div class="tenue chico">Sin orden del piloto ahora.</div>';
+  $('#piScan').innerHTML = tabla([['Token', x => esc(x.simbolo)], ['Pts', x => x.pts], ['Desde máx. 4h', x => sg(x.ret, 1) + ' %'], ['24h', x => sg(x.t24, 1) + ' %'], ['RSI15', x => x.rsi], ['ATR15', x => n(x.atr, 1) + ' %'], ['Smart $', x => n(x.smart, 0)]],
+    (p.ultimo_scan || {}).top || [], 'Aún no ha escaneado.') + (p.ultimo_scan ? `<div class="tenue chico">${fecha(p.ultimo_scan.ts)}</div>` : '');
+  $('#piOps2').innerHTML = tabla([['Fecha', x => fecha(x.creada)], ['Token', x => esc(x.simbolo)], ['Resultado', x => ({ tp: '<span class="verde">TP</span>', sl: '<span class="rojo">SL</span>', no_entro: 'no entró', fallo_compra: '<span class="ambar">fallo compra</span>' })[x.resultado] || esc(x.resultado)], ['SOL', x => sg(x.pnl_sol, 4)]],
+    (p.ops || []).slice().reverse().slice(0, 20), 'Sin operaciones todavía.');
+  $('#piLog').textContent = (p.log || []).slice().reverse().map(([t, l]) => `${fecha(t)}  ${l}`).join('\n');
+}
+async function guardarPiloto(extra = {}) {
+  try {
+    await api('/piloto/config', 'POST', { por_op_sol: +$('#piPorOp').value, perdida_max_sol: +$('#piPerd').value, max_ops_dia: +$('#piOps').value, umbral: +$('#piUmbral').value, ...extra });
+    toast(extra.activo === true ? 'Piloto ACTIVADO: opera con dinero real dentro de esos límites' : extra.activo === false ? 'Piloto parado (si tiene una orden dentro, GMGN sigue vigilando su TP/SL)' : 'Guardado'); cargarPiloto();
+  } catch (e) { toast(e.message); }
+}
+$('#piGuardar').onclick = () => guardarPiloto();
+$('#piOn').onclick = () => { if (confirm(`¿Activar el piloto con DINERO REAL?\n${$('#piPorOp').value} SOL por operación, se apaga solo si pierde ${$('#piPerd').value} SOL.`)) guardarPiloto({ activo: true }); };
+$('#piOff').onclick = () => guardarPiloto({ activo: false });
+setInterval(() => { if (!document.hidden && E.pag === 'real') { cargarReal(); cargarPiloto(); } }, 5000);
 
 // ---------- Up/Down de Polymarket (simulado) ----------
 async function cargarUpdown() {
@@ -461,7 +487,7 @@ setInterval(() => { if (!document.hidden && E.pag === 'updown') cargarUpdown(); 
 
 // ---------- navegación ----------
 function irA(p) { $$('#pestanas button').forEach(b => b.classList.toggle('on', b.dataset.p === p)); $$('.pag').forEach(s => s.classList.toggle('on', s.id === 'p-' + p)); E.pag = p;
-  ({ agente: cargarAgente, real: cargarReal, updown: cargarUpdown, diario: cargarDiario, stats: cargarStats, practica: cargarPracticas, escaner: cargarAlertas, ajustes: pintarCfg })[p]?.(); }
+  ({ agente: cargarAgente, real: () => { cargarReal(); cargarPiloto(); }, updown: cargarUpdown, diario: cargarDiario, stats: cargarStats, practica: cargarPracticas, escaner: cargarAlertas, ajustes: pintarCfg })[p]?.(); }
 $$('#pestanas button').forEach(b => b.onclick = () => irA(b.dataset.p));
 async function cambiarCuenta() { localStorage.setItem('dmn.cuenta', $('#selCuenta').value); pararAuto(); await cargarCuenta(); limpiarTicket(); await cargarGrafico(); cargarCotizacion(); cargarAnalisis(); if (E.pag && E.pag !== 'mesa') irA(E.pag); }
 $('#selCuenta').onchange = cambiarCuenta;

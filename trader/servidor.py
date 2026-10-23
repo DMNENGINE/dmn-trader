@@ -4,7 +4,7 @@ Si se expone fuera de este PC, poner DMN_TRADER_TOKEN: se pedirá en la cabecera
 import argparse, json, mimetypes, os, re, threading, time, traceback
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
-from . import datos, db, motor, analisis, backtest, agente, real, updown
+from . import datos, db, motor, analisis, backtest, agente, real, piloto, updown
 
 WEB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'web')
 VERSION = '1.0.0'
@@ -374,6 +374,22 @@ def r_real_nodo(q, b):
     return real.recibir(b)
 
 
+# ---------- piloto real (opera solo, dentro de los montos que pone el usuario) ----------
+
+
+@ruta('GET', '/api/piloto')
+def r_piloto(q, b):
+    """Estado del piloto: el local si corre aquí; si no, el último que mandó el nodo con la key."""
+    if piloto._hilo['t'] and piloto._hilo['t'].is_alive():
+        return {**piloto.estado(), 'aqui': True}
+    return {**((real.estado().get('piloto')) or {}), 'cfg': piloto.cfg(), 'aqui': False}
+
+
+@ruta('POST', '/api/piloto/config')
+def r_piloto_cfg(q, b):
+    return piloto.poner_cfg(b or {})
+
+
 # ---------- hilo de fondo ----------
 
 
@@ -499,6 +515,7 @@ def preparar():
     if updown.estado().get('activo') or db.uno('SELECT 1 FROM pm_apuestas WHERE resultado IS NULL'):
         updown.arrancar_hilo()  # los apostadores siguen tras un reinicio (y las apuestas abiertas se cobran)
     agente.arrancar_ordenes()  # nodos: obedecen al panel de la central (cuántos agentes aquí, parar)
+    piloto.arrancar()  # opera solo si la configuración lo activa (desde el panel / APOLO)
     real.arrancar()  # solo donde está gmgn-cli con la key (el PC): vigila la cuenta real y la manda a la central
     if not db.q('SELECT 1 FROM cuentas LIMIT 1'):
         c = motor.crear_cuenta('Principal', 10000, 'USD')

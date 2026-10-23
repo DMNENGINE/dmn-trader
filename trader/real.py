@@ -219,12 +219,21 @@ def guardar(snap):
     return snap
 
 
+def _cfg_mas_nueva(otra):
+    """Configuración del piloto: gana la que se cambió más tarde (panel en la central o freno del nodo)."""
+    from . import piloto
+    if isinstance(otra, dict) and otra.get('cambiado', 0) > piloto.cfg().get('cambiado', 0):
+        db.poner_ajuste(piloto.CFG, otra)
+
+
 def recibir(snap):
-    """En la central: guarda la foto que manda el nodo con la key."""
+    """En la central: guarda la foto que manda el nodo con la key y le devuelve la configuración del piloto."""
+    from . import piloto
     if isinstance(snap, dict) and snap.get('ts'):
         snap['recibido'] = int(time.time())
+        _cfg_mas_nueva((snap.get('piloto') or {}).get('cfg'))
         db.poner_ajuste(CLAVE, snap)
-    return {'ok': True}
+    return {'ok': True, 'piloto_cfg': piloto.cfg()}
 
 
 def estado():
@@ -242,7 +251,8 @@ def _enviar(snap):
     req = urllib.request.Request(agente.CENTRAL + '/api/real/nodo', data=json.dumps(snap, default=str).encode(), method='POST',
                                  headers={'content-type': 'application/json', **({'x-token': agente.CENTRAL_TOKEN} if agente.CENTRAL_TOKEN else {})})
     try:
-        urllib.request.urlopen(req, timeout=10).read()
+        r = json.loads(urllib.request.urlopen(req, timeout=10).read() or b'{}')
+        _cfg_mas_nueva(r.get('piloto_cfg'))
     except Exception:
         pass
 
@@ -251,8 +261,9 @@ def _bucle():
     while True:
         t0 = time.time()
         try:
+            from . import piloto
             snap = guardar(foto())
-            _enviar(snap)
+            _enviar({**snap, 'piloto': piloto.estado()})
         except Exception as e:
             s = db.ajuste(CLAVE) or {}
             s['error'] = str(e)[:200]

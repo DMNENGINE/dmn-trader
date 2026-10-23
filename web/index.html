@@ -103,6 +103,18 @@
   <div class="panel"><div class="cab">💰 Cuenta real en GMGN <span id="reEstado" class="tenue chico"></span><span class="espacio"></span><span id="reWallet" class="tenue chico mono"></span></div>
     <p class="tenue chico">Dinero de verdad. Esta pestaña solo mira: el PC consulta tu wallet cada 10 s con gmgn-cli (la clave no sale de él) y lo manda aquí. Las compras, los take-profit y los stop los ejecuta el bot de GMGN.</p>
     <div id="reKpis" class="tiles"></div></div>
+  <div class="panel"><div class="cab">🧭 Piloto automático (dinero real) <span id="piEstado" class="tenue chico"></span></div>
+    <div class="fila" style="flex-wrap:wrap;gap:8px;align-items:end">
+      <label class="chico">SOL por operación<br><input id="piPorOp" type="number" step="0.001" min="0.005" max="0.1" style="width:90px"></label>
+      <label class="chico">Pérdida máx. total (SOL)<br><input id="piPerd" type="number" step="0.001" min="0.001" style="width:90px"></label>
+      <label class="chico">Ops máx./día<br><input id="piOps" type="number" step="1" min="1" style="width:70px"></label>
+      <label class="chico">Puntos mínimos (0-9)<br><input id="piUmbral" type="number" step="1" min="4" max="9" style="width:70px"></label>
+      <button id="piGuardar">Guardar</button><button id="piOn" class="verde">▶ Activar</button><button id="piOff" class="rojo">⏹ Parar</button>
+    </div>
+    <div id="piOrden" style="margin-top:8px"></div>
+    <details style="margin-top:6px"><summary class="chico">Último escaneo</summary><div id="piScan"></div></details>
+    <div class="cab chico" style="margin-top:8px">Historial del piloto</div><div id="piOps2"></div>
+    <pre id="piLog" class="chico" style="max-height:180px;overflow:auto"></pre></div>
   <div class="panel"><div class="cab">🤖 Qué está haciendo el bot ahora</div><div id="reBot"></div></div>
   <div class="panel"><div class="cab">📈 Velas en vivo <span id="reVTok" class="espacio"></span><span class="tenue chico">1 min · GMGN</span></div><div id="reChart" style="height:340px"></div></div>
   <div class="panel"><div class="cab">Posiciones abiertas</div><div id="rePos"></div></div>
