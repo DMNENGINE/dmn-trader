@@ -6,15 +6,18 @@ Frenos duros: pérdida máxima del total (se apaga), pausa tras 2 stops seguidos
 para comisiones, enfriamiento por token tras un stop. Corre donde está gmgn-cli con la key (el PC); la configuración la
 pone el panel de la central y llega aquí con la respuesta de la sincronía de real.py."""
 import threading, time
-from . import db, onchain, real
+from . import db, llm, onchain, real
 
 CFG, EST = 'piloto_cfg', 'piloto_estado'
 CADA = 300            # escaneo
 CADA_ORDEN = 30       # seguimiento de la orden abierta
+CADA_IA = 300         # revisión de la posición por el modelo
+CADA_VELAS = 300
 DEFECTO = {'activo': False, 'tarea': 'memes_sol', 'por_op_sol': 0.01, 'perdida_max_sol': 0.008, 'reserva_sol': 0.005,
-           'max_ops_dia': 6, 'umbral': 6, 'atr_max': 8.0, 'espera_min': 45, 'pausa_stops_h': 3, 'enfriar_token_h': 6}
+           'max_ops_dia': 6, 'umbral': 6, 'atr_max': 8.0, 'espera_min': 45, 'pausa_stops_h': 3, 'enfriar_token_h': 6,
+           'gestion': True, 'ia': True, 'smart_salida_usd': 300.0, 'ia_conf_min': 0.7}
 _hilo = {'t': None}
-_ult = {'scan': 0}
+_ult = {'scan': 0, 'smart': 0}
 
 
 def cfg():
@@ -156,6 +159,135 @@ def _resultado(o):
     return 'cerrada'
 
 
+# ---------------- gestión activa (1: stop que sube · 2: salida anticipada · 3: revisión con IA) ----------------
+
+def _precio(tok):
+    return float(onchain._api('/v1/token/info', chain='sol', address=tok)['price']['price'])
+
+
+def _tokens(w, tok):
+    try:
+        d = onchain._api('/v1/user/wallet_token_balance', chain='sol', wallet_address=w, token_address=tok)
+        return float(d['balances'][0]['balance'])
+    except Exception:
+        return 0.0
+
+
+def _vender(o):
+    """Venta a mercado del 100 % (tras anular la orden de GMGN para que su TP/SL no choque)."""
+    real._cli('swap', '--chain', 'sol', '--from', o['wallet'], '--input-token', o['token'], '--output-token', real.SOL,
+              '--percent', '100', '--slippage', '15', '--priority-fee', '0.00001', '--tip-fee', '0.00001', timeout=60)
+
+
+def _salir(e, o, motivo):
+    if not o.get('salida'):
+        try:
+            _cancelar(o['wallet'], o['id'])
+        except Exception as ex:
+            _log(e, f"⚠️ Quería salir de {o['simbolo']} ({motivo}) pero no pude anular la orden de GMGN: {str(ex)[:80]}")
+            return
+        o['salida'] = motivo
+        _log(e, f"🚪 Saliendo de {o['simbolo']}: {motivo}")
+    try:
+        if _tokens(o['wallet'], o['token']) > 0:
+            _vender(o)
+        o['vendido'] = int(time.time())
+    except Exception as ex:
+        o['reintentos'] = o.get('reintentos', 0) + 1
+        _log(e, f"⚠️ Venta de {o['simbolo']} falló (reintento {o['reintentos']}): {str(ex)[:80]}")
+
+
+def _contexto(tok, simbolo):
+    """Resumen compacto de la moneda para el modelo: precio, flujo, holders y velas recientes."""
+    t = onchain._api('/v1/token/info', chain='sol', address=tok)
+    p, st = t['price'], t.get('stat') or {}
+    s = onchain.registrar('SOL', tok, simbolo, t.get('name'))
+    v15, v1h = onchain.velas(s, '15m')[-16:], onchain.velas(s, '1h')[-24:]
+    r = lambda x: float('%.4g' % x)
+    pr = float(p['price'])
+    return {'simbolo': simbolo, 'precio': r(pr),
+            'cambio_%': {k: round((pr / float(p[f'price_{k}']) - 1) * 100, 1) for k in ('5m', '1h', '6h', '24h') if float(p.get(f'price_{k}') or 0)},
+            'compras_vs_ventas_$': {k: [round(float(p.get(f'buy_volume_{k}') or 0)), round(float(p.get(f'sell_volume_{k}') or 0))] for k in ('5m', '1h', '6h')},
+            'liquidez_$': round(float(t.get('liquidity') or 0)), 'holders': t.get('holder_count'),
+            'top10_%': round(float(st.get('top_10_holder_rate') or 0) * 100, 1), 'bundlers_%': round(float(st.get('top_bundler_trader_percentage') or 0) * 100, 1),
+            'smart_money_neto_1h_$': onchain.smart_neto(s),
+            'velas_15m_ohlcv': [[r(x['o']), r(x['h']), r(x['l']), r(x['c']), round(x['v'])] for x in v15],
+            'cierres_1h': [r(x['c']) for x in v1h]}
+
+
+REGLAS_IA = ('Eres un trader cuantitativo de memecoins de Solana, frío y escéptico. Costes reales ≈6 % ida y vuelta: solo vale la pena '
+             'si el movimiento esperado lo supera con claridad. Peligros: ventas > compras sostenidas, smart money vendiendo, mechas largas '
+             'arriba, volumen cayendo tras un pump, holders concentrados. Responde SOLO JSON.')
+
+
+def _ia_entrada(c, b):
+    if not c['ia'] or not llm.disponible():
+        return True, 'sin IA'
+    sl = max(8, min(2.5 * b['atr'], 18))
+    try:
+        r = llm.preguntar(f"{REGLAS_IA}\nEl escáner propone COMPRAR en retroceso ({b['pts']}/9 puntos, ATR15 {b['atr']} %, compra límite medio ATR "
+                          f"por debajo, TP +{2 * sl:.0f} %, SL −{sl:.0f} %).\nDatos: {_contexto(b['token'], b['simbolo'])}\n"
+                          'Contesta {"decision":"entrar"|"vetar","confianza":0-1,"motivo":"una frase en español"}', timeout=90)
+    except Exception as ex:
+        return True, f'IA no contestó ({str(ex)[:40]})'
+    veto = str(r.get('decision', '')).lower().startswith('vet') and real._f(r.get('confianza')) >= 0.6
+    return (not veto), str(r.get('motivo') or '')[:160]
+
+
+def _gestionar(e, c, o):
+    """Posición abierta: máximo, stop que sube, salidas anticipadas y revisión del modelo."""
+    ahora = time.time()
+    if o.get('salida'):
+        if not o.get('vendido') and o.get('reintentos', 0) < 20:
+            _salir(e, o, o['salida'])
+        return
+    pr = _precio(o['token'])
+    ent = o.get('precio_entrada') or o['compra']
+    o['precio'], o['max'] = pr, max(o.get('max') or ent, pr)
+    o['pnl_pct'] = round((pr / ent - 1) * 100, 2)
+    if not c['gestion']:
+        return
+    # 1) stop que sube: a mitad de camino del TP protege la entrada (+2 %); a 3/4 persigue el máximo a 1,5 ATR
+    stop = None
+    if o['max'] >= ent * (1 + o['tp'] / 200):
+        stop = ent * 1.02
+    if o['max'] >= ent * (1 + o['tp'] * 0.75 / 100):
+        stop = max(stop or 0, o['max'] * (1 - 1.5 * o['atr'] / 100))
+    if stop and stop != o.get('stop_dyn'):
+        o['stop_dyn'] = stop
+        _log(e, f"🔒 {o['simbolo']} llegó a {(o['max'] / ent - 1) * 100:+.1f} %: stop subido a {stop:.6g} $ ({(stop / ent - 1) * 100:+.1f} %)")
+    if stop and pr <= stop:
+        return _salir(e, o, f"stop dinámico ({(pr / ent - 1) * 100:+.1f} %)")
+    # 2) salida anticipada: smart money vendiendo fuerte con la posición en rojo, o sin volumen ni avance tras 1 h
+    s = onchain.registrar('SOL', o['token'], o['simbolo'])
+    sm = onchain.smart_neto(s)
+    o['smart'] = sm
+    if sm is not None and sm <= -c['smart_salida_usd'] and pr < ent:
+        return _salir(e, o, f'smart money vendiendo ({sm:.0f} $ en 1 h)')
+    if ahora - o.get('velas_ts', 0) >= CADA_VELAS:
+        o['velas_ts'] = ahora
+        try:
+            v = onchain.velas(s, '15m')
+            o['vol_rel'] = round(sum(x['v'] for x in v[-2:]) / 2 / (sum(x['v'] for x in v[-26:-2]) / 24 or 1), 2)
+        except Exception:
+            pass
+    if ahora - o['entro'] > 3600 and o['pnl_pct'] < 2 and (o.get('vol_rel') or 1) < 0.3:
+        return _salir(e, o, f"sin volumen ni avance tras 1 h (vol {o.get('vol_rel')}×, {o['pnl_pct']:+.1f} %)")
+    # 3) revisión con el modelo cada 5 min
+    if c['ia'] and ahora - o.get('ia_ts', 0) >= CADA_IA and llm.disponible():
+        o['ia_ts'] = ahora
+        try:
+            r = llm.preguntar(f"{REGLAS_IA}\nPosición LARGA: entrada {ent:.6g} $, ahora {o['pnl_pct']:+.1f} %, máximo {(o['max'] / ent - 1) * 100:+.1f} %, "
+                              f"TP +{o['tp']:.0f} %, SL −{o['sl']:.0f} %, abierta hace {int((ahora - o['entro']) / 60)} min.\n"
+                              f"Datos: {_contexto(o['token'], o['simbolo'])}\n"
+                              '¿Mantener hasta TP/SL o salir ya? Contesta {"accion":"mantener"|"salir","confianza":0-1,"motivo":"una frase en español"}', timeout=90)
+            o['ia'] = {'accion': r.get('accion'), 'confianza': r.get('confianza'), 'motivo': str(r.get('motivo') or '')[:160], 'ts': int(ahora)}
+            if str(r.get('accion', '')).lower().startswith('sal') and real._f(r.get('confianza')) >= c['ia_conf_min']:
+                return _salir(e, o, f"la IA lo ve mal: {o['ia']['motivo']}")
+        except Exception as ex:
+            o['ia'] = {'error': str(ex)[:80], 'ts': int(ahora)}
+
+
 def _seguir(e, c):
     """Orden abierta del piloto: ¿entró?, ¿cerró?, ¿caducó sin entrar?"""
     o = e['orden']
@@ -167,6 +299,13 @@ def _seguir(e, c):
         o['entro'] = int(time.time())
         o['precio_entrada'] = real._f(x.get('open_price'))
         _log(e, f"✅ Compró {o['simbolo']} a {o['precio_entrada']:.6g} $ — TP +{o['tp']:.0f} % / SL −{o['sl']:.0f} %")
+    if (compro and tipo == 'open') or (o.get('salida') and not o.get('vendido')):
+        try:
+            _gestionar(e, c, o)
+        except Exception as ex:
+            e['error'], e['error_ts'] = f'gestión: {str(ex)[:150]}', int(time.time())
+        if o.get('salida') and not o.get('vendido'):
+            return
     if tipo == 'open' and not compro and time.time() - o['creada'] > c['espera_min'] * 60:
         try:
             _cancelar(o['wallet'], o['id'])
@@ -176,18 +315,24 @@ def _seguir(e, c):
         return
     if tipo == 'history':
         res = _resultado(x)
+        if o.get('salida'):
+            if (_tokens(o['wallet'], o['token']) > 0 and o.get('reintentos', 0) < 20
+                    and (not o.get('vendido') or time.time() - o['vendido'] > 90)):
+                o['vendido'] = None  # anulada pero aún con monedas: se reintenta la venta
+                return _salir(e, o, o['salida'])
+            res = 'salida'
         saldo, _ = _saldo()
-        pnl = saldo - o['saldo_antes'] if res in ('tp', 'sl', 'cerrada') else 0.0
+        pnl = saldo - o['saldo_antes'] if res in ('tp', 'sl', 'cerrada', 'salida') else 0.0
         op = {**o, 'cerrada': int(time.time()), 'resultado': res, 'pnl_sol': round(pnl, 6)}
         e['ops'] = (e.get('ops') or [])[-199:] + [op]
         e['orden'] = None
-        if res == 'sl':
+        if res == 'sl' or (res in ('salida', 'cerrada') and pnl < 0):
             e['stops_seguidos'] = e.get('stops_seguidos', 0) + 1
             e.setdefault('enfriar', {})[o['token']] = int(time.time()) + c['enfriar_token_h'] * 3600
         elif res == 'tp':
             e['stops_seguidos'] = 0
-        icono = {'tp': '🎯', 'sl': '🛑', 'fallo_compra': '⚠️', 'no_entro': '⌛', 'cerrada': '📤'}[res]
-        _log(e, f"{icono} {o['simbolo']}: {res} · {pnl:+.4f} SOL")
+        icono = {'tp': '🎯', 'sl': '🛑', 'fallo_compra': '⚠️', 'no_entro': '⌛', 'cerrada': '📤', 'salida': '🚪'}[res]
+        _log(e, f"{icono} {o['simbolo']}: {res}{' (' + o['salida'] + ')' if o.get('salida') else ''} · {pnl:+.4f} SOL")
         if e.get('stops_seguidos', 0) >= 2:
             e['pausa_hasta'] = int(time.time()) + c['pausa_stops_h'] * 3600
             e['stops_seguidos'] = 0
@@ -197,6 +342,12 @@ def _seguir(e, c):
 def paso():
     c, e = cfg(), _est()
     ahora = int(time.time())
+    if ahora - _ult['smart'] >= 60:  # smart money fresco: lo usan la salida anticipada y la IA
+        _ult['smart'] = ahora
+        try:
+            onchain.actualizar_smart()
+        except Exception:
+            pass
     if e.get('orden'):
         _seguir(e, c)
     if c['activo'] and not e.get('orden'):
@@ -228,8 +379,17 @@ def paso():
             cand = candidatos(evitar)
             e['ultimo_scan'] = {'ts': ahora, 'top': cand[:6]}
             buenos = [x for x in cand if x['pts'] >= c['umbral'] and x['atr'] <= c['atr_max']]
-            if buenos:
-                b = buenos[0]
+            b = None
+            for x in buenos[:3]:
+                ok, motivo = _ia_entrada(c, x)
+                if ok:
+                    b = x
+                    if motivo != 'sin IA':
+                        _log(e, f"🧠 IA aprueba {x['simbolo']}: {motivo}")
+                    break
+                _log(e, f"🧠 IA veta {x['simbolo']}: {motivo}")
+                e.setdefault('enfriar', {})[x['token']] = ahora + 3600
+            if b:
                 oid, compra, tp, sl = _crear(w, b, b['precio'])
                 e['orden'] = {'id': oid, 'token': b['token'], 'simbolo': b['simbolo'], 'creada': ahora, 'wallet': w, 'compra': compra,
                               'tp': tp, 'sl': sl, 'pts': b['pts'], 'atr': b['atr'], 'sol': c['por_op_sol'], 'saldo_antes': saldo}
