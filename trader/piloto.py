@@ -795,8 +795,24 @@ def _responder(pet, estado, respuesta):
     db.poner_ajuste(PET, {**pet, 'estado': estado, 'respuesta': str(respuesta)[:300], 'resuelta': int(time.time())})
 
 
+def _filtro_apolo(tok):
+    """El mismo filtro de seguridad que las entradas automáticas: el token tiene que estar en el ranking de volumen y
+    pasar onchain.revisar (liquidez, volumen real, rug, top 10, mint/freeze renunciados, edad). [] = pasa."""
+    for intervalo in ('1h', '24h'):
+        d = onchain._api('/v1/market/rank', chain='sol', interval=intervalo, limit=100, order_by='volume', direction='desc',
+                         filters=['not_wash_trading'], min_liquidity=onchain.FILTRO['liquidez_min'], min_volume=100_000)
+        t = next((x for x in (d or {}).get('rank') or [] if x.get('address') == tok), None)
+        if t:
+            mal = [m for m in onchain.revisar(t) if m != 'poco volumen']
+            return mal + (['poco volumen'] if (t.get('volume') or 0) < 100_000 else [])
+    return ['no está entre los tokens con liquidez y volumen suficientes del ranking de GMGN']
+
+
 def _comprar_apolo(e, w, pet):
     from . import mercado_gmgn
+    mal = _filtro_apolo(pet['token'])
+    if mal:
+        raise EntradaNoEnviada('no pasa el filtro de seguridad del piloto: ' + ', '.join(mal))
     precio = _precio(pet['token'])
     if not precio or not math.isfinite(precio) or precio <= 0:
         raise EntradaNoEnviada('sin precio del token en GMGN')

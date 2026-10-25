@@ -40,9 +40,23 @@ class PeticionApolo(unittest.TestCase):
     def test_comprar_pasa_por_mercado_gmgn_con_los_datos_de_apolo(self):
         self.activo();pet=self.pedir(tp=40,sl=10,simbolo='BTC')
         e={}
-        with patch.object(P,'_precio',return_value=0.01),patch('trader.mercado_gmgn.abrir') as abrir:P._comprar_apolo(e,'w',pet)
+        with patch.object(P,'_filtro_apolo',return_value=[]),patch.object(P,'_precio',return_value=0.01),patch('trader.mercado_gmgn.abrir') as abrir:P._comprar_apolo(e,'w',pet)
         _,w,b,precio=abrir.call_args.args
         self.assertEqual((w,b['token'],b['tp'],b['sl'],b['est_id'],precio),('w',TOK,40.0,10.0,'apolo',0.01))
+    def test_token_que_no_pasa_el_filtro_no_se_compra(self):
+        self.activo();pet=self.pedir()
+        malo={'address':TOK,'liquidity':200000,'volume':900000,'rug_ratio':0.92,'top_10_holder_rate':0.79,'renounced_mint':1,'renounced_freeze_account':1,'open_timestamp':0}
+        with patch.object(P.onchain,'_api',return_value={'rank':[malo]}),patch('trader.mercado_gmgn.abrir') as abrir:
+            with self.assertRaises(P.EntradaNoEnviada) as ex:P._comprar_apolo({},'w',pet)
+        abrir.assert_not_called();self.assertIn('riesgo de rug',str(ex.exception));self.assertIn('top 10',str(ex.exception))
+    def test_token_fuera_del_ranking_no_se_compra(self):
+        self.activo();pet=self.pedir()
+        with patch.object(P.onchain,'_api',return_value={'rank':[]}),patch('trader.mercado_gmgn.abrir') as abrir:
+            with self.assertRaises(P.EntradaNoEnviada):P._comprar_apolo({},'w',pet)
+        abrir.assert_not_called()
+    def test_token_sano_pasa_el_filtro(self):
+        sano={'address':TOK,'liquidity':200000,'volume':900000,'rug_ratio':0.1,'top_10_holder_rate':0.2,'renounced_mint':1,'renounced_freeze_account':1,'open_timestamp':1700000000}
+        with patch.object(P.onchain,'_api',return_value={'rank':[sano]}):self.assertEqual(P._filtro_apolo(TOK),[])
     def test_salir_sin_posicion_se_rechaza_sin_vender(self):
         db.poner_ajuste(P.PET,{'id':'a','accion':'salir','motivo':'x','ts':int(time.time()),'estado':'pendiente'})
         db.poner_ajuste(P.EST,{'orden':None})
