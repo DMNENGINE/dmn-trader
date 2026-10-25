@@ -1,7 +1,7 @@
 """Servidor HTTP de DMN Trader: API JSON (/api/...) + panel web (web/). Un hilo de fondo ejecuta órdenes y alertas.
 Arranque: python -m trader.servidor  [--host 0.0.0.0] [--puerto 8777]
 Si se expone fuera de este PC, poner DMN_TRADER_TOKEN: se pedirá en la cabecera x-token (o ?token=)."""
-import argparse, json, mimetypes, os, re, threading, time, traceback, ipaddress, hmac
+import argparse, json, mimetypes, os, re, sys, threading, time, traceback, ipaddress, hmac
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from . import datos, db, motor, analisis, backtest, agente, real, piloto, updown
@@ -634,8 +634,21 @@ def main():
         raise ValueError('DMN_TRADER_TOKEN es obligatorio para escuchar fuera de localhost')
     preparar()
     threading.Thread(target=bucle, daemon=True).start()
-    print(f'DMN Trader {VERSION} en http://{a.host}:{a.puerto}  (base: {db.RUTA})', flush=True)
-    ThreadingHTTPServer((a.host, a.puerto), Manejador).serve_forever()
+    if os.environ.get('DMN_TRADER_VIGILAR_STDIN') == '1':
+        # lanzado por APOLO: su tubería de entrada sigue abierta mientras APOLO viva; si se cierra (EOF), el motor también
+        def vigilar_padre():
+            try:
+                while sys.stdin.buffer.read(4096):
+                    pass
+            except Exception:
+                pass
+            os._exit(0)
+        threading.Thread(target=vigilar_padre, daemon=True).start()
+    srv = ThreadingHTTPServer((a.host, a.puerto), Manejador)
+    puerto = srv.server_address[1]  # con --puerto 0 el sistema elige uno libre (así lo lanza APOLO)
+    print(f'DMN Trader {VERSION} en http://{a.host}:{puerto}  (base: {db.RUTA})', flush=True)
+    print(f'DMN_TRADER_PUERTO={puerto}', flush=True)
+    srv.serve_forever()
 
 
 if __name__ == '__main__':

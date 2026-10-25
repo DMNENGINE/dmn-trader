@@ -1,0 +1,5 @@
+# Saltos de línea fijos: el paquete de APOLO va firmado (FIRMA.json) y la copia que baja cada uno debe ser idéntica byte a byte.
+* text=auto eol=lf
+*.bat text eol=crlf
+*.png binary
+*.ico binary

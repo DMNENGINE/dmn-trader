@@ -1,0 +1,21 @@
+{
+  "nombre": "dmn-trader",
+  "version": "1.0.0",
+  "descripcion": "DMN Trader dentro de APOLO: APOLO arranca y vigila el motor (Python), añade la pestaña Trading al panel (autopiloto simulado con guardia, enjambre, noticias, mesa, backtest, práctica) y el piloto con dinero real apagado por defecto y con límites. No es asesoramiento financiero.",
+  "autor": "DMNENGINE",
+  "licencia": "MIT",
+  "entrada": "apolo/index.js",
+  "apoloSdk": "^1.0.0",
+  "permisos": ["shell", "red:127.0.0.1"],
+  "secretos": ["dmn-trader:token", "dmn-trader:gmgn"],
+  "aporta": {
+    "herramientas": [
+      { "nombre": "trader_guia", "riesgo": "lectura", "descripcion": "Guía de DMN Trader (órdenes, disciplina, enjambre) y referencias: estrategias, riesgo, glosario, plan-aprendizaje. Léela antes de operar." },
+      { "nombre": "trader_consultar", "riesgo": "lectura", "descripcion": "DMN Trader en solo lectura (dinero simulado, precios reales): precio, analisis, buscar, estado, cuentas, ordenes, tamano, diario, stats, examen, equity, estrategias, backtest, optimizar, escaner, alertas, avisos, reglas (sin cambios), enjambre [informe|noticias|lecciones|agente <id>], updown [mercados]." },
+      { "nombre": "trader_operar", "riesgo": "escritura", "descripcion": "DMN Trader, órdenes que cambian algo (dinero simulado): comprar, vender, cerrar, stop, cancelar, usar, nueva, reiniciar, reglas clave=valor, anotar, vigilar, olvidar, alerta, practica, avanzar, updown iniciar|parar." }
+    ],
+    "vistas": [
+      { "nombre": "trading", "archivo": "apolo/ui/trading.js", "titulo": "Trading", "icono": "grafica" }
+    ]
+  }
+}

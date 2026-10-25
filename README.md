@@ -11,7 +11,19 @@ Simulador profesional de trading con **datos reales** (Yahoo Finance) y dinero *
 - **Escáner y alertas** (con aviso a un webhook de Discord opcional).
 - **APOLO:** paquete para [APOLO](https://github.com/DMNENGINE/apolo): se instala desde la tienda, APOLO arranca el motor y añade una pestaña al panel.
 
-## Uso
+## Con APOLO (recomendado)
+1. Necesitas **Python 3.10+** (python.org). Si falta `numpy`, la pestaña lo instala con un botón.
+2. En APOLO: **Skills → Explorar → DMN Trader → Instalar** (o `POST /v1/plugins/instalar {"fuente":"DMNENGINE/dmn-trader"}`).
+3. Aparece **Trading** en el menú del panel. APOLO arranca el motor en un puerto libre, lo reinicia si se cae y lo para al cerrarse.
+   El token del motor se guarda cifrado en la bóveda de APOLO.
+4. El agente usa `trader_consultar` (lectura), `trader_operar` (simulado) y `trading_autopiloto` (enjambre simulado con duración y pérdida máxima).
+5. **Piloto con dinero real (GMGN):** apagado por defecto. Solo desde la pestaña: clave API de GMGN (cifrada), límites, escribir
+   «ACTIVO DINERO REAL» y aprobarlo en APOLO. El pánico de APOLO (Ctrl+Alt+Esc) lo pausa. Requiere `gmgn-cli` instalado y configurado.
+6. Otros equipos (p. ej. una Raspberry Pi) se unen como nodos: en la pestaña, «Permitir que otros equipos se unan» → «Datos para unir…».
+
+El paquete está firmado con la clave de DMNENGINE (`FIRMA.json`): APOLO solo carga su pestaña dentro del panel si la firma cuadra.
+
+## Uso sin APOLO
 - `iniciar.bat` → servidor en segundo plano + panel en http://127.0.0.1:8777
 - `autoarranque.bat` → que arranque con Windows.
 - En la Pi u otro equipo: `DMN_TRADER_TOKEN=secreto python3 -m trader.servidor --host 0.0.0.0` (el token se pide fuera de localhost).
