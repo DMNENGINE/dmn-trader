@@ -9,7 +9,7 @@ Simulador profesional de trading con **datos reales** (Yahoo Finance) y dinero *
 - **Backtest:** 7 estrategias, comisiones y deslizamiento, stop/objetivo por ATR, tamaño por riesgo, comparación con comprar y mantener, Sharpe/Sortino/Calmar, Monte Carlo y optimizador con validación fuera de muestra.
 - **Práctica (replay):** un trozo del pasado al azar, vela a vela, sin ver el futuro (→ avanza, espacio = auto).
 - **Escáner y alertas** (con aviso a un webhook de Discord opcional).
-- **APOLO:** skill `trader` (D:\RobotCompanion\skills\finanzas\trader) que maneja todo por voz/chat.
+- **APOLO:** paquete para [APOLO](https://github.com/DMNENGINE/apolo): se instala desde la tienda, APOLO arranca el motor y añade una pestaña al panel.
 
 ## Uso
 - `iniciar.bat` → servidor en segundo plano + panel en http://127.0.0.1:8777
@@ -19,9 +19,12 @@ Simulador profesional de trading con **datos reales** (Yahoo Finance) y dinero *
 
 Los precios de acciones pueden ir con algo de retraso; las órdenes de acciones solo se ejecutan con el mercado abierto. No es asesoramiento financiero.
 
-## En la Pi (instalación actual)
-Servicio `dmn-trader` (systemd) en `/home/dmn/dmn-trader`, puerto 8777, token en `.env`. Panel: `http://192.168.1.124:8777/#token=<token>` (se recuerda en el navegador).
-Actualizar: `tar --exclude=datos --exclude=.git -cf - . | ssh dmn@192.168.1.124 'tar -xf - -C ~/dmn-trader' && ssh dmn@192.168.1.124 sudo systemctl restart dmn-trader`
+## Varios equipos (central y nodos)
+Un equipo hace de **central** y los demás se unen como **nodos** con su propio enjambre:
+- Central: `DMN_TRADER_TOKEN=<secreto> python3 -m trader.servidor --host 0.0.0.0` (en Linux, como servicio systemd con el token en `.env`).
+  Panel: `http://<ip-de-la-central>:8777/#token=<token>` (se recuerda en el navegador).
+- Nodo: `DMN_TRADER_CENTRAL=http://<ip-de-la-central>:8777 DMN_TRADER_CENTRAL_TOKEN=<token> DMN_TRADER_NODO=<nombre> python3 -m trader.servidor`.
+  En Windows, `servidor-pc.bat` / `enjambre-pc.bat` leen la URL de `datos\central.txt` y el token de `datos\central_token.txt`.
 
 ## El reto de APOLO (`trader/agente.py`)
 Agente que opera solo con microoperaciones (1m/5m/15m), hace la autopsia de cada pérdida, aplica arreglos, y al quebrar prueba candidatos en datos reales recientes antes del siguiente intento. Pestaña «🤖 APOLO» del panel o `trader.py agente …` desde APOLO.

@@ -1,3 +1,9 @@
 datos/
 __pycache__/
 *.pyc
+.env
+*.env
+*.log
+*.key
+*.pem
+datos*/
