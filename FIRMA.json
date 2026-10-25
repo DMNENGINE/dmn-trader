@@ -2,7 +2,7 @@
   "formato": "apolo-firma/1",
   "autor": "DMNENGINE",
   "clavePublica": "fwdqHj9gcc4wD68fHBkRnGm0VwQyYFrJcYryj+8lSCI=",
-  "fecha": "2026-10-25T22:41:18.327Z",
+  "fecha": "2026-10-25T22:47:24.202Z",
   "archivos": {
     ".gitattributes": "c230339ad0282ad80de83b1765c45682618096ad2f0de6c125263131e34ebe00",
     ".gitignore": "e855002a95f08d987f1c8288ec210ac6607695b2f8b00f404c2e4fca8ff12c84",
@@ -50,6 +50,7 @@
     "tests/test_guardia.py": "1d11e2978fad2ca0c72a8f41620b0d9372d542b89024cbd16e41c103f723494e",
     "tests/test_mercado_gmgn.py": "229484335255c9552fed19f5e4bea6780f5fcbe54a8e77f1c4044711806c7cd5",
     "tests/test_observatorio_gmgn.py": "b240e856ad71ffc6a907641f3ea5cc590ae504dba7f53fe5df6c402bee3fb139",
+    "tests/test_piloto_apolo.py": "066af1aed083055ca4ae0e2b5b300e0a943633d1e6567f25dbafcfca0cb002cb",
     "tests/test_pnl_confirmado.py": "9c3ca4b0268fc4650dc8a99e24ea82cecf20c4837300cdd37a40d21f852b27d0",
     "tests/test_presupuesto_gmgn.py": "b386db574ecc1d8d1ceadc88a6d5428b4498d0d66d69a2bee5d2054d97cfd5c2",
     "tests/test_reactivacion.py": "da4c1e4a1e41b93e62daa64bfeff56a09b88251f6af428fd27d471dd14b30e1b",
@@ -83,7 +84,7 @@
     "trader/observatorio_gmgn.py": "708d73d7aa7299aecff220b82046e92ea9ad318824ee6cc24333c9fc5413657e",
     "trader/onchain.py": "6bc3f1da90d0b12862b277d2007e76dc56aaf755e980d7baadf416ea3c9982f2",
     "trader/piloto_fut.py": "75563e9ceb48f0941e40036b276a32da5890e22b6b698b4915c94ae7de28e926",
-    "trader/piloto.py": "2828b97cb3631d1d41a2800d0039478388945af898aec3dc89fa69d59269ea72",
+    "trader/piloto.py": "7e388f56a091b5651b95167f4ad5229bb8b1e89084852a33eaaa1807db72cb1f",
     "trader/presupuesto_gmgn.py": "bc775b4a059865cd929d1b73e6b6607de89ad8cf5c10579a773efe61faef850b",
     "trader/reactivacion.py": "f110ad123724971bf9b8a440ad6ea5465c2c90449791c61a99cb8330c2644dee",
     "trader/real.py": "28dcea200137a2584d5f37fe23e02f712ff565d0302db5256c3ed72cad3c3fd0",
@@ -100,5 +101,5 @@
     "web/index.html": "6828d67a7bce8eeeddce8078e41a9368a72c4af531032f2b4ae0214609524cd4",
     "web/vendor/lightweight-charts.js": "0c146b9bfbc6e5f19da1a0de876dae43023c332d5157d82f7575f9b7653ee519"
   },
-  "firma": "CofyVJT1sRg4TZo2lE5NK0/vQpboTXxQUro4zXbswNwi+74GdKyR9tPL+NQYia6COshPGHeN71LV1ZqEbTr9CQ=="
+  "firma": "rzMpZoqada7bHpPYkWLYttcT3E/Q3baVKpaG3g6uAzcsj8gH6Ff6NphZT+FH2AccsC6uWJctPSvk3WqMS6UYDg=="
 }
