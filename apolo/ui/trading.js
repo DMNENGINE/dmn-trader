@@ -199,7 +199,6 @@ registrarVistaPlugin('dmn-trader', 'trading', {
         <p>${tr('Cada trader va por libre a la sala que toca — opera sentado en la sala de traders, busca frente a la pizarra o en el atrio, estudia sus pérdidas en el laboratorio.')}</p>
         <div class="tr-ley"><span><i style="background:#2fd1b0"></i>${tr('Punto turquesa')} = Pi</span><span><i style="background:#c77dff"></i>${tr('Morado')} = PC</span></div>
       </div>
-      ${typeof CJ_pestanas === 'function' ? CJ_pestanas('trading') : ''}
       <div class="tr-kpis" id="trKpis"></div>
       <div class="tr-ticker" id="trTicker" hidden><b>📰 ${tr('EN VIVO')}</b><div><span id="trTickerTxt"></span></div></div>
       <div class="tr-sala"><canvas id="trCanvas" width="${this.W}" height="${this.H}"></canvas><div id="trTip" class="tr-tip" hidden></div></div>
