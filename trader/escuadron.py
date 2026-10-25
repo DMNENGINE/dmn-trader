@@ -396,7 +396,7 @@ def jefe(e):
                                 'resultado': 'rechazada por la simulación' + (f' ({mejora:+.2f}R)' if mejora is not None else ' (pocos trades)')})
         it = {'ts': int(time.time()), 'analisis': analisis, 'propuestas': res, 'modelo': llm.MODELO}
         db.poner_ajuste('jefe_mesa', it)
-        A._leccion(None, None, None, 'jefe', '🧑‍💼 Jefe de mesa: ' + analisis + (' ' + ' | '.join(f"{x['titulo']}: {x['resultado']}" for x in res) if res else ''), {})
+        A._leccion(None, None, None, 'jefe', '💼 Jefe de mesa: ' + analisis + (' ' + ' | '.join(f"{x['titulo']}: {x['resultado']}" for x in res) if res else ''), {})
         return it
     finally:
         _jefe.release()

@@ -25,7 +25,6 @@ El paquete está firmado con la clave de DMNENGINE (`FIRMA.json`): APOLO solo ca
 
 ## Uso sin APOLO
 - `iniciar.bat` → servidor en segundo plano + panel en http://127.0.0.1:8777
-- `autoarranque.bat` → que arranque con Windows.
 - En la Pi u otro equipo: `DMN_TRADER_TOKEN=secreto python3 -m trader.servidor --host 0.0.0.0` (el token se pide fuera de localhost).
 - Datos en `datos/trader.db` (SQLite). Prueba: `python tests/prueba_motor.py`.
 

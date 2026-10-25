@@ -766,7 +766,7 @@ def _jefe(e):
     try:
         j = escuadron.jefe(e)
         if j:
-            log('🧑‍💼 ' + escuadron.resumen_jefe()[:300])
+            log('💼 ' + escuadron.resumen_jefe()[:300])
     except Exception:
         log('error del jefe de mesa: ' + traceback.format_exc().splitlines()[-1])
 
