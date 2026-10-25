@@ -186,9 +186,16 @@ registrarVistaPlugin('dmn-trader', 'trading', {
     this.abort = new AbortController(); this.carga = null; this.detalles = new Map();
     this.v = v; this.datos = null; this.burbujas = new Map(); this.antes = new Map(); this.sel = null; this.salaSel = null; this.cajas = []; this.pj = new Map(); this.labHasta = new Map();
     this.mundo(); this.est = { borde: '#2fd1b0', luz: 'neon', bahia: 1, precios: [] };
+    try { this.tab = localStorage.getItem('dmn-trader:tab') === 'centro' ? 'centro' : 'panel'; } catch { this.tab = 'panel'; }
     v.innerHTML = `<div class="pagina mision ancha tr-mc">
       <div class="tr-cab">
-        <div class="tr-logo">${ic('edificio')}<div><b>MISSION CONTROL</b><span>${tr('CENTRO DE OPERACIONES')}</span></div></div>
+        <div class="tr-logo">${ic('grafica')}<div><b>DMN TRADER</b><span>${tr('TRADING')}</span></div></div>
+        <div class="tr-tabs" id="trTabs"><button data-tab="panel">${ic('grafica')}${tr('Panel')}</button><button data-tab="centro">${ic('edificio')}${tr('Centro de operaciones')}</button></div>
+        <span class="tr-sub" id="trMotorEst"></span>
+      </div>
+      <div id="trVPanel" class="tr-panel"><div id="trPanelMsg" class="sutil">${tr('Conectando con el motor…')}</div><iframe id="trFrame" title="DMN Trader" hidden></iframe></div>
+      <div id="trVCentro" hidden>
+      <div class="tr-cab tr-cab2">
         <p>${tr('Cada trader va por libre a la sala que toca — opera sentado en la sala de traders, busca frente a la pizarra o en el atrio, estudia sus pérdidas en el laboratorio.')}</p>
         <div class="tr-ley"><span><i style="background:#2fd1b0"></i>${tr('Punto turquesa')} = Pi</span><span><i style="background:#c77dff"></i>${tr('Morado')} = PC</span></div>
       </div>
@@ -212,7 +219,10 @@ registrarVistaPlugin('dmn-trader', 'trading', {
         <div class="tr-card"><div class="tr-tit">${tr('LECCIONES')}</div><div id="trLec" class="tr-lec"></div></div>
         <div class="tr-card" id="trMotor"><div class="tr-tit">${ic('ajustes')}${tr('MOTOR')}</div><p class="sutil">${tr('Cargando…')}</p></div>
         <div class="tr-card tr-real" id="trReal"><div class="tr-tit">💰 ${tr('PILOTO REAL')}</div><p class="sutil">${tr('Cargando…')}</p></div>
-      </div></div>`;
+      </div></div></div>`;
+    $('#trTabs', v).onclick = e => { const b = e.target.closest('[data-tab]'); if (b) this.verTab(b.dataset.tab); };
+    this.verTab(this.tab);
+    this.panel();
     this.cv = $('#trCanvas', v); this.c = this.cv.getContext('2d'); this.c.imageSmoothingEnabled = false;
     this.cv.onmousemove = e => this.raton(e); this.cv.onmouseleave = () => { $('#trTip', v).hidden = true; };
     this.cv.onclick = e => {
@@ -231,9 +241,33 @@ registrarVistaPlugin('dmn-trader', 'trading', {
     if (this.v !== v || this.ciclo !== ciclo) return;
     this.cargarReal();   // después del mapa: el estado del piloto es pesado en el motor y en frío retrasaba el primer mapa
     let vuelta = 0;
-    clearInterval(this.t); this.t = setInterval(() => { if (document.hidden) return; this.cargar(); if (++vuelta % 3 === 0) { this.cargarMotor(); this.cargarReal(); } }, 5000);
-    let ult = 0; const bucle = ts => { if (this.v !== v || this.ciclo !== ciclo) return; if (ts - ult > 66) { ult = ts; this.dibujar(ts); } this.raf = requestAnimationFrame(bucle); };
+    clearInterval(this.t); this.t = setInterval(() => { if (document.hidden) return; if (this.tab !== 'centro') { if (++vuelta % 3 === 0) this.panel(); return; } this.cargar(); if (++vuelta % 3 === 0) { this.cargarMotor(); this.cargarReal(); } }, 5000);
+    let ult = 0; const bucle = ts => { if (this.v !== v || this.ciclo !== ciclo) return; if (this.tab === 'centro' && ts - ult > 66) { ult = ts; this.dibujar(ts); } this.raf = requestAnimationFrame(bucle); };
     this.raf = requestAnimationFrame(bucle);
+  },
+  // Panel = el panel web completo del motor (el mismo del puerto 8777, con todas sus pestañas); Centro = el edificio
+  verTab(t) {
+    const v = this.v; if (!v) return;
+    this.tab = t === 'centro' ? 'centro' : 'panel';
+    try { localStorage.setItem('dmn-trader:tab', this.tab); } catch { }
+    $$('#trTabs [data-tab]', v).forEach(b => b.classList.toggle('on', b.dataset.tab === this.tab));
+    $('#trVPanel', v).hidden = this.tab !== 'panel'; $('#trVCentro', v).hidden = this.tab !== 'centro';
+    if (this.tab === 'centro') { this.cargar(); this.cargarMotor(); this.cargarReal(); }
+  },
+  async panel() {
+    const v = this.v; if (!v) return;
+    let m; try { m = await accionPlugin('dmn-trader', 'trading', 'estado', {}, this.abort?.signal); } catch (e) { m = { estado: 'error', error: e.message }; }
+    if (this.v !== v) return;
+    const f = $('#trFrame', v), msg = $('#trPanelMsg', v), ok = m.estado === 'activo' && m.url;
+    $('#trMotorEst', v).className = 'tr-sub ' + (ok ? 'ok' : 'mal');
+    $('#trMotorEst', v).textContent = ok ? `● ${m.externo ? tr('Motor de este equipo') : tr('Motor del paquete')} · ${m.url.replace('http://', '')}` : `● ${tr('Motor sin conexión')}`;
+    if (ok) {
+      const url = m.url + '/';
+      if (f.dataset.url !== url) { f.dataset.url = url; f.src = url; }
+      f.hidden = false; msg.hidden = true;
+    } else {
+      f.hidden = true; msg.hidden = false; msg.textContent = m.error || tr('El motor de DMN Trader no está en marcha.');
+    }
   },
   salir() { clearInterval(this.t); cancelAnimationFrame(this.raf); this.abort?.abort(); this.v = null; },
 
@@ -524,7 +558,7 @@ registrarVistaPlugin('dmn-trader', 'trading', {
     let m; try { m = await accionPlugin('dmn-trader', 'trading', 'estado', {}, this.abort?.signal); } catch (e) { el.innerHTML = `<p class="mal">${esc(e.message)}</p>`; return; }
     if (this.v !== v) return;
     const color = { activo: 'ok', arrancando: 'neutro', parado: 'neutro' }[m.estado] || 'mal';
-    const txt = { activo: 'En marcha', arrancando: 'Arrancando…', parado: 'Parado', caido: 'Caído (se reintenta solo)', sin_python: 'Falta Python', sin_numpy: 'Falta numpy' }[m.estado] || m.estado;
+    const txt = { activo: 'En marcha', arrancando: 'Arrancando…', parado: 'Parado', caido: 'Caído (se reintenta solo)', esperando: 'Esperando tu motor (8777)', sin_python: 'Falta Python', sin_numpy: 'Falta numpy' }[m.estado] || m.estado;
     el.innerHTML = `<div class="tr-tit">${ic('ajustes')}${tr('MOTOR')}<span class="tr-sub ${color}">${tr(txt)}</span></div>
       ${m.error ? `<p class="mal">${esc(m.error)}</p>` : ''}
       <p class="sutil">${m.python ? 'Python ' + esc(m.python) + ' · ' : ''}${m.url ? esc(m.url) : ''}${m.datos ? '<br>' + tr('Datos') + ': ' + esc(m.datos) : ''}</p>
@@ -581,6 +615,12 @@ registrarVistaPlugin('dmn-trader', 'trading', {
 (() => {
   const st = document.createElement('style');
   st.textContent = `  .pagina.tr-mc{max-width:none}
+  .tr-tabs{display:flex;gap:6px;flex:1}.tr-tabs button{display:flex;align-items:center;gap:6px;background:transparent;border:1px solid var(--tr-borde);color:inherit;border-radius:8px;padding:7px 14px;cursor:pointer;font:inherit;opacity:.75}
+  .tr-tabs button.on{opacity:1;border-color:var(--tr-acento);background:rgba(47,209,176,.12);color:var(--tr-acento)}
+  .tr-panel{background:var(--tr-card);border:1px solid var(--tr-borde);border-radius:10px;overflow:hidden}
+  .tr-panel iframe{display:block;width:100%;height:calc(100vh - 150px);min-height:600px;border:0;background:#0b0f17}
+  .tr-panel #trPanelMsg{padding:40px;text-align:center}
+  .tr-cab2{padding:8px 18px}
   .tr-mc{--tr-card:#0f1828;--tr-borde:#22314a;--tr-acento:#2fd1b0}
   .tr-cab{display:flex;align-items:center;gap:22px;background:var(--tr-card);border:1px solid var(--tr-borde);border-radius:10px;padding:12px 18px;margin-bottom:10px}
   .tr-logo{display:flex;align-items:center;gap:12px;padding-right:22px;border-right:1px solid var(--tr-borde)}.tr-logo .i{width:38px;height:38px;color:var(--tr-acento)}

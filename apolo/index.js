@@ -16,13 +16,31 @@ const ESCRITURA = new Set(['usar', 'nueva', 'reiniciar', 'comprar', 'vender', 'c
 const SUB_LECTURA = { enjambre: ['', 'informe', 'noticias', 'lecciones', 'agente'], agente: ['', 'informe', 'noticias', 'lecciones', 'agente'], updown: ['', 'mercados'], polymarket: ['', 'mercados'] };
 const SUB_ESCRITURA = { updown: ['iniciar', 'parar'], polymarket: ['iniciar', 'parar'] };
 
-let apolo, proc = null, parando = false, reintentos = 0, temporizador = null, python = null, token = '', estado = { estado: 'parado' };
+let apolo, proc = null, parando = false, reintentos = 0, temporizador = null, vigia = null, python = null, token = '', estado = { estado: 'parado' };
+// Por defecto se usa el motor que ya corre en este equipo (servidor-pc.bat, puerto 8777: piloto real, datos y central).
+// Solo con externo = '' el paquete arranca un motor propio.
+const EXTERNO = 'http://127.0.0.1:8777';
 const logs = [];
 const anotar = (tipo, txt) => {
   for (const l of String(txt).split(/\r?\n/)) if (l.trim()) logs.push(`${new Date().toISOString().slice(11, 19)} ${tipo} ${token ? l.split(token).join('•••') : l}`.slice(0, 400));
   logs.splice(0, Math.max(0, logs.length - 200));
 };
-const ajustes = async () => ({ lan: false, puerto: 0, ...(apolo.almacen.leer('ajustes') || {}) });
+const ajustes = async () => ({ lan: false, puerto: 0, externo: EXTERNO, ...(apolo.almacen.leer('ajustes') || {}) });
+async function sondear(url) {
+  try { const r = await fetch(url + '/api/salud', { signal: AbortSignal.timeout(3000), redirect: 'error' }); return r.ok && (await r.json()).ok === true; } catch { return false; }
+}
+// motor externo: se comprueba cada 15 s; el destino (lo que usa el núcleo de APOLO) solo existe mientras responde
+async function vigilarExterno(url) {
+  const vivo = await sondear(url);
+  if (vivo && estado.estado !== 'activo') {
+    estado = { estado: 'activo', externo: true, url, puerto: +new URL(url).port, desde: Date.now() };
+    try { apolo.almacen.guardar('destino', { url, externo: true, desde: estado.desde }); } catch (e) { anotar('!', e.message); }
+    apolo.log(`usando el motor de este equipo en ${url}`);
+  } else if (!vivo && estado.estado !== 'esperando') {
+    estado = { estado: 'esperando', externo: true, url, error: `Tu motor de DMN Trader (${url}) no responde. Ábrelo con servidor-pc.bat; esta pestaña se conecta sola en cuanto arranque.` };
+    try { apolo.almacen.borrar('destino'); } catch { }
+  }
+}
 const rutaDatos = () => apolo.config.datos || path.join(apolo.almacen.ruta, 'datos', 'trader.db');
 
 // ---------- Python ----------
@@ -44,7 +62,16 @@ function buscarPython() {
 // ---------- motor ----------
 async function arrancar() {
   if (proc) return;
-  clearTimeout(temporizador); parando = false;
+  clearTimeout(temporizador); clearInterval(vigia); parando = false;
+  const a0 = await ajustes();
+  if (a0.externo) {
+    token = (await apolo.secretos.leer('dmn-trader:token')) || '';
+    if (!token) { token = crypto.randomBytes(24).toString('hex'); await apolo.secretos.guardar('dmn-trader:token', token); }   // el núcleo exige que exista
+    estado = { estado: 'parado' };
+    await vigilarExterno(a0.externo);
+    vigia = setInterval(() => vigilarExterno(a0.externo).catch(e => anotar('!', e.message)), 15_000);
+    return;
+  }
   python = buscarPython();
   if (!python) { estado = { estado: 'sin_python', error: 'No encuentro Python 3.10 o superior. Instálalo desde python.org y reinicia el motor.' }; return; }
   if (!python.numpy) { estado = { estado: 'sin_numpy', error: `Python ${python.version} no tiene numpy.`, python: python.version }; return; }
@@ -86,7 +113,8 @@ async function arrancar() {
   });
 }
 function parar() {
-  parando = true; clearTimeout(temporizador);
+  parando = true; clearTimeout(temporizador); clearInterval(vigia);
+  if (estado.externo) { try { apolo.almacen.borrar('destino'); } catch { } estado = { estado: 'parado' }; return Promise.resolve(); }   // el motor externo no es nuestro: no se toca
   const p = proc; if (!p) { estado = { estado: 'parado' }; return Promise.resolve(); }
   return new Promise(ok => { const t = setTimeout(() => { try { p.kill('SIGKILL'); } catch { } ok(); }, 5000); p.once('exit', () => { clearTimeout(t); ok(); }); try { p.stdin.end(); p.kill(); } catch { ok(); } });
 }
@@ -96,6 +124,8 @@ const publico = () => ({ ...estado, logs: logs.slice(-40), plataforma: process.p
 // ---------- herramientas ----------
 function ejecutarCliente(orden) {
   if (!estado.url) throw new Error('el motor de DMN Trader no está en marcha (mira Trading → Motor en el panel)');
+  if (!python) python = buscarPython();
+  if (!python) throw new Error('No encuentro Python 3.10 o superior para el cliente de DMN Trader.');
   return new Promise((ok, mal) => {
     const p = spawn(python.cmd, [...python.pre, path.join(__dirname, 'trader.py'), ...orden], { cwd: RAIZ, windowsHide: true,
       env: { ...process.env, DMN_TRADER_URL: estado.url, DMN_TRADER_TOKEN: token, PYTHONIOENCODING: 'utf-8', PYTHONDONTWRITEBYTECODE: '1' } });
@@ -140,7 +170,7 @@ module.exports = definirPlugin({
         arrancar: async () => { await arrancar(); return publico(); },
         parar: async () => { await parar(); return publico(); },
         // la mesa completa (velas, órdenes, diario, backtest, práctica) es el panel web del propio motor
-        mesa: async () => { if (!estado.url) throw new Error('el motor no está en marcha'); return { url: `${estado.url}/#token=${token}` }; },
+        mesa: async () => { if (!estado.url) throw new Error('el motor no está en marcha'); return { url: estado.externo ? estado.url + '/' : `${estado.url}/#token=${token}` }; },
         instalarNumpy: async () => {
           const py = buscarPython(); if (!py) throw new Error('primero instala Python 3.10+');
           const r = spawnSync(py.cmd, [...py.pre, '-m', 'pip', 'install', '--user', 'numpy'], { encoding: 'utf8', windowsHide: true, timeout: 600_000 });
@@ -153,8 +183,9 @@ module.exports = definirPlugin({
           await apolo.secretos.guardar('dmn-trader:gmgn', clave.trim()); return reiniciar();
         },
         borrarGmgn: async () => { await apolo.secretos.guardar('dmn-trader:gmgn', ''); return reiniciar(); },
-        ajustes: async ({ lan, puerto }) => {
+        ajustes: async ({ lan, puerto, externo }) => {
           const x = await ajustes();
+          if (externo !== undefined) { if (externo !== '' && !/^http:\/\/127\.0\.0\.1:\d{1,5}$/.test(externo)) throw new Error('motor externo: http://127.0.0.1:<puerto> o vacío para arrancar uno propio'); x.externo = externo; }
           if (typeof lan === 'boolean') x.lan = lan;
           if (puerto !== undefined) { if (!Number.isInteger(puerto) || (puerto !== 0 && (puerto < 1024 || puerto > 65535))) throw new Error('puerto 0 (automático) o 1024-65535'); x.puerto = puerto; }
           apolo.almacen.guardar('ajustes', x); return reiniciar();
