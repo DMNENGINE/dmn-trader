@@ -251,7 +251,18 @@ registrarVistaPlugin('dmn-trader', 'trading', {
     try { localStorage.setItem('dmn-trader:tab', this.tab); } catch { }
     $$('#trTabs [data-tab]', v).forEach(b => b.classList.toggle('on', b.dataset.tab === this.tab));
     $('#trVPanel', v).hidden = this.tab !== 'panel'; $('#trVCentro', v).hidden = this.tab !== 'centro';
+    this.ajustarAlto();
     if (this.tab === 'centro') { this.cargar(); this.cargarMotor(); this.cargarReal(); }
+  },
+  // en Panel solo hace scroll el panel del motor: la página de APOLO no se desplaza y el marco llena el alto que queda
+  ajustarAlto() {
+    const v = this.v; if (!v) return;
+    const sc = v.closest('#vista') || v.parentElement, f = $('#trVPanel', v);
+    if (!this._alRedim) { this._alRedim = () => this.ajustarAlto(); addEventListener('resize', this._alRedim); }
+    if (this.tab !== 'panel') { if (sc) sc.style.overflow = ''; f.style.height = ''; return; }
+    if (sc) { sc.style.overflow = 'hidden'; sc.scrollTop = 0; }
+    const abajo = sc ? sc.getBoundingClientRect().bottom : innerHeight;
+    f.style.height = Math.max(300, abajo - f.getBoundingClientRect().top - 14) + 'px';
   },
   async panel() {
     const v = this.v; if (!v) return;
@@ -263,12 +274,12 @@ registrarVistaPlugin('dmn-trader', 'trading', {
     if (ok) {
       const url = m.url + '/';
       if (f.dataset.url !== url) { f.dataset.url = url; f.src = url; }
-      f.hidden = false; msg.hidden = true;
+      f.hidden = false; msg.hidden = true; this.ajustarAlto();
     } else {
       f.hidden = true; msg.hidden = false; msg.textContent = m.error || tr('El motor de DMN Trader no está en marcha.');
     }
   },
-  salir() { clearInterval(this.t); cancelAnimationFrame(this.raf); this.abort?.abort(); this.v = null; },
+  salir() { const sc = this.v && (this.v.closest('#vista') || this.v.parentElement); if (sc) sc.style.overflow = ''; if (this._alRedim) { removeEventListener('resize', this._alRedim); this._alRedim = null; } clearInterval(this.t); cancelAnimationFrame(this.raf); this.abort?.abort(); this.v = null; },
 
   // ---------- el mundo: estructura, fondo, luz y rejilla para andar ----------
   mundo() {
@@ -616,8 +627,8 @@ registrarVistaPlugin('dmn-trader', 'trading', {
   st.textContent = `  .pagina.tr-mc{max-width:none}
   .tr-tabs{display:flex;gap:6px;flex:1}.tr-tabs button{display:flex;align-items:center;gap:6px;background:transparent;border:1px solid var(--tr-borde);color:inherit;border-radius:8px;padding:7px 14px;cursor:pointer;font:inherit;opacity:.75}
   .tr-tabs button.on{opacity:1;border-color:var(--tr-acento);background:rgba(47,209,176,.12);color:var(--tr-acento)}
-  .tr-panel{background:var(--tr-card);border:1px solid var(--tr-borde);border-radius:10px;overflow:hidden}
-  .tr-panel iframe{display:block;width:100%;height:calc(100vh - 150px);min-height:600px;border:0;background:#0b0f17}
+  .tr-panel{background:var(--tr-card);border:1px solid var(--tr-borde);border-radius:10px;overflow:hidden;display:flex;flex-direction:column}
+  .tr-panel iframe{display:block;width:100%;flex:1;min-height:0;border:0;background:#0b0f17}
   .tr-panel #trPanelMsg{padding:40px;text-align:center}
   .tr-cab2{padding:8px 18px}
   .tr-mc{--tr-card:#0f1828;--tr-borde:#22314a;--tr-acento:#2fd1b0}
