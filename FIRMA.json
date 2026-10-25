@@ -2,10 +2,11 @@
   "formato": "apolo-firma/1",
   "autor": "DMNENGINE",
   "clavePublica": "fwdqHj9gcc4wD68fHBkRnGm0VwQyYFrJcYryj+8lSCI=",
-  "fecha": "2026-10-25T18:12:55.218Z",
+  "fecha": "2026-10-25T18:18:12.579Z",
   "archivos": {
     ".gitattributes": "c230339ad0282ad80de83b1765c45682618096ad2f0de6c125263131e34ebe00",
     ".gitignore": "e855002a95f08d987f1c8288ec210ac6607695b2f8b00f404c2e4fca8ff12c84",
+    "apolo/firmar.js": "08b762ed32c549fdcae8e32a8eb838d556dfa059a17e4cdb6c063339b7fcfcc5",
     "apolo/index.js": "6499c5f703787a3f63dc8956c7dc034af0b854c3aa8b115c29f100e951dbe8a1",
     "apolo/references/estrategias.md": "c08665b5ec988203d40d11ce5079c623eab12a7331649b9d8e8d067cb30e2cb6",
     "apolo/references/glosario.md": "0a5c087d8c2820ce71ac7e70d0239133fd1aa7dda2b7f58b3143fa03afb93b9f",
@@ -14,7 +15,7 @@
     "apolo/SKILL.md": "95cd1c1124f4f2d5ac2a474a89ed95268468b0919aa86f05ebab25233c1263eb",
     "apolo/test/ui.test.js": "425d7173fffb1f8f349d499566b37876e838dc5eca87638dbdf548e727ac37b4",
     "apolo/trader.py": "5e64845c2f7a7387a78635851391da6423ab5cffb445a6e964a06181d4974c43",
-    "apolo/ui/trading.js": "98dc495490727192d7636f2116bf9176363e14de1c54f0042c1443aece985b57",
+    "apolo/ui/trading.js": "8801352c3dde8515e11f815707f088cc31aca4c89defcdea001a3b31e098c006",
     "apolo-plugin.json": "3eedc67d7c464df1fe5fb75b6b3f964694ff7861e2bb4b0769bd8fbe97ee35bc",
     "autoarranque.bat": "74c22e49a2986ac88309cf89da3088a83f2e938254cfba8bbb43966ea27ed660",
     "enjambre-pc.bat": "baa52d6e7f2af2b79c9329d6c951e19a66484a2ef0f6690fcf108c1e2dd302a2",
@@ -99,5 +100,5 @@
     "web/index.html": "6828d67a7bce8eeeddce8078e41a9368a72c4af531032f2b4ae0214609524cd4",
     "web/vendor/lightweight-charts.js": "0c146b9bfbc6e5f19da1a0de876dae43023c332d5157d82f7575f9b7653ee519"
   },
-  "firma": "HK/by/53HXADTXk5S/CoxehWI4/sBL451gsuhomufPuWHaxTRDtgchB8vC4KtYHG/EDjm+dlLEKPy+oOVyEPBg=="
+  "firma": "VPh+bNIW6eB5T+sm66qxVc4SuVivhCjE6OH3+Hx4OYUR44DFLjVg0Em397ipoeffu71bqQhn8HZTYzQX0UGpCg=="
 }
