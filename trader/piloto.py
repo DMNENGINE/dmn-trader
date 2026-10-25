@@ -5,9 +5,9 @@ vigila el propio GMGN. Solo una orden suya a la vez; la anula si no entra a tiem
 Frenos duros: pérdida máxima del total (se apaga), pausa tras 2 stops seguidos, tope de operaciones al día, reserva de SOL
 para comisiones, enfriamiento por token tras un stop. Corre donde está gmgn-cli con la key (el PC); la configuración la
 pone el panel de la central y llega aquí con la respuesta de la sincronía de real.py."""
-import threading, time, math
+import json, threading, time, math, urllib.request
 from decimal import Decimal, InvalidOperation
-from . import conciencia, db, llm, onchain, real, contabilidad_gmgn as CG, supervision_gmgn as SG
+from . import conciencia, db, onchain, real, contabilidad_gmgn as CG, supervision_gmgn as SG
 from .presupuesto_gmgn import EntradaNoEnviada, presupuesto, PRIORIDAD, PROPINA
 
 CFG, EST = 'piloto_cfg', 'piloto_estado'
@@ -447,8 +447,19 @@ REGLAS_IA = ('Eres un trader cuantitativo de memecoins de Solana, frío y escép
              'arriba, volumen cayendo tras un pump, holders concentrados. Responde SOLO JSON.')
 
 
+def _apolo(tipo, simbolo, propuesta, datos):
+    """Decide el cerebro de APOLO (modelo del cerebro + su memoria de trading): POST /v1/trading/decidir en este equipo."""
+    tok = open(conciencia.TOKEN_APOLO, encoding='utf-8').read().strip()
+    rq = urllib.request.Request(conciencia.APOLO + '/v1/trading/decidir', method='POST',
+                                data=json.dumps({'tipo': tipo, 'simbolo': simbolo, 'propuesta': propuesta, 'datos': datos}).encode(),
+                                headers={'content-type': 'application/json', 'x-robot-token': tok})
+    with urllib.request.urlopen(rq, timeout=130) as r:
+        return json.loads(r.read().decode('utf-8'))
+
+
 def _ia_entrada(c, b):
-    if not c['ia'] or not llm.disponible():
+    """(True, motivo) entra · (False, motivo) APOLO veta · (None, motivo) APOLO no contesta: con dinero real no se entra sin él."""
+    if not c['ia']:
         return True, 'sin IA'
     sl = max(8, min(2.5 * b['atr'], 18))
     if b.get('estrategia'):
@@ -459,10 +470,9 @@ def _ia_entrada(c, b):
         prop = (f"El escáner propone COMPRAR en retroceso ({b['pts']}/9 puntos, ATR15 {b['atr']} %, compra límite medio ATR "
                 f"por debajo, TP +{2 * sl:.0f} %, SL −{sl:.0f} %).")
     try:
-        r = llm.preguntar(f"{REGLAS_IA}\n{prop}\nDatos: {_contexto(b['token'], b['simbolo'])}\n"
-                          'Contesta {"decision":"entrar"|"vetar","confianza":0-1,"motivo":"una frase en español"}', timeout=90)
+        r = _apolo('entrada', b['simbolo'], prop, _contexto(b['token'], b['simbolo']))
     except Exception as ex:
-        return True, f'IA no contestó ({str(ex)[:40]})'
+        return None, f'APOLO no contestó ({str(ex)[:60]}): no entro'
     veto = str(r.get('decision', '')).lower().startswith('vet') and real._f(r.get('confianza')) >= 0.6
     return (not veto), str(r.get('motivo') or '')[:160]
 
@@ -510,16 +520,16 @@ def _gestionar(e, c, o):
     if ahora - o['entro'] > 3600 and o['pnl_pct'] < 2 and (o.get('vol_rel') or 1) < 0.3:
         return _salir(e, o, f"sin volumen ni avance tras 1 h (vol {o.get('vol_rel')}×, {o['pnl_pct']:+.1f} %)")
     # 3) revisión con el modelo cada 5 min
-    if c['ia'] and ahora - o.get('ia_ts', 0) >= CADA_IA and llm.disponible():
+    if c['ia'] and ahora - o.get('ia_ts', 0) >= CADA_IA:
         o['ia_ts'] = ahora
         try:
-            r = llm.preguntar(f"{REGLAS_IA}\nPosición LARGA: entrada {ent:.6g} $, ahora {o['pnl_pct']:+.1f} %, máximo {(o['max'] / ent - 1) * 100:+.1f} %, "
-                              f"TP +{o['tp']:.0f} %, SL −{o['sl']:.0f} %, abierta hace {int((ahora - o['entro']) / 60)} min.\n"
-                              f"Datos: {_contexto(o['token'], o['simbolo'])}\n"
-                              '¿Mantener hasta TP/SL o salir ya? Contesta {"accion":"mantener"|"salir","confianza":0-1,"motivo":"una frase en español"}', timeout=90)
+            r = _apolo('posicion', o['simbolo'],
+                       f"Posición LARGA: entrada {ent:.6g} $, ahora {o['pnl_pct']:+.1f} %, máximo {(o['max'] / ent - 1) * 100:+.1f} %, "
+                       f"TP +{o['tp']:.0f} %, SL −{o['sl']:.0f} %, abierta hace {int((ahora - o['entro']) / 60)} min. ¿Mantener hasta TP/SL o salir ya?",
+                       _contexto(o['token'], o['simbolo']))
             o['ia'] = {'accion': r.get('accion'), 'confianza': r.get('confianza'), 'motivo': str(r.get('motivo') or '')[:160], 'ts': int(ahora)}
             if str(r.get('accion', '')).lower().startswith('sal') and real._f(r.get('confianza')) >= c['ia_conf_min']:
-                return _salir(e, o, f"la IA lo ve mal: {o['ia']['motivo']}")
+                return _salir(e, o, f"APOLO lo ve mal: {o['ia']['motivo']}")
         except Exception as ex:
             o['ia'] = {'error': str(ex)[:80], 'ts': int(ahora)}
 
@@ -659,14 +669,17 @@ def paso():
             b = None
             for x in buenos[:3]:
                 ok, motivo = _ia_entrada(c, x)
+                if ok is None:  # APOLO cerrado o sin modelo: no se entra ni se castiga al token
+                    _log(e, f"🧠 {motivo}")
+                    break
                 if ok:
                     b = x
                     if motivo != 'sin IA':
-                        _log(e, f"🧠 IA aprueba {x['simbolo']}: {motivo}")
+                        _log(e, f"🧠 APOLO aprueba {x['simbolo']}: {motivo}")
                     break
                 from . import observatorio_gmgn as O
                 O.decision('entrada_vetada', x.get('est_id', ''), x['token'], 'veto_ia')
-                _log(e, f"🧠 IA veta {x['simbolo']}: {motivo}")
+                _log(e, f"🧠 APOLO veta {x['simbolo']}: {motivo}")
                 e.setdefault('enfriar', {})[x['token']] = ahora + 3600
             if b and b.get('estrategia'):
                 # Compra a mercado con protecciones adjuntas y conciliacion independiente.
