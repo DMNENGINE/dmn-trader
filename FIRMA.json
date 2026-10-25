@@ -2,7 +2,7 @@
   "formato": "apolo-firma/1",
   "autor": "DMNENGINE",
   "clavePublica": "fwdqHj9gcc4wD68fHBkRnGm0VwQyYFrJcYryj+8lSCI=",
-  "fecha": "2026-10-25T22:47:24.202Z",
+  "fecha": "2026-10-25T23:08:12.643Z",
   "archivos": {
     ".gitattributes": "c230339ad0282ad80de83b1765c45682618096ad2f0de6c125263131e34ebe00",
     ".gitignore": "e855002a95f08d987f1c8288ec210ac6607695b2f8b00f404c2e4fca8ff12c84",
@@ -15,7 +15,7 @@
     "apolo/SKILL.md": "95cd1c1124f4f2d5ac2a474a89ed95268468b0919aa86f05ebab25233c1263eb",
     "apolo/test/ui.test.js": "425d7173fffb1f8f349d499566b37876e838dc5eca87638dbdf548e727ac37b4",
     "apolo/trader.py": "5e64845c2f7a7387a78635851391da6423ab5cffb445a6e964a06181d4974c43",
-    "apolo/ui/trading.js": "15f9d030ba57d66b932ae7b71705a69468824fab855fc337aec541b053e89fb5",
+    "apolo/ui/trading.js": "d80d47608eb8ef3d7dec298eac24ee54bc20c30671b9f222e840e52a11b660e0",
     "apolo-plugin.json": "3eedc67d7c464df1fe5fb75b6b3f964694ff7861e2bb4b0769bd8fbe97ee35bc",
     "enjambre-pc.bat": "baa52d6e7f2af2b79c9329d6c951e19a66484a2ef0f6690fcf108c1e2dd302a2",
     "GUARDIA-APOLO.md": "bdbc3f46402586fe74f4322583a05f9b6144f43d1f4d549bff9c05f6b07789c4",
@@ -96,10 +96,13 @@
     "trader/supervision_gmgn.py": "5ccf8df42529db9ed2d0dfa565ab2345be7123cbbd8585112f2f55df0d157762",
     "trader/updown.py": "14dd1534143baf4802a873f2cb797492c9cf5378679e2594b9830dcb5486bb59",
     "trader/validacion_fabrica.py": "4bbd8a8002f75a46a90d36c893856f79c9378f7a3207854144f3cd1cb142ffb9",
-    "web/app.js": "81b0a3793ad87cc0687a61dd5d2e33bdeaafdbf00cae0ad78e9258005705bf8b",
-    "web/estilo.css": "3a5a640f50057d1f09f1ce7e33a705d2a87c4b8a8d918b7e983925ed2dcd54a5",
-    "web/index.html": "6828d67a7bce8eeeddce8078e41a9368a72c4af531032f2b4ae0214609524cd4",
-    "web/vendor/lightweight-charts.js": "0c146b9bfbc6e5f19da1a0de876dae43023c332d5157d82f7575f9b7653ee519"
+    "web/app.js": "388eab12cc457f81ce3dfca66a63827e486000f14b685d9dfd4b5ee05722d757",
+    "web/estilo.css": "15d7769a3ee72e0d8a91fcba13f9798f6b5f84440bc3cb4f79ddf3f009ed8aae",
+    "web/grafo3d.js": "e01271005041a61e8b2b0aefe9ece392a544b8d90252bc5fd43f69281ddecb77",
+    "web/index.html": "188edd51b55f18b792a814d0f6e3fb0afb852569be0f7e5cc486b37921f41359",
+    "web/vendor/LICENSE-three": "852e0e8699169bf9f6fdc6bda3e682d078dcbc738b5d33e74df594721bff271d",
+    "web/vendor/lightweight-charts.js": "0c146b9bfbc6e5f19da1a0de876dae43023c332d5157d82f7575f9b7653ee519",
+    "web/vendor/three.module.min.js": "3e690ac7d180b0aadf0891bea39eec643e29e2d3e75c99b18689518665f69ba6"
   },
-  "firma": "rzMpZoqada7bHpPYkWLYttcT3E/Q3baVKpaG3g6uAzcsj8gH6Ff6NphZT+FH2AccsC6uWJctPSvk3WqMS6UYDg=="
+  "firma": "5CntVboXmrWrM/y+gZnE086/0IbvYKGUGh89hT1FIfJADszbiJZ+orQAvbs38PGHk0RDWaN+Gh5fRTh4v5sQAg=="
 }
