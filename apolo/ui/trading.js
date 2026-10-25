@@ -217,7 +217,6 @@ registrarVistaPlugin('dmn-trader', 'trading', {
       if (a) { this.sel = a; this.salaSel = null; this.ficha(a); return; }
       this.sel = null; this.salaSel = this.salaEn(e); this.fichaSala(this.salaSel);
     };
-    $('#trParar', v).onclick = async () => { const b = $('#trParar', v); if (b.disabled) return; b.disabled = true; try { const r = await api('POST', '/trading/parar', {}); if (r.estado !== 'parado' || !r.confirmada) throw new Error('Parada no confirmada. Reinicia APOLO si el núcleo no está actualizado.'); aviso('Parada confirmada por la central'); if (this.v === v && this.ciclo === ciclo) await this.cargar(); } catch (er) { aviso(er.message, true); } finally { b.disabled = false; } };
     this.fichaSala(null);
     await this.cargar();
     if (this.v !== v || this.ciclo !== ciclo) return;
@@ -240,6 +239,7 @@ registrarVistaPlugin('dmn-trader', 'trading', {
   ajustarAlto() {
     const v = this.v; if (!v) return;
     const sc = v.closest('#vista') || v.parentElement, f = $('#trVPanel', v);
+    if (!f) return;   // la vista ya no está montada
     if (!this._alRedim) { this._alRedim = () => this.ajustarAlto(); addEventListener('resize', this._alRedim); }
     if (this.tab !== 'panel') { if (sc) sc.style.overflow = ''; f.style.height = ''; return; }
     if (sc) { sc.style.overflow = 'hidden'; sc.scrollTop = 0; }
@@ -250,9 +250,10 @@ registrarVistaPlugin('dmn-trader', 'trading', {
     const v = this.v; if (!v) return;
     let m; try { m = await accionPlugin('dmn-trader', 'trading', 'estado', {}, this.abort?.signal); } catch (e) { m = { estado: 'error', error: e.message }; }
     if (this.v !== v) return;
-    const f = $('#trFrame', v), msg = $('#trPanelMsg', v), ok = m.estado === 'activo' && m.url;
-    $('#trMotorEst', v).className = 'tr-sub ' + (ok ? 'ok' : 'mal');
-    $('#trMotorEst', v).textContent = ok ? `● ${m.externo ? tr('Motor de este equipo') : tr('Motor del paquete')} · ${m.url.replace('http://', '')}` : `● ${tr('Motor sin conexión')}`;
+    const f = $('#trFrame', v), msg = $('#trPanelMsg', v), est = $('#trMotorEst', v), ok = m.estado === 'activo' && m.url;
+    if (!f || !msg || !est) return;
+    est.className = 'tr-sub ' + (ok ? 'ok' : 'mal');
+    est.textContent = ok ? `● ${m.externo ? tr('Motor de este equipo') : tr('Motor del paquete')} · ${m.url.replace('http://', '')}` : `● ${tr('Motor sin conexión')}`;
     if (ok) {
       const url = m.url + '/';
       if (f.dataset.url !== url) { f.dataset.url = url; f.src = url; }
