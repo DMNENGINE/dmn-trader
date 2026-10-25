@@ -19,7 +19,9 @@ def configurar(e, duracion_min, perdida_max_pct):
     validar(duracion_min, perdida_max_pct)
     cuentas = [r['cuenta_id'] for r in db.q('SELECT cuenta_id FROM ag_agentes WHERE activo=1')]
     if not cuentas:
-        raise ValueError('no hay cuentas para supervisar')
+        from . import reactivacion as R
+        if not R.estado(e)['esperando_cierre']:
+            raise ValueError('no hay cuentas para supervisar')
     fin = time.time() + duracion_min * 60
     if e.get('hasta'):
         fin = min(fin, e['hasta'])
@@ -37,6 +39,10 @@ def estado():
 def admitir(cid, reduce=False):
     if reduce:
         return
+    from . import reactivacion as R
+    R.preparar()
+    if db.uno("SELECT 1 FROM ag_agentes a JOIN ag_esperas q ON q.agente_id=a.id WHERE a.cuenta_id=? AND a.activo=0 AND q.estado='esperando' LIMIT 1", (cid,)):
+        raise ValueError('agente esperando cierre previo; nuevas entradas bloqueadas')
     g = estado()
     if not g or not db.uno('SELECT 1 FROM ag_agentes WHERE cuenta_id=?', (cid,)):
         return
@@ -70,6 +76,8 @@ def evaluar():
         try:
             # El historial no se borra al renovar un intento: las quiebras no reinician el limite.
             ids = g['cuentas']
+            if not ids:
+                return None  # La duracion sigue vigente mientras todos esperan un cierre.
             marcas = ','.join('?' for _ in ids)
             t = db.uno(f"SELECT COALESCE(SUM(CASE WHEN estado='cerrado' THEN pnl ELSE pnl-comisiones END),0) pnl FROM trades WHERE id>? AND cuenta_id IN ({marcas})", (g['tradeDesde'], *ids))
             pnl = t['pnl']

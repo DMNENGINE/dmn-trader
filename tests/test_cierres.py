@@ -36,18 +36,20 @@ class Cierres(unittest.TestCase):
             y = motor.cerrar(a['cuenta_id'], 'AMD')
         self.assertEqual(x['id'], y['id'])
 
-    def test_arranque_revisa_todas_las_cuentas_sin_cambiar_capital_ni_sesion(self):
+    def test_arranque_aparta_la_cuenta_pendiente_y_libera_las_demas(self):
         a = self.abrir()
         antes = db.q('SELECT id,efectivo,capital_inicial FROM cuentas ORDER BY id')
         sesion = A.estado()['sesion_id']
         intentos = db.uno('SELECT COUNT(*) n FROM ag_intentos')['n']
         with patch.object(motor, 'barra', return_value=self.barra(False)):
-            with self.assertRaisesRegex(motor.ErrorOrden, 'CIERRES_PENDIENTES'):
-                A.iniciar(2, 1, 100, ['cripto'], duracion_min=1, perdida_max_pct=10)
+            result = A.iniciar(2, 1, 100, ['cripto'], duracion_min=1, perdida_max_pct=10)
         self.assertEqual(antes, db.q('SELECT id,efectivo,capital_inicial FROM cuentas ORDER BY id'))
-        self.assertEqual(sesion, A.estado()['sesion_id'])
-        self.assertEqual(intentos, db.uno('SELECT COUNT(*) n FROM ag_intentos')['n'])
-        self.assertFalse(A.estado()['activo'])
+        self.assertNotEqual(sesion, A.estado()['sesion_id'])
+        self.assertEqual(intentos + 1, db.uno('SELECT COUNT(*) n FROM ag_intentos')['n'])
+        self.assertTrue(A.estado()['activo'])
+        from trader import reactivacion
+        self.assertEqual(reactivacion.estado(A.estado())['esperando_cierre'], 1)
+        self.assertEqual(len(A.agentes()), 1)
 
     def test_al_abrir_mercado_se_cierra_y_luego_se_puede_iniciar(self):
         a = self.abrir()
