@@ -2,7 +2,7 @@
   "formato": "apolo-firma/1",
   "autor": "DMNENGINE",
   "clavePublica": "fwdqHj9gcc4wD68fHBkRnGm0VwQyYFrJcYryj+8lSCI=",
-  "fecha": "2026-10-25T22:35:58.132Z",
+  "fecha": "2026-10-25T22:41:18.327Z",
   "archivos": {
     ".gitattributes": "c230339ad0282ad80de83b1765c45682618096ad2f0de6c125263131e34ebe00",
     ".gitignore": "e855002a95f08d987f1c8288ec210ac6607695b2f8b00f404c2e4fca8ff12c84",
@@ -41,6 +41,7 @@
     "tests/test_cierres.py": "5a2e2cd4e715f43537abb8c59c7e7f076665de3afe8d317ed6abe466d0c0c683",
     "tests/test_conciliacion.py": "291342bb93f36a07ad70170c9a44824a8df2459acb0e3b5516eda3dfdee8905f",
     "tests/test_contabilidad_gmgn.py": "ab7668b3300d3a8a9c8cf1fda85799f9e1b502f58a281a3b79a54645cd973cee",
+    "tests/test_cupo_gmgn.py": "86e6c21419a7847832baf68799eff308262a64142e6f40330f69d683adcf1cd4",
     "tests/test_drenaje.py": "392b321234be4a4de080cddbf884f7a8b3952ae3d498d6eeff3cbb0db8be3068",
     "tests/test_ejecucion_real.py": "7c66dfb6fd491db9862367651433da8f153c834391fc05d3f0b96c6e3dd5dfe0",
     "tests/test_ejecutor.py": "44bc5af895853404171e74a270957735d7dc26c7ad5903ef12cd2e6f1001ee8c",
@@ -80,12 +81,12 @@
     "trader/metricas.py": "28f75876234d0162d8df39f8be7390791e649e882d125bfcf15f730ab7d753ee",
     "trader/motor.py": "3980cbcabbfaf544dba0444b9344ed5f440d1bd1593850b6337db028a11b4551",
     "trader/observatorio_gmgn.py": "708d73d7aa7299aecff220b82046e92ea9ad318824ee6cc24333c9fc5413657e",
-    "trader/onchain.py": "1e76e4ac3629fa1cb989d34165f7f465b2fc218f5a59a452b15b0a7c9e83b703",
+    "trader/onchain.py": "6bc3f1da90d0b12862b277d2007e76dc56aaf755e980d7baadf416ea3c9982f2",
     "trader/piloto_fut.py": "75563e9ceb48f0941e40036b276a32da5890e22b6b698b4915c94ae7de28e926",
     "trader/piloto.py": "2828b97cb3631d1d41a2800d0039478388945af898aec3dc89fa69d59269ea72",
     "trader/presupuesto_gmgn.py": "bc775b4a059865cd929d1b73e6b6607de89ad8cf5c10579a773efe61faef850b",
     "trader/reactivacion.py": "f110ad123724971bf9b8a440ad6ea5465c2c90449791c61a99cb8330c2644dee",
-    "trader/real.py": "41deda3e617aed695b91f7955a6dd55cb6a208710d92496cb21497b4568cd22f",
+    "trader/real.py": "28dcea200137a2584d5f37fe23e02f712ff565d0302db5256c3ed72cad3c3fd0",
     "trader/rpc_lectura.py": "ef00bdc3723b57d0bd564bc6b79b0e914133e61478e2261fba5503d3b0acff71",
     "trader/salida_gmgn.py": "ae6c1f859d14d2e017b96f27b693d1170be9e4cc4188ba57bcbe7140842f1171",
     "trader/sentimiento.py": "c70601fd427ffd87f468d02220a898128aedce0aa419998f3eb4fd74567c3136",
@@ -99,5 +100,5 @@
     "web/index.html": "6828d67a7bce8eeeddce8078e41a9368a72c4af531032f2b4ae0214609524cd4",
     "web/vendor/lightweight-charts.js": "0c146b9bfbc6e5f19da1a0de876dae43023c332d5157d82f7575f9b7653ee519"
   },
-  "firma": "0EKxKK32FZU/WYfpAX1ax/jhPaUo2fifOI3ZKt7qqwD3glEkTkgB/m7gcHvtN+9GFNqTC1g/NtRlZDQwQSOnBA=="
+  "firma": "CofyVJT1sRg4TZo2lE5NK0/vQpboTXxQUro4zXbswNwi+74GdKyR9tPL+NQYia6COshPGHeN71LV1ZqEbTr9CQ=="
 }
