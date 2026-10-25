@@ -17,7 +17,7 @@ try {
   const tar = path.join(tmp, 'p.tar');
   execFileSync('git', ['archive', '--format=tar', '-o', tar, 'HEAD'], { cwd: raiz });
   const dir = path.join(tmp, 'p'); fs.mkdirSync(dir);
-  execFileSync('tar', ['-xf', tar, '-C', dir]);
+  execFileSync('tar', ['-xf', 'p.tar', '-C', 'p'], { cwd: tmp });   // rutas relativas: el tar de Git Bash toma "C:" por un servidor
   fs.rmSync(path.join(dir, 'FIRMA.json'), { force: true });
   const firmar = require(path.resolve(modulo));
   firmar.firmar(dir, fs.readFileSync(clave, 'utf8'), { autor: 'DMNENGINE' });
