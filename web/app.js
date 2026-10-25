@@ -320,14 +320,14 @@ $('#btnAvisos').onclick = () => { const p = $('#avisosPanel'); p.classList.toggl
 const CFG = [['riesgo_max_pct', 'Riesgo máximo por operación (%)'], ['perdida_diaria_max_pct', 'Pérdida diaria máxima (%) → bloquea el día'], ['max_posiciones', 'Máximo de posiciones abiertas'],
   ['apalancamiento', 'Apalancamiento (1 = sin margen)'], ['comision_fija', 'Comisión fija por orden'], ['comision_pct', 'Comisión % por orden'], ['deslizamiento_pct', 'Deslizamiento simulado (%)'],
   ['exigir_stop', 'Exigir stop-loss en cada entrada'], ['riesgo_estricto', 'Rechazar órdenes que superen el riesgo'], ['permitir_cortos', 'Permitir cortos']];
-function pintarCfg() { const c = E.cuenta.config; $('#formCfg').innerHTML = CFG.map(([k, t]) => typeof c[k] === 'boolean' ? `<label class="check"><input type="checkbox" data-cfg="${k}" ${c[k] ? 'checked' : ''}> ${t}</label>` : `<label>${t} <input data-cfg="${k}" type="number" step="any" value="${c[k]}"></label>`).join(''); }
+function pintarCfg() { const c = E.cuenta.config; $('#ajCuentaNombre').textContent = '· ' + E.cuenta.nombre; $('#formCfg').innerHTML = CFG.map(([k, t]) => typeof c[k] === 'boolean' ? `<label class="check"><input type="checkbox" data-cfg="${k}" ${c[k] ? 'checked' : ''}> ${t}</label>` : `<label>${t} <input data-cfg="${k}" type="number" step="any" value="${c[k]}"></label>`).join(''); }
 $('#btnCfg').onclick = async () => { const b = {}; $$('[data-cfg]').forEach(i => b[i.dataset.cfg] = i.type === 'checkbox' ? i.checked : +i.value);
   try { await api(`/cuentas/${E.cuenta.id}`, 'PATCH', b); await cargarCuenta(); msg('#cfgMsg', 'Reglas guardadas.', true); } catch (e) { msg('#cfgMsg', e.message); } };
 $('#btnNueva').onclick = async () => { try { const c = await api('/cuentas', 'POST', { nombre: $('#nNombre').value, capital: +$('#nCap').value, moneda: $('#nMon').value }); await cargarCuentas(); $('#selCuenta').value = c.id; await cambiarCuenta(); msg('#ajMsg', 'Cuenta creada.', true); } catch (e) { msg('#ajMsg', e.message); } };
 $('#btnReset').onclick = async () => { if (!confirm('¿Reiniciar la cuenta? Se borran posiciones, órdenes, diario y curva.')) return; await api(`/cuentas/${E.cuenta.id}/reiniciar`, 'POST'); await cambiarCuenta(); msg('#ajMsg', 'Cuenta reiniciada.', true); };
 $('#btnBorrar').onclick = async () => { if (E.cuentas.length < 2) return msg('#ajMsg', 'Es la única cuenta.'); if (!confirm('¿Eliminar esta cuenta para siempre?')) return;
   await api(`/cuentas/${E.cuenta.id}`, 'DELETE'); localStorage.removeItem('dmn.cuenta'); await cargarCuentas(); await cambiarCuenta(); msg('#ajMsg', 'Cuenta eliminada.', true); };
-$('#btnWebhook').onclick = async () => { try { await api('/ajustes', 'POST', { webhook: $('#wUrl').value.trim() }); msg('#ajMsg', 'Webhook guardado: los avisos (stops, alertas, bloqueos) llegarán ahí.', true); } catch (e) { msg('#ajMsg', e.message); } };
+$('#btnWebhook').onclick = async () => { try { await api('/ajustes', 'POST', { webhook: $('#wUrl').value.trim() }); msg('#avMsg', 'Webhook guardado: los avisos (stops, alertas, bloqueos) llegarán ahí.', true); } catch (e) { msg('#avMsg', e.message); } };
 
 // ---------- enjambre ----------
 async function cargarAgente() {
@@ -346,8 +346,7 @@ async function cargarAgente() {
       ['Capital', a => n(a.equity, 2)], ['Máximo', a => n(a.max_equity, 2)], ['Trades', a => `${a.trades} (${a.ganados}✔)`], ['R medio', a => a.r_medio != null ? sg(a.r_medio) : '—'],
       ['Intentos', a => a.intentos], ['🏆', a => a.metas || ''], ['Estado', a => esc(a.estado)], ['Último', a => `<span class="chico">${esc(a.ultimo || '')}</span>`]], todos);
     $('#agInforme').textContent = inf.texto;
-    $('#agLec').innerHTML = m.lecciones.map(l => `<div class="lec">${esc(l.texto)}<br><small>${fecha(l.ts)} · ${l.tipo}</small></div>`).join('') || '<span class="tenue">Aún sin lecciones.</span>';
-    $('#agLog').textContent = (m.log || []).slice().reverse().join('\n') || 'Sin actividad.';
+    guardarCerebro('enjambre', m.lecciones || [], m.log || []);
   } catch (e) { msg('#agMsg', e.message); }
 }
 $('#agIniciar').onclick = async () => { try {
@@ -361,7 +360,7 @@ $('#agIniciar').onclick = async () => { try {
   msg('#agMsg', hecho.join(' · ') + ' (los otros equipos lo aplican en ≤ 10 s)', true); setTimeout(cargarAgente, 1500); } catch (e) { msg('#agMsg', e.message); } };
 $('#agParar').onclick = async () => { try { for (const i of $('#agPorNodo').querySelectorAll('input')) { await api('/enjambre/parar', 'POST', { nodo: i.dataset.nodo }); i.value = 0; }
   msg('#agMsg', 'Parada solicitada a todos los nodos. Comprueba su estado: una orden remota pendiente no confirma la parada.', true); cargarAgente(); } catch (e) { msg('#agMsg', e.message); } };
-setInterval(() => { if (!document.hidden && E.pag === 'agente') cargarAgente(); }, 10000);
+setInterval(() => { if (!document.hidden && E.pag === 'lab-enjambre') cargarAgente(); }, 10000);
 
 // ---------- cuenta real (GMGN) ----------
 const hace_ = s => s < 90 ? `${Math.round(s)} s` : s < 5400 ? `${Math.round(s / 60)} min` : s < 172800 ? `${Math.round(s / 3600)} h` : `${Math.round(s / 86400)} d`;
@@ -393,7 +392,8 @@ async function cargarReal() {
       <div class="chico">${n(p.cantidad, 2)} · ${n(p.valor, 3)} $ · coste ${n(p.coste, 3)} $</div><div class="grande">${sg(p.pnl_pct, 2)} %</div>
       <div class="tenue chico">desde ${fecha(p.desde)} · liquidez ${n(p.liquidez / 1000, 0)} k$ · <a href="https://gmgn.ai/sol/token/${esc(p.token)}" target="_blank" rel="noopener">GMGN</a></div></div>
       <div class="re-barra">${p.sl ? `<span class="ab" style="left:${x(p.sl)}">SL ${np(p.sl)}</span>` : ''}${p.tp ? `<span class="ab" style="left:${x(p.tp)}">TP ${np(p.tp)}</span>` : ''}${p.entrada ? `<i class="ent" style="left:${x(p.entrada)}"></i><span class="ar" style="left:${x(p.entrada)}">entrada ${np(p.entrada)}</span>` : ''}<i class="act" style="left:${x(p.precio)}" title="ahora"></i></div></div>`; }).join('') : '<div class="tenue">Nada abierto.</div>';
-  $('#reEv').textContent = (r.eventos || []).slice().reverse().map(([ts, txt]) => `${fecha(ts)}  ${txt}`).join('\n') || 'Sin eventos todavía: aparecerán aquí las compras, ventas y los TP/SL que salten.';
+  E.real = r;
+  guardarCerebro('eventos', [], (r.eventos || []).map(([ts, txt]) => [ts, txt]));
   $('#reAct').innerHTML = tabla([['Hora', a => fecha(a.ts)], ['Tipo', a => a.tipo === 'buy' ? '<span class="verde">compra</span>' : a.tipo === 'sell' ? '<span class="rojo">venta</span>' : esc(a.tipo)],
     ['Token', a => esc(a.simbolo) + (a.ruta && a.ruta.length ? ` <span class="tenue chico">vía ${a.ruta.map(esc).join(' → ')}</span>` : '')], ['Cantidad', a => n(a.cantidad, 2)], ['$', a => n(a.usd, 3)], ['Precio', a => np(a.precio)], ['Costes $', a => n((a.gas_usd || 0) + (a.dex_usd || 0), 3)],
     ['Tx', a => `<a href="https://solscan.io/tx/${esc(a.tx)}" target="_blank" rel="noopener">${esc((a.tx || '').slice(0, 8))}…</a>`]], r.actividad || [], 'Sin actividad.');
@@ -437,7 +437,7 @@ function pintarConciencia(C) {
     : '<div class="tenue chico">Solo en el PC.</div>';
 }
 async function cargarConciencia() { try { pintarConciencia((await api('/piloto')).conciencia); } catch (e) { $('#piCon').innerHTML = `<div class="tenue chico">${esc(e.message)}</div>`; } }
-setInterval(() => { if (!document.hidden && E.pag === 'agente') cargarConciencia(); }, 30000);
+setInterval(() => { if (!document.hidden && E.pag === 'cerebro-conciencia') cargarConciencia(); }, 30000);
 async function cargarPiloto() {
   let p;
   try { p = await api('/piloto'); } catch (e) { $('#piEstado').textContent = e.message; return; }
@@ -506,12 +506,17 @@ async function cargarPiloto() {
   $('#piFut').innerHTML = (U ? `<div class="chico" style="margin-bottom:4px">${fcfg.activo ? '🧪 Sim operando' : '⏸️ Futuros parados'} · ${estadoReal}</div>` : '') + (U ? (U.error ? `<div class="re-bot" style="border-left-color:var(--rojo)">⚠️ ${esc(U.error)}</div>` : '')
     + `<div class="chico">${(U.cuentas || []).filter(c => c.conectada).map(c => `<b>${esc(c.nombre)}</b> ${c.simulada ? '(sim)' : '<b>(REAL)</b>'}: ${n(c.saldo, 2)} $ · realizado ${sg(c.realizado, 2)} $`).join(' · ') || 'NinjaTrader sin cuentas conectadas'}</div>`
     + `<div class="chico">Abiertas: ${Object.values(U.abiertas || {}).map(o => `${o.real ? '💵' : '🧪'} ${esc(o.nt)} ${o.lado === 1 ? 'largo' : 'corto'} («${esc(o.estrategia)}»)`).join(' · ') || 'ninguna'}</div>`
-    + (FF && FF.manuales ? `<div class="tenue chico" style="margin-top:6px">${FF.muestras} muestras · ${esc(FF.msg || '')} · resultados en $ por contrato, con costes</div>`
-      + `<div class="re-bot" style="margin-top:6px;border-left-color:var(--verde)">💰 <b>A la cuenta real</b> (en vivo ≥ ${FF.promo.vivo_n} ops, ≥ +${FF.promo.vivo_usd} $/op, ≥ ${FF.promo.vivo_gana} % ganadoras): ${(FF.promovidas || []).length ? FF.promovidas.map(x => `<b>${esc(x.nombre || x.id)}</b> (${usd(x.vivo)})`).join(' · ') : '<span class="tenue">ninguna todavía</span>'}</div>`
-      + tabla([['Estrategia', x => `<b>${esc(x.nombre || x.id)}</b><div class="tenue chico">${esc(x.regla)}</div>`], ['Entreno', x => usd(x.entreno)], ['Validación', x => usd(x.prueba)], ['En vivo', x => usd(x.vivo)]], (FF.manuales || []).concat(FF.salon || []), '') : '')
-    + `<pre class="chico" style="max-height:160px;overflow:auto;margin-top:6px">${esc((U.log || []).slice().reverse().map(([t, l]) => `${fecha(t)}  ${l}`).join(String.fromCharCode(10)))}</pre>`
+    + (FF && FF.promovidas ? `<div class="re-bot" style="margin-top:6px;border-left-color:var(--verde)">💰 <b>Estrategias autorizadas para la cuenta real</b>: ${FF.promovidas.length ? FF.promovidas.map(x => `<b>${esc(x.nombre || x.id)}</b> (${usd(x.vivo)})`).join(' · ') : '<span class="tenue">ninguna todavía (se promueven en Laboratorio → Fábrica)</span>'}</div>` : '')
     : '<div class="tenue chico">Solo en el PC.</div>');
-  $('#piLog').textContent = (p.log || []).slice().reverse().map(([t, l]) => `${fecha(t)}  ${l}`).join('\n');
+  // la fábrica de futuros es simulación: va al Laboratorio
+  $('#labFut').innerHTML = FF && FF.manuales ? `<div class="tenue chico">${FF.muestras} muestras · ${esc(FF.msg || '')} · resultados en $ por contrato, con costes</div>`
+    + `<div class="re-bot" style="margin-top:6px;border-left-color:var(--verde)">💰 <b>Promovidas a la cuenta real</b> (en vivo ≥ ${FF.promo.vivo_n} ops, ≥ +${FF.promo.vivo_usd} $/op, ≥ ${FF.promo.vivo_gana} % ganadoras): ${(FF.promovidas || []).length ? FF.promovidas.map(x => `<b>${esc(x.nombre || x.id)}</b> (${usd(x.vivo)})`).join(' · ') : '<span class="tenue">ninguna todavía</span>'}</div>`
+    + tabla([['Estrategia', x => `<b>${esc(x.nombre || x.id)}</b><div class="tenue chico">${esc(x.regla)}</div>`], ['Entreno', x => usd(x.entreno)], ['Validación', x => usd(x.prueba)], ['En vivo', x => usd(x.vivo)]], (FF.manuales || []).concat(FF.salon || []), '')
+    : '<div class="tenue chico">Solo en el PC.</div>';
+  guardarCerebro('futuros', [], (U && U.log) || []);
+  guardarCerebro('piloto', [], p.log || []);
+  E.piloto = p;
+  pintarSeguridad(p);
 }
 async function guardarFuturos(extra = {}) {
   try {
@@ -535,7 +540,8 @@ async function guardarPiloto(extra = {}) {
 $('#piGuardar').onclick = () => guardarPiloto();
 $('#piOn').onclick = () => { if (confirm(`¿Activar el piloto con DINERO REAL?\n${$('#piPorOp').value} SOL por operación, se apaga solo si pierde ${$('#piPerd').value} SOL.`)) guardarPiloto({ activo: true }); };
 $('#piOff').onclick = () => guardarPiloto({ activo: false });
-setInterval(() => { if (!document.hidden && E.pag === 'real') { cargarReal(); cargarPiloto(); } }, 5000);
+setInterval(() => { if (document.hidden) return; if (E.pag === 'real-memes') { cargarReal(); cargarPiloto(); } else if (['real-futuros', 'real-seguridad'].includes(E.pag)) cargarPiloto(); }, 5000);
+setInterval(() => { if (!document.hidden && ['lab-fabrica', 'lab-modelos', 'lab-escaner', 'cerebro-decisiones'].includes(E.pag)) cargarPiloto().then(() => E.pag === 'cerebro-decisiones' && pintarDecisiones()); }, 20000);
 
 // ---------- Up/Down de Polymarket (simulado) ----------
 async function cargarUpdown() {
@@ -559,19 +565,53 @@ async function cargarUpdown() {
       ['Lado', x => x.lado === 'Up' ? '<span class="verde">Up</span>' : '<span class="rojo">Down</span>'], ['Precio', x => n(x.precio, 2)], ['$', x => n(x.coste + x.comision, 2)],
       ['Quedaban', x => hace_(x.segs_rest)], ['Resultado', x => x.resultado ? (x.resultado === x.lado ? '<span class="verde">✔ ganó</span>' : '<span class="rojo">✘ perdió</span>') : '<span class="tenue">abierta</span>'],
       ['P&L', x => x.pnl != null ? sg(x.pnl) + ' $' : '—']], m.recientes || [], 'Sin apuestas todavía.');
-    $('#udLec').innerHTML = (m.lecciones || []).map(l => `<div class="lec">${esc(l.texto)}<br><small>${fecha(l.ts)}</small></div>`).join('') || '<span class="tenue">La primera evolución llega a las 3 h.</span>';
-    $('#udLog').textContent = (m.log || []).slice().reverse().join('\n') || 'Sin actividad.';
+    guardarCerebro('updown', m.lecciones || [], m.log || []);
   } catch (e) { msg('#udMsg', e.message); }
 }
 $('#udIniciar').onclick = async () => { try { await api('/updown/iniciar', 'POST', { agentes: +$('#udN').value, capital: +$('#udCap').value }); msg('#udMsg', 'Apostando (simulado).', true); cargarUpdown(); } catch (e) { msg('#udMsg', e.message); } };
 $('#udParar').onclick = async () => { try { await api('/updown/parar', 'POST'); msg('#udMsg', 'Parado.', true); cargarUpdown(); } catch (e) { msg('#udMsg', e.message); } };
-setInterval(() => { if (!document.hidden && E.pag === 'updown') cargarUpdown(); }, 5000);
+setInterval(() => { if (!document.hidden && E.pag === 'lab-updown') cargarUpdown(); }, 5000);
 
-// ---------- navegación ----------
-function irA(p) { $$('#pestanas button').forEach(b => b.classList.toggle('on', b.dataset.p === p)); $$('.pag').forEach(s => s.classList.toggle('on', s.id === 'p-' + p)); E.pag = p;
-  ({ agente: () => { cargarAgente(); cargarConciencia(); }, real: () => { cargarReal(); cargarPiloto(); }, updown: cargarUpdown, diario: cargarDiario, stats: cargarStats, practica: cargarPracticas, escaner: cargarAlertas, ajustes: pintarCfg })[p]?.(); }
+// ---------- navegación: sección → subpestaña ----------
+const SUBS = {
+  resumen: [],
+  real: [['memes', '🪙 Memecoins (GMGN)'], ['futuros', '📈 Futuros (NinjaTrader)'], ['seguridad', '🛡️ Seguridad']],
+  lab: [['fabrica', '🏭 Fábrica'], ['enjambre', '🤖 Enjambre'], ['updown', '🎲 Up/Down'], ['modelos', '🧪 Modelos de IA'], ['escaner', '🔎 Escáner del piloto']],
+  manual: [['mesa', 'Mesa'], ['practica', 'Práctica'], ['backtest', 'Backtest'], ['diario', 'Diario'], ['stats', 'Estadísticas'], ['alertas', 'Escáner y alertas']],
+  cerebro: [['decisiones', 'Decisiones de APOLO'], ['conciencia', 'Conciencia y grafo'], ['lecciones', 'Lecciones'], ['actividad', 'Actividad']],
+  ajustes: [['conexiones', 'Conexiones'], ['cuentas', 'Cuentas simuladas'], ['avisos', 'Avisos']],
+};
+// nombres antiguos (enlaces internos y memoria del navegador)
+const ALIAS = { mesa: ['manual', 'mesa'], agente: ['lab', 'enjambre'], updown: ['lab', 'updown'], diario: ['manual', 'diario'], stats: ['manual', 'stats'], backtest: ['manual', 'backtest'], practica: ['manual', 'practica'], escaner: ['manual', 'alertas'] };
+const CARGAR = {
+  resumen: () => cargarResumen(),
+  'real-memes': () => { cargarReal(); cargarPiloto(); }, 'real-futuros': () => cargarPiloto(), 'real-seguridad': () => cargarPiloto(),
+  'lab-fabrica': () => cargarPiloto(), 'lab-enjambre': () => cargarAgente(), 'lab-updown': () => cargarUpdown(), 'lab-modelos': () => cargarPiloto(), 'lab-escaner': () => cargarPiloto(),
+  'manual-diario': () => cargarDiario(), 'manual-stats': () => cargarStats(), 'manual-practica': () => cargarPracticas(), 'manual-alertas': () => cargarAlertas(),
+  'cerebro-decisiones': () => cargarPiloto().then(pintarDecisiones), 'cerebro-conciencia': () => { cargarConciencia(); abrirGrafo(); },
+  'cerebro-lecciones': () => cargarCerebroTodo().then(pintarLecciones), 'cerebro-actividad': () => cargarCerebroTodo().then(pintarActividad),
+  'ajustes-conexiones': () => cargarConexiones(), 'ajustes-cuentas': () => pintarCfg(),
+};
+const memo = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch { } };
+function irA(p, s) {
+  if (ALIAS[p]) [p, s] = ALIAS[p];
+  if (!SUBS[p]) p = 'resumen';
+  const subs = SUBS[p]; if (subs.length && !subs.some(x => x[0] === s)) s = memo('dmn.sub.' + p) || subs[0][0];
+  if (subs.length && !subs.some(x => x[0] === s)) s = subs[0][0];
+  E.sec = p; E.sub2 = s; E.pag = subs.length ? p + '-' + s : p; memo('dmn.sec', p); if (s) memo('dmn.sub.' + p, s);
+  $$('#pestanas button').forEach(b => b.classList.toggle('on', b.dataset.p === p));
+  $('#subpestanas').innerHTML = subs.map(([k, t]) => `<button data-s="${k}" class="${k === s ? 'on' : ''}">${t}</button>`).join('');
+  $('#subpestanas').className = 'subpestanas ' + (p === 'real' ? 'real' : ['lab', 'manual'].includes(p) ? 'sim' : '');
+  $('#subpestanas').hidden = !subs.length;
+  $('#barraManual').classList.toggle('oculto', p !== 'manual');
+  $$('.pag').forEach(x => x.classList.toggle('on', x.id === 'p-' + E.pag));
+  if (p !== 'cerebro' || s !== 'conciencia') cerrarGrafo();
+  if (E.pag === 'manual-mesa' && !E.mesaVista) { E.mesaVista = true; setTimeout(() => cargarGrafico(), 0); }   // los gráficos se crean ocultos: encuadrar al verlos
+  CARGAR[E.pag]?.();
+}
 $$('#pestanas button').forEach(b => b.onclick = () => irA(b.dataset.p));
-async function cambiarCuenta() { localStorage.setItem('dmn.cuenta', $('#selCuenta').value); pararAuto(); await cargarCuenta(); limpiarTicket(); await cargarGrafico(); cargarCotizacion(); cargarAnalisis(); if (E.pag && E.pag !== 'mesa') irA(E.pag); }
+$('#subpestanas').onclick = e => { const b = e.target.closest('[data-s]'); if (b) irA(E.sec, b.dataset.s); };
+async function cambiarCuenta() { localStorage.setItem('dmn.cuenta', $('#selCuenta').value); pararAuto(); await cargarCuenta(); limpiarTicket(); await cargarGrafico(); cargarCotizacion(); cargarAnalisis(); if (E.pag && E.pag !== 'manual-mesa') irA(E.sec, E.sub2); }
 $('#selCuenta').onchange = cambiarCuenta;
 $$('.lado button').forEach(b => b.onclick = () => ponerLado(b.dataset.lado));
 $('#tTipo').onchange = ponerTipo;
@@ -584,7 +624,10 @@ document.addEventListener('keydown', e => { if (!esReplay() || e.target.matches(
 
 (async function inicio() {
   crearGraficos(); ponerTipo(); prepararBT();
-  await cargarCuentas(); await cargarCuenta(); await cargarGrafico(); cargarCotizacion(); cargarAnalisis(); cargarVig(); cargarAvisos();
+  await cargarCuentas(); await cargarCuenta(); irA(memo('dmn.sec') || 'resumen'); actualizarChips();
+  await cargarGrafico(); cargarCotizacion(); cargarAnalisis(); cargarVig(); cargarAvisos();
+  setInterval(() => { if (!document.hidden) actualizarChips(); }, 30000);
+  setInterval(() => { if (!document.hidden && E.pag === 'resumen') cargarResumen(); }, 15000);
   setInterval(() => { if (document.hidden) return; cargarCotizacion(); if (!esReplay()) cargarCuenta(); cargarAvisos(); }, 10000);
   setInterval(() => { if (!document.hidden && !esReplay()) cargarVig(); }, 30000);
   setInterval(() => { if (!document.hidden && !esReplay() && ['5m', '15m'].includes(E.intervalo)) cargarGrafico(false); }, 60000);
@@ -596,57 +639,180 @@ function lineaConciencia(L, titulo = '') {
   const W = 600, H = 120, x = i => 4 + i * (W - 8) / (L.length - 1), y = v => H - 4 - (Math.max(0, Math.min(100, v)) / 100) * (H - 8);
   const pts = L.map((r, i) => `${x(i).toFixed(1)},${y(r.nivel).toFixed(1)}`).join(' ');
   const ult = L[L.length - 1];
-  return cab + `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:120px;margin-top:6px;background:rgba(127,127,127,.06);border-radius:6px">`
+  return cab + `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:120px;margin-top:6px;background:rgba(127,127,127,.06);border-radius:6px">`
     + [25, 50, 75].map(v => `<line x1="0" x2="${W}" y1="${y(v)}" y2="${y(v)}" stroke="currentColor" opacity=".12"/>`).join('')
-    + `<polyline points="${pts}" fill="none" stroke="var(--verde)" stroke-width="2"/>`
+    + `<polyline points="${pts}" fill="none" stroke="var(--verde)" stroke-width="2" vector-effect="non-scaling-stroke"/>`
     + L.map((r, i) => r.mejor_vivo != null ? `<circle cx="${x(i)}" cy="${y(r.nivel)}" r="3" fill="var(--verde)"><title>en vivo ${r.mejor_vivo} %/op</title></circle>` : '').join('')
     + `</svg><div class="tenue chico">${L.length} rondas · desde ${fecha(L[0].ts)} · ahora: ${ult.pasan} pasan la validación${ult.mejor_prueba != null ? `, mejor ${sg(ult.mejor_prueba, 1)} %/op fuera de muestra` : ''}. Hasta 40 = solo datos y exploración; por encima solo sube con ventaja demostrada.</div>`;
 }
 
-// ---------- grafo de la conciencia (fuerzas, canvas) ----------
-const GR_COL = { ronda: '#22c55e', estrategia: '#a855f7', moneda: '#f59e0b', futuro: '#38bdf8', 'operación': '#ef4444', aprendizaje: '#94a3b8', sistema: '#eab308' };
-let grAnim = null;
-$('#grVer').onclick = async () => {
-  const caja = $('#grCaja');
-  if (caja.style.display !== 'none') { caja.style.display = 'none'; cancelAnimationFrame(grAnim); $('#grVer').textContent = '🕸️ Ver el grafo'; return; }
-  caja.style.display = ''; $('#grVer').textContent = 'Ocultar el grafo';
-  let g; try { g = await api('/conciencia/grafo'); } catch (e) { return toast(e.message); }
-  dibujarGrafo(g);
-};
-function dibujarGrafo(g) {
-  const cv = $('#grLienzo'), dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
-  cv.width = W * dpr; cv.height = H * dpr; const cx = cv.getContext('2d'); cx.scale(dpr, dpr);
-  const N = (g.nodos || []).map((n, i) => ({ ...n, x: W / 2 + Math.cos(i) * (50 + i % 200), y: H / 2 + Math.sin(i) * (50 + i % 200), vx: 0, vy: 0,
-    r: n.tipo === 'ronda' ? 7 : Math.min(12, 3 + Math.sqrt(n.veces || 1)) }));
-  const idx = Object.fromEntries(N.map((n, i) => [n.id, i]));
-  const A = (g.aristas || []).filter(a => a.de in idx && a.a in idx).map(a => ({ ...a, s: idx[a.de], t: idx[a.a] }));
-  const cuenta = {}; N.forEach(n => cuenta[n.tipo] = (cuenta[n.tipo] || 0) + 1);
-  $('#grLeyenda').innerHTML = Object.entries(cuenta).map(([k, v]) => `<span style="color:${GR_COL[k] || '#888'}">●</span> ${esc(k)} ${v}`).join(' · ') + ` · ${A.length} enlaces · <span class="tenue">verde enlazado = la línea de rondas (progreso)</span>`;
-  let paso = 0, sobre = null;
-  const tick = () => {
-    if (paso++ < 400) {
-      const k = 0.02 * (1 - paso / 420);
-      for (let i = 0; i < N.length; i++) for (let j = i + 1; j < N.length; j++) {
-        const a = N[i], b = N[j]; let dx = a.x - b.x, dy = a.y - b.y, d2 = dx * dx + dy * dy + 0.01;
-        if (d2 > 22500) continue; const f = 90 / d2; dx *= f; dy *= f; a.vx += dx; a.vy += dy; b.vx -= dx; b.vy -= dy;
-      }
-      for (const e of A) { const a = N[e.s], b = N[e.t], dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy) || 1, f = (d - (e.tipo === 'sigue_a' ? 26 : 38)) * 0.03;
-        a.vx += dx / d * f; a.vy += dy / d * f; b.vx -= dx / d * f; b.vy -= dy / d * f; }
-      for (const n of N) { n.vx += (W / 2 - n.x) * 0.006; n.vy += (H / 2 - n.y) * 0.009; n.x += Math.max(-8, Math.min(8, n.vx * k * 50)); n.y += Math.max(-8, Math.min(8, n.vy * k * 50));
-        n.vx *= 0.5; n.vy *= 0.5; n.x = Math.max(8, Math.min(W - 8, n.x)); n.y = Math.max(8, Math.min(H - 8, n.y)); }
-    }
-    cx.clearRect(0, 0, W, H);
-    for (const e of A) { const a = N[e.s], b = N[e.t], linea = e.tipo === 'sigue_a', resalta = sobre != null && (e.s === sobre || e.t === sobre);
-      cx.strokeStyle = linea ? '#22c55e' : resalta ? 'rgba(250,250,250,.7)' : 'rgba(140,140,160,.18)'; cx.lineWidth = linea ? 2.5 : resalta ? 1.2 : 0.6;
-      cx.beginPath(); cx.moveTo(a.x, a.y); cx.lineTo(b.x, b.y); cx.stroke(); }
-    N.forEach((n, i) => { cx.fillStyle = GR_COL[n.tipo] || '#888'; cx.globalAlpha = sobre == null || i === sobre || A.some(e => (e.s === sobre && e.t === i) || (e.t === sobre && e.s === i)) ? 1 : 0.25;
-      cx.beginPath(); cx.arc(n.x, n.y, n.r, 0, 7); cx.fill(); });
-    cx.globalAlpha = 1;
-    grAnim = requestAnimationFrame(tick);
-  };
-  cv.onmousemove = ev => { const b = cv.getBoundingClientRect(), x = ev.clientX - b.left, y = ev.clientY - b.top;
-    sobre = null; let mejor = 14; N.forEach((n, i) => { const d = Math.hypot(n.x - x, n.y - y); if (d < mejor) { mejor = d; sobre = i; } });
-    $('#grInfo').innerHTML = sobre == null ? '' : `<b style="color:${GR_COL[N[sobre].tipo] || '#888'}">${esc(N[sobre].nombre)}</b> <span class="tenue">(${esc(N[sobre].tipo)} · ${A.filter(e => e.s === sobre || e.t === sobre).length} enlaces)</span>`; };
-  cv.onmouseleave = () => { sobre = null; $('#grInfo').innerHTML = ''; };
-  cancelAnimationFrame(grAnim); tick();
+
+// ---------- datos compartidos (las consultas pesadas se reutilizan un rato) ----------
+const CACHE = {};
+async function apiCache(ruta, ttl) {
+  const c = CACHE[ruta], ahora = Date.now();
+  if (c && ahora - c.t < ttl * 1000) return c.p;
+  const p = api(ruta); CACHE[ruta] = { t: ahora, p };
+  p.catch(() => { delete CACHE[ruta]; });
+  return p;
 }
+const tile = (x, y, z = '') => `<div class="tile"><small>${x}</small><b>${y}</b>${z ? `<span class="tenue chico">${z}</span>` : ''}</div>`;
+const SUPERV = { apagado: 'Piloto apagado', validando: 'Validando estrategias', esperando_senal: 'Esperando señal', protegida: 'Protecciones verificadas', conciliacion: 'Conciliación pendiente', saliendo: 'Confirmando salida', requiere_revision: 'Requiere revisión' };
+
+// ---------- cabecera: estado de todo de un vistazo ----------
+async function actualizarChips() {
+  const mapa = apiCache('/enjambre/mapa', 60);   // lento: se añade cuando llega
+  const [p, r] = await Promise.allSettled([api('/piloto'), api('/real')]);
+  const ch = [], P = p.value, R = r.value;
+  if (P) {
+    E.piloto = P; const c = P.cfg || {}, o = P.orden;
+    ch.push(`<span class="chip real ${c.activo ? 'on' : ''}" data-ir="real-memes">● Piloto ${c.activo ? 'activo' : 'parado'}${o ? ` · ${esc(o.simbolo)}` : ''}</span>`);
+    const f = P.futuros?.cfg;
+    if (f) ch.push(`<span class="chip real ${f.real_activo ? 'on' : ''}" data-ir="real-futuros">● Futuros ${f.real_activo ? 'real activo' : f.activo ? 'Sim101' : 'parados'}</span>`);
+    if (P.supervision?.requiere_revision) ch.push(`<span class="chip alerta" data-ir="real-seguridad">⚠ Revisión pendiente</span>`);
+  }
+  if (R) ch.push(`<span class="chip ${R.ts && R.edad < 60 ? 'on' : 'apagado'}" data-ir="ajustes-conexiones">● PC ${R.ts && R.edad < 60 ? 'conectado' : 'sin datos'}</span>`);
+  $('#chips').innerHTML = ch.join('');
+  const M = await mapa.catch(() => null);
+  if (M) { const k = (M.nodos.find(x => x.local) || M.nodos[0] || {}).kpis || {}; $('#chips').insertAdjacentHTML('beforeend', `<span class="chip sim ${k.activo ? 'on' : ''}" data-ir="lab-enjambre">● Enjambre ${k.activo ? (k.agentes || '') + ' agentes' : 'parado'}</span>`); }
+}
+$('#chips').onclick = e => { const c = e.target.closest('[data-ir]'); if (!c) return; const [a, b] = c.dataset.ir.split('-'); irA(a, b); };
+
+// ---------- resumen ----------
+async function cargarResumen() {
+  const [p, r, m, u] = await Promise.allSettled([api('/piloto'), api('/real'), apiCache('/enjambre/mapa', 60), apiCache('/updown', 60)]);
+  const P = p.value || {}, R = r.value || {}, M = m.value, U = u.value, c = P.cfg || {}, o = P.orden, F = P.fabrica || {}, FU = P.futuros || {}, fc = FU.cfg || {};
+  if (p.value) E.piloto = P;
+  const conf = (P.ops || []).filter(x => x.pnl_confirmado), neto = conf.reduce((a, x) => a + (x.pnl_sol || 0), 0);
+  const vPos = (R.posiciones || []).reduce((a, x) => a + (x.valor || 0), 0);
+  $('#rsReal').innerHTML = [
+    tile('Wallet GMGN', R.sol != null ? n(R.sol, 4) + ' SOL' : '—', R.sol_usd ? '≈ ' + n(R.sol * R.sol_usd + vPos) + ' $' : ''),
+    tile('Piloto memecoins', c.activo ? '<span class="verde">● Activo</span>' : '<span class="tenue">○ Parado</span>', esc(SUPERV[P.supervision?.estado] || '')),
+    tile('Posición', o ? esc(o.simbolo) + (o.pnl_pct != null ? ' ' + sg(o.pnl_pct, 1) + ' %' : '') : '<span class="tenue">ninguna</span>', o ? (o.proteccion_verificada ? 'TP/SL verificados' : 'conciliando') : ''),
+    tile('Neto confirmado', conf.length ? sg(neto, 4) + ' SOL' : '—', `${conf.length} operaciones con recibos`),
+    tile('Futuros real', fc.real_activo ? `<span class="verde">● ${esc(fc.cuenta_real)}</span>` : '<span class="tenue">○ Parado</span>', fc.real_activo ? `freno ${fc.real_perdida_dia} $/día` : ''),
+  ].join('');
+  $('#rsRealTxt').innerHTML = P.error && P.error_ts > Date.now() / 1000 - 600 ? `<div class="re-bot" style="border-left-color:var(--ambar)">Último aviso del piloto: ${esc(P.error)}</div>` : '';
+  const k = M ? ((M.nodos.find(x => x.local) || M.nodos[0] || {}).kpis || {}) : {}, con = P.conciencia;
+  $('#rsLab').innerHTML = [
+    tile('Promovidas a real', `${(F.promovidas || []).length} memes · ${((FU.fabrica || {}).promovidas || []).length} futuros`, (F.promovidas || []).length ? '' : 'el dinero real espera'),
+    tile('Fábrica', F.muestras ? n(F.muestras.listas, 0) + ' muestras' : '—', F.muestras ? `${F.muestras.pendientes} esperando resultado` : ''),
+    tile('Enjambre', M ? (k.activo ? `<span class="verde">● ${k.agentes}</span>` : '<span class="tenue">○ parado</span>') : '—', M ? `${M.total.trades} operaciones · R medio ${k.r_medio != null ? n(k.r_medio, 2) : '—'}` : ''),
+    tile('Up/Down', U ? (U.activo ? `<span class="verde">● ${U.agentes}</span>` : '<span class="tenue">○ parado</span>') : '—', U ? `acierto ${U.acierto != null ? n(U.acierto * 100, 1) + ' %' : '—'}` : ''),
+    tile('Conciencia', con ? n(con.nivel, 0) + '/100' : '—', con ? `${con.velas_total} muestras aprendidas` : ''),
+  ].join('');
+  $('#rsLabTxt').innerHTML = '';
+  $('#rsApolo').innerHTML = decisiones(P).slice(0, 6).map(filaDecision).join('') || '<span class="tenue">APOLO todavía no ha decidido ninguna operación real.</span>';
+  const at = [];
+  if (P.supervision?.requiere_revision) at.push(`<div class="re-bot" style="border-left-color:var(--rojo)">Incidencia en el piloto real: ${esc(P.supervision.motivo)} <a href="#" data-irsec="real-seguridad">revisar</a></div>`);
+  if (P.intencion_entrada) at.push('<div class="re-bot" style="border-left-color:var(--rojo)">Hay una entrada sin confirmar en GMGN. <a href="#" data-irsec="real-seguridad">revisar</a></div>');
+  if (R.ts && R.edad > 120) at.push(`<div class="re-bot" style="border-left-color:var(--ambar)">El PC no manda datos desde hace ${hace_(R.edad)}.</div>`);
+  if (FU.error && (fc.activo || fc.real_activo)) at.push(`<div class="re-bot" style="border-left-color:var(--ambar)">Futuros: ${esc(FU.error)}</div>`);
+  $('#rsAtencion').innerHTML = at.join('') || '<span class="verde">Nada pendiente.</span>';
+}
+document.addEventListener('click', e => { const a = e.target.closest('[data-irsec]'); if (!a) return; e.preventDefault(); const [x, y] = a.dataset.irsec.split('-'); irA(x, y); });
+
+// ---------- seguridad del dinero real ----------
+function pintarSeguridad(p) {
+  const c = p.cfg || {}, sv = p.supervision || {}, fc = (p.futuros || {}).cfg || {};
+  $('#seEstado').innerHTML = `<div class="tiles">${tile('Estado', esc(SUPERV[sv.estado] || sv.estado || '—'))}${tile('Piloto', c.activo ? '<span class="verde">Activo</span>' : 'Parado')}${tile('Entrada sin confirmar', p.intencion_entrada ? '<span class="rojo">Sí</span>' : 'No')}${tile('Incidencias abiertas', (sv.incidencias || []).length)}</div><div class="chico">${esc(sv.motivo || '')}</div>`;
+  $('#seIncidencias').innerHTML = ((sv.incidencias || []).map(x => `<div class="re-bot" style="border-left-color:${x.critica ? 'var(--rojo)' : 'var(--ambar)'}"><b>${esc(x.codigo)}</b> · ${esc(x.motivo)}<div class="tenue chico">desde ${fecha(x.creada)} · última ${fecha(x.ultima)}</div></div>`).join('') || '<div class="verde chico">Sin incidencias.</div>')
+    + (sv.requiere_revision || p.intencion_entrada ? '<button id="seConciliado" class="ambar" style="margin-top:8px">✅ Ya lo revisé en GMGN</button><div class="tenue chico">Resuelve las incidencias y olvida la entrada sin confirmar. No activa el piloto.</div>' : '');
+  const b = $('#seConciliado');
+  if (b) b.onclick = () => { if (confirm('¿Revisaste en GMGN las órdenes y la wallet?\nSe resuelven las incidencias y se olvida la entrada sin confirmar (si la hubiera). Una orden que siga abierta en GMGN y no esté en el panel tendrás que cerrarla tú.')) guardarPiloto({ conciliado: Math.floor(Date.now() / 1000) }); };
+  $('#seLimites').innerHTML = `<div>Memecoins: ${n(c.por_op_sol, 3)} SOL por operación · se apaga si pierde ${n(c.perdida_max_sol, 3)} SOL desde ${p.saldo_inicio != null ? n(p.saldo_inicio, 4) + ' SOL' : '—'} · máximo ${c.max_ops_dia} operaciones al día · reserva ${n(c.reserva_sol, 3)} SOL para comisiones · tras 2 stops seguidos, pausa de ${c.pausa_stops_h} h.</div>
+    <div>Futuros: ${fc.cuenta_real ? `cuenta ${esc(fc.cuenta_real)} · freno ${fc.real_perdida_dia} $/día · ${fc.qty} contrato(s)` : 'sin cuenta real'}.</div>
+    <div class="tenue">Sin APOLO no se abre ninguna operación real. Los límites dependen de que el motor esté en marcha: no garantizan un máximo ante saltos de precio.</div>`;
+}
+
+// ---------- cerebro: decisiones de APOLO, lecciones y actividad en un solo sitio ----------
+function decisiones(P) {
+  const out = (P.log || []).filter(([, l]) => /🧠/.test(l)).map(([ts, l]) => ({ ts, txt: l.replace(/^🧠\s*/, ''), tipo: /veta|no contestó/.test(l) ? 'veta' : /aprueba/.test(l) ? 'aprueba' : 'info' }));
+  const o = P.orden;
+  if (o && o.ia && o.ia.motivo) out.push({ ts: o.ia.ts, txt: `Revisión de ${o.simbolo}: ${o.ia.accion} (${n((o.ia.confianza || 0) * 100, 0)} %) — ${o.ia.motivo}`, tipo: o.ia.accion === 'salir' ? 'veta' : 'aprueba' });
+  for (const op of P.ops || []) if (/APOLO lo ve mal/.test(op.salida || '')) out.push({ ts: op.cerrada, txt: `Cerró ${op.simbolo}: ${op.salida}`, tipo: 'veta' });
+  return out.sort((a, b) => b.ts - a.ts);
+}
+const filaDecision = d => `<div class="decision ${d.tipo}"><span>${d.tipo === 'veta' ? '✋' : d.tipo === 'aprueba' ? '✅' : '🧠'}</span><div>${esc(d.txt)}<div class="tenue chico">${fecha(d.ts)}</div></div></div>`;
+function pintarDecisiones() {
+  $('#ceDecisiones').innerHTML = decisiones(E.piloto || {}).map(filaDecision).join('') || '<div class="tenue">APOLO todavía no ha decidido ninguna operación real. Cuando haya una estrategia promovida, cada entrada pasa por él.</div>';
+}
+E.cb = { lec: {}, act: {} };
+function guardarCerebro(origen, lecciones, log) {
+  E.cb.lec[origen] = lecciones.map(l => ({ ts: l.ts, txt: l.texto, tipo: l.tipo, origen }));
+  E.cb.act[origen] = log.map(x => Array.isArray(x) ? { ts: x[0], txt: x[1], origen } : { ts: null, txt: String(x), origen });
+}
+async function cargarCerebroTodo() {
+  const [m, u, p, r] = await Promise.allSettled([apiCache('/enjambre/mapa', 30), apiCache('/updown', 30), api('/piloto'), api('/real')]);
+  if (m.value) guardarCerebro('enjambre', m.value.lecciones || [], m.value.log || []);
+  if (u.value) guardarCerebro('updown', u.value.lecciones || [], u.value.log || []);
+  if (p.value) { E.piloto = p.value; guardarCerebro('piloto', [], p.value.log || []); guardarCerebro('futuros', [], (p.value.futuros || {}).log || []); }
+  if (r.value) guardarCerebro('eventos', [], r.value.eventos || []);
+}
+const ORIGEN = { enjambre: '🤖', updown: '🎲', piloto: '🧭', futuros: '📈', eventos: '⚡' };
+let filtroLec = '', filtroAct = '';
+function pintarLecciones() {
+  const L = Object.entries(E.cb.lec).filter(([k]) => !filtroLec || k === filtroLec).flatMap(([, v]) => v).sort((a, b) => (b.ts || 0) - (a.ts || 0)).slice(0, 200);
+  $('#ceLecciones').innerHTML = L.map(l => `<div class="lec">${ORIGEN[l.origen] || ''} ${esc(l.txt)}<br><small>${fecha(l.ts)} · ${esc(l.origen)}${l.tipo ? ' · ' + esc(l.tipo) : ''}</small></div>`).join('') || '<span class="tenue">Aún sin lecciones.</span>';
+}
+function pintarActividad() {
+  const A = Object.entries(E.cb.act).filter(([k]) => !filtroAct || k === filtroAct).flatMap(([, v]) => v);
+  const conTs = A.filter(x => x.ts).sort((a, b) => b.ts - a.ts), sinTs = A.filter(x => !x.ts).reverse();
+  $('#ceActividad').textContent = [...conTs.map(x => `${fecha(x.ts)}  ${ORIGEN[x.origen] || ''} ${x.txt}`), ...sinTs.map(x => `${ORIGEN[x.origen] || ''} ${x.txt}`)].slice(0, 400).join('\n') || 'Sin actividad.';
+}
+$('#leFiltro').onclick = e => { const b = e.target.closest('[data-f]'); if (!b) return; filtroLec = b.dataset.f; $$('#leFiltro button').forEach(x => x.classList.toggle('on', x === b)); pintarLecciones(); };
+$('#acFiltro').onclick = e => { const b = e.target.closest('[data-f]'); if (!b) return; filtroAct = b.dataset.f; $$('#acFiltro button').forEach(x => x.classList.toggle('on', x === b)); pintarActividad(); };
+setInterval(() => {
+  if (document.hidden) return;
+  if (E.pag === 'cerebro-lecciones') cargarCerebroTodo().then(pintarLecciones);
+  if (E.pag === 'cerebro-actividad') cargarCerebroTodo().then(pintarActividad);
+}, 30000);
+
+// ---------- ajustes → conexiones ----------
+async function cargarConexiones() {
+  const [s, r, p, m] = await Promise.allSettled([api('/salud'), api('/real'), api('/piloto'), apiCache('/enjambre/mapa', 30)]);
+  const S = s.value, R = r.value || {}, P = p.value || {}, M = m.value, U = P.futuros || {};
+  const fila = (ok, t, d) => `<div class="conex"><span class="${ok ? 'verde' : ok === false ? 'rojo' : 'tenue'}">●</span><div><b>${t}</b><div class="tenue chico">${d}</div></div></div>`;
+  $('#ajConexiones').innerHTML = [
+    fila(!!S, 'Motor DMN Trader', S ? `en ${esc(location.host)} · versión ${esc(S.version)} · ${S.cuentas} cuentas simuladas` : 'no responde'),
+    fila(R.ts ? R.edad < 60 : null, 'GMGN (wallet real)', R.wallet ? `wallet ${esc(R.wallet.slice(0, 6))}…${esc(R.wallet.slice(-4))} · datos de hace ${hace_(R.edad)} · la clave de GMGN vive solo en el PC` : 'sin datos: enciende el servidor del PC (servidor-pc.bat)'),
+    fila(P.cfg ? true : null, 'Piloto real', P.aqui ? 'corre en este equipo' : 'corre en el PC y manda su estado a esta central'),
+    fila(U.cuentas ? U.cuentas.some(c => c.conectada) : null, 'NinjaTrader (futuros)', U.cuentas ? (U.cuentas.map(c => `${esc(c.nombre)} ${c.simulada ? '(sim)' : '(REAL)'} ${c.conectada ? 'conectada' : 'desconectada'}`).join(' · ') || 'sin cuentas') : (U.error ? esc(U.error) : 'abre NinjaTrader con el AddOn DmnPuente')),
+    ...(M ? M.nodos.map(x => fila(x.local || x.en_linea, `Nodo ${esc(x.nodo)}${x.local ? ' (central)' : ''}`, `${(x.agentes || []).length} agentes · ${x.local ? 'aquí' : x.en_linea ? 'en línea' : 'desconectado'}`)) : []),
+  ].join('');
+}
+
+// ---------- grafo de la conciencia: el mismo grafo 3D que la memoria de APOLO ----------
+const GR_COL = { ronda: '#22c55e', estrategia: '#a855f7', moneda: '#f59e0b', futuro: '#38bdf8', 'operación': '#ef4444', aprendizaje: '#94a3b8', sistema: '#eab308' };
+const G3 = { g3: null, modo: 'top', sel: null };
+function cerrarGrafo() { G3.g3?.destruir(); G3.g3 = null; G3.sel = null; }
+async function abrirGrafo() {
+  if (G3.g3) return;
+  let g; try { g = await api('/conciencia/grafo'); } catch (e) { $('#grInfo').textContent = e.message; return; }
+  if (E.pag !== 'cerebro-conciencia' || G3.g3) return;
+  // nodo central (como «tú» en la memoria de APOLO) enlazado a las estrategias y los futuros
+  const base = { ronda: .2, moneda: 1, futuro: 6, estrategia: 10, 'operación': 8, aprendizaje: 3, sistema: 6 };
+  const nodos = [{ id: 'usuario', tipo: 'sistema', nombre: 'DMN Trader', peso: 30, importancia: 1e9 },
+    ...(g.nodos || []).map(x => ({ id: x.id, tipo: x.tipo, nombre: x.nombre, peso: x.veces || 1, importancia: (base[x.tipo] ?? 1) * (x.veces || 1) }))];
+  const top = new Set([...nodos].sort((a, b) => b.importancia - a.importancia).slice(0, 120).map(x => x.id));
+  nodos.forEach(x => { x.top = top.has(x.id); x.antes = false; });
+  const por = new Map(nodos.map(x => [x.id, x]));
+  const enlaces = [...(g.aristas || []), ...nodos.filter(x => ['estrategia', 'futuro'].includes(x.tipo)).map(x => ({ de: 'usuario', a: x.id, peso: 2, tipo: 'raiz' }))];
+  const aristas = enlaces.map(a => ({ ...a, s: por.get(a.de), t: por.get(a.a) })).filter(a => a.s && a.t);
+  const vec = new Map();
+  for (const a of aristas) for (const [x, y] of [[a.s, a.t], [a.t, a.s]]) { if (!vec.has(x.id)) vec.set(x.id, new Set()); vec.get(x.id).add(y.id); }
+  const visible = x => x.id === 'usuario' || G3.modo === 'todo' || x.top || (G3.sel && (x === G3.sel || vec.get(G3.sel.id)?.has(x.id)));
+  const linea = a => visible(a.s) && visible(a.t) && (G3.modo === 'todo' || a.tipo !== 'simuló' || (G3.sel && (a.s === G3.sel || a.t === G3.sel)));
+  const cuenta = {}; nodos.forEach(x => { if (x.id !== 'usuario') cuenta[x.tipo] = (cuenta[x.tipo] || 0) + 1; });
+  $('#grLeyenda').innerHTML = Object.entries(cuenta).map(([k, v]) => `<span style="color:${GR_COL[k] || '#888'}">●</span> ${esc(k)} ${v}`).join(' · ') + ` · ${aristas.length} enlaces`;
+  const ir = () => {
+    if (E.pag !== 'cerebro-conciencia' || G3.g3) return;
+    G3.g3 = window.Grafo3D.crear($('#grCaja'), { nodos, aristas, visible, linea, colores: GR_COL, acento: '#22c55e',
+      alTocar: x => {
+        G3.sel = x || null; G3.g3.seleccionar(G3.sel); if (x) G3.g3.enfocar(x);
+        $('#grInfo').innerHTML = x ? `<b style="color:${GR_COL[x.tipo] || '#22c55e'}">${esc(x.nombre)}</b> <span class="tenue">(${esc(x.tipo)} · ${vec.get(x.id)?.size || 0} enlaces)</span>` : '';
+      } });
+  };
+  if (window.Grafo3D) ir(); else window.addEventListener('grafo3d-listo', ir, { once: true });
+}
+$('#grModo').onclick = e => { const b = e.target.closest('[data-m]'); if (!b) return; G3.modo = b.dataset.m; $$('#grModo button').forEach(x => x.classList.toggle('on', x === b)); G3.g3?.refrescar(); };

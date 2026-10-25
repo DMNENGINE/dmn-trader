@@ -205,19 +205,7 @@ registrarVistaPlugin('dmn-trader', 'trading', {
       <div class="tr-abajo">
         <div class="tr-card tr-news"><div class="tr-tit">📰 ${tr('ANALISTA DE NOTICIAS · EN VIVO')}<span class="tr-sub" id="trNewsEst"></span></div><div id="trMacro" class="tr-macro"></div><div id="trNews" class="tr-newslist"></div></div>
         <div class="tr-card" id="trFicha"></div>
-        <div class="tr-card"><div class="tr-tit">${tr('CONTROL')}</div>
-          <div class="tr-ctl"><label>${tr('Agentes')} <input id="trN" type="number" min="1" max="2000" value="50"></label>
-          <label>${tr('Mercados')} <select id="trMerc"><option value="cripto,acciones">Cripto + Acc</option><option value="cripto">Cripto</option><option value="acciones">Acciones</option></select></label>
-          <label>${tr('Hasta')} <input id="trHasta" placeholder="07:00"></label></div>
-          <div class="tr-ctl"><label>Capital simulado por agente <input id="trCapital" type="number" min="0.01" max="1000000" step="0.01" value="1"></label><label>Meta simulada <input id="trMeta" type="number" min="0.01" max="100000000" value="100"></label></div>
-          <div class="tr-ctl"><label>Duración máxima (min) <input id="trDuracion" type="number" min="1" max="1440" value="60"></label><label>Pérdida máxima (%) <input id="trPerdida" type="number" min="0.1" max="100" step="0.1" value="10"></label></div>
-          <p class="sutil">AUTOPILOTO SIMULADO · Sin dinero real. Controla el nodo local de la central. Requiere APOLO abierto para supervisar estos límites.</p><p id="trAuto" role="status"></p>
-          <div class="tr-bot"><button class="btn" id="trIniciar" disabled>${ic('rayo')}Activar autopiloto simulado</button><button class="btn" id="trParar">■ ${tr('Parar')}</button></div>
-          <p class="tr-central" id="trCentral"></p></div>
         <div class="tr-card"><div class="tr-tit">${ic('trofeo')}${tr('MEJORES AGENTES')}</div><div id="trTop"></div></div>
-        <div class="tr-card"><div class="tr-tit">${tr('LECCIONES')}</div><div id="trLec" class="tr-lec"></div></div>
-        <div class="tr-card" id="trMotor"><div class="tr-tit">${ic('ajustes')}${tr('MOTOR')}</div><p class="sutil">${tr('Cargando…')}</p></div>
-        <div class="tr-card tr-real" id="trReal"><div class="tr-tit">💰 ${tr('PILOTO REAL')}</div><p class="sutil">${tr('Cargando…')}</p></div>
       </div></div></div>`;
     $('#trTabs', v).onclick = e => { const b = e.target.closest('[data-tab]'); if (b) this.verTab(b.dataset.tab); };
     this.verTab(this.tab);
@@ -229,18 +217,12 @@ registrarVistaPlugin('dmn-trader', 'trading', {
       if (a) { this.sel = a; this.salaSel = null; this.ficha(a); return; }
       this.sel = null; this.salaSel = this.salaEn(e); this.fichaSala(this.salaSel);
     };
-    $('#trIniciar', v).onclick = async () => {
-      const b = $('#trIniciar', v); if (b.disabled) return; b.disabled = true; this.controlPendiente = true;
-      try { await api('POST', '/trading/iniciar', { modo: 'simulado', agentes: +$('#trN', v).value, mercados: $('#trMerc', v).value.split(','), hasta: $('#trHasta', v).value || null, capital: +$('#trCapital', v).value, meta: +$('#trMeta', v).value, duracionMin: +$('#trDuracion', v).value, perdidaMaxPct: +$('#trPerdida', v).value }, this.abort.signal); aviso('Autopiloto simulado: arranque confirmado'); if (this.v === v && this.ciclo === ciclo) await this.cargar(); }
-      catch (er) { if (this.v === v && this.ciclo === ciclo) aviso(er.message, true); } finally { this.controlPendiente = false; if (this.v === v && this.ciclo === ciclo) await this.cargar(); } };
     $('#trParar', v).onclick = async () => { const b = $('#trParar', v); if (b.disabled) return; b.disabled = true; try { const r = await api('POST', '/trading/parar', {}); if (r.estado !== 'parado' || !r.confirmada) throw new Error('Parada no confirmada. Reinicia APOLO si el núcleo no está actualizado.'); aviso('Parada confirmada por la central'); if (this.v === v && this.ciclo === ciclo) await this.cargar(); } catch (er) { aviso(er.message, true); } finally { b.disabled = false; } };
     this.fichaSala(null);
-    this.cargarMotor();
     await this.cargar();
     if (this.v !== v || this.ciclo !== ciclo) return;
-    this.cargarReal();   // después del mapa: el estado del piloto es pesado en el motor y en frío retrasaba el primer mapa
     let vuelta = 0;
-    clearInterval(this.t); this.t = setInterval(() => { if (document.hidden) return; if (this.tab !== 'centro') { if (++vuelta % 3 === 0) this.panel(); return; } this.cargar(); if (++vuelta % 3 === 0) { this.cargarMotor(); this.cargarReal(); } }, 5000);
+    clearInterval(this.t); this.t = setInterval(() => { if (document.hidden) return; if (this.tab !== 'centro') { if (++vuelta % 3 === 0) this.panel(); return; } this.cargar(); }, 5000);
     let ult = 0; const bucle = ts => { if (this.v !== v || this.ciclo !== ciclo) return; if (this.tab === 'centro' && ts - ult > 66) { ult = ts; this.dibujar(ts); } this.raf = requestAnimationFrame(bucle); };
     this.raf = requestAnimationFrame(bucle);
   },
@@ -252,7 +234,7 @@ registrarVistaPlugin('dmn-trader', 'trading', {
     $$('#trTabs [data-tab]', v).forEach(b => b.classList.toggle('on', b.dataset.tab === this.tab));
     $('#trVPanel', v).hidden = this.tab !== 'panel'; $('#trVCentro', v).hidden = this.tab !== 'centro';
     this.ajustarAlto();
-    if (this.tab === 'centro') { this.cargar(); this.cargarMotor(); this.cargarReal(); }
+    if (this.tab === 'centro') this.cargar();
   },
   // en Panel solo hace scroll el panel del motor: la página de APOLO no se desplaza y el marco llena el alto que queda
   ajustarAlto() {
@@ -321,11 +303,8 @@ registrarVistaPlugin('dmn-trader', 'trading', {
     if (!this.v || this.carga) return;
     const v = this.v, ciclo = this.ciclo, carga = {}; this.carga = carga;
     try {
-    const d = await api('GET', '/trading/mapa', undefined, this.abort?.signal), auto = d._autopiloto || { estado: 'no disponible' };
+    const d = await api('GET', '/trading/mapa', undefined, this.abort?.signal);
     if (this.v !== v || this.ciclo !== ciclo) return;
-    $('#trAuto', v).textContent = auto.centralActiva && auto.estado === 'parado' ? 'Enjambre activo sin supervisión de APOLO. Deténlo antes de configurar el autopiloto.' : `Autopiloto simulado: ${auto.estado}${auto.motivo ? ' · ' + auto.motivo : ''}`;
-    if (auto.contrato === 'apolo-trading/1' && !auto.capacidadCentral) $('#trAuto', v).textContent += ' · Actualiza DMN Trader para habilitar la guardia persistente.';
-    $('#trIniciar', v).disabled = !!this.controlPendiente || auto.contrato !== 'apolo-trading/1' || !auto.capacidadCentral || auto.centralActiva || ['activo', 'iniciando', 'incierto', 'parando', 'parada_no_confirmada'].includes(auto.estado);
     const ahora = performance.now() / 1000;
     for (const n of d.nodos) for (const a of n.agentes || []) {                   // burbuja cuando cambia lo último que hizo
       const k = n.nodo + ':' + a.id, prev = this.antes.get(k);
@@ -353,8 +332,6 @@ registrarVistaPlugin('dmn-trader', 'trading', {
       <div><b>${esc(a.nombre)}</b><span>${esc(a.estrategia)} · ${esc(a.marco)} · ${esc(a.nodo)}</span></div><em class="${a.r_medio > 0 ? 'ok' : 'mal'}">${a.r_medio > 0 ? '+' : ''}${a.r_medio.toFixed(2)}R</em><small>${esc(a.trades)}</small></div>`).join('')
       : `<p class="sutil">${tr('Aún sin operaciones suficientes.')}</p>`;
     $('#trTop', this.v).onclick = e => { const r = e.target.closest('[data-ag]'); if (!r) return; const [nd, id] = r.dataset.ag.split(':'); const a = todos.find(x => x.nodo === nd && x.id === +id); if (a) { this.sel = a; this.salaSel = null; this.ficha(a); } };
-    $('#trLec', this.v).innerHTML = (d.lecciones || []).slice(0, 14).map(l => `<div class="tr-l"><span class="sutil">${new Date(l.ts * 1000).toLocaleTimeString()} · ${esc(l.tipo)}</span><br>${esc(l.texto)}</div>`).join('') || `<p class="sutil">${tr('Aún sin lecciones.')}</p>`;
-    $('#trCentral', this.v).innerHTML = `<b>${tr('Central')}:</b> ${esc(d._central || '—')} · ${d.nodos.map(n => `${esc(n.nodo)} <span style="color:${n.local || n.en_linea ? '#5dff9b' : '#ff6b6b'}">●</span>`).join(' ')}`;
     this.noticias(d.analista);
     // No sobrescribir el formulario mientras el usuario prepara una configuracion.
     if (this.sel) { const a = todos.find(x => x.nodo === this.sel.nodo && x.id === this.sel.id); if (a) this.ficha(a, true); }
@@ -561,64 +538,6 @@ registrarVistaPlugin('dmn-trader', 'trading', {
       <div><small>Trades</small><b>${esc(a.trades)} <span class="sutil">(${esc(a.ganados)}✔)</span></b></div><div><small>R</small><b class="${(a.r_medio || 0) > 0 ? 'ok' : 'mal'}">${a.r_medio != null ? a.r_medio.toFixed(2) : '—'}</b></div></div>
       ${pie}<p class="tr-desc">${esc(a.estado)} · ${esc(a.ultimo || '')}</p>${extra}`;
   },
-
-  // ---------- motor (lo arranca y vigila el paquete) ----------
-  async cargarMotor() {
-    const v = this.v, el = v && $('#trMotor', v); if (!el) return;
-    let m; try { m = await accionPlugin('dmn-trader', 'trading', 'estado', {}, this.abort?.signal); } catch (e) { el.innerHTML = `<p class="mal">${esc(e.message)}</p>`; return; }
-    if (this.v !== v) return;
-    const color = { activo: 'ok', arrancando: 'neutro', parado: 'neutro' }[m.estado] || 'mal';
-    const txt = { activo: 'En marcha', arrancando: 'Arrancando…', parado: 'Parado', caido: 'Caído (se reintenta solo)', esperando: 'Esperando tu motor (8777)', sin_python: 'Falta Python', sin_numpy: 'Falta numpy' }[m.estado] || m.estado;
-    el.innerHTML = `<div class="tr-tit">${ic('ajustes')}${tr('MOTOR')}<span class="tr-sub ${color}">${tr(txt)}</span></div>
-      ${m.error ? `<p class="mal">${esc(m.error)}</p>` : ''}
-      <p class="sutil">${m.python ? 'Python ' + esc(m.python) + ' · ' : ''}${m.url ? esc(m.url) : ''}${m.datos ? '<br>' + tr('Datos') + ': ' + esc(m.datos) : ''}</p>
-      <div class="tr-bot">
-        ${m.estado === 'sin_numpy' ? `<button class="btn" data-m="instalarNumpy">${tr('Instalar numpy')}</button>` : ''}
-        <button class="btn" data-m="mesa" ${m.url ? '' : 'disabled'}>${ic('grafica')}${tr('Abrir la mesa')}</button>
-        <button class="btn fantasma" data-m="reiniciar">${tr('Reiniciar motor')}</button></div>
-      <label class="tr-lan"><input type="checkbox" id="trLan" ${m.ajustes?.lan ? 'checked' : ''}> ${tr('Permitir que otros equipos se unan (red local, con token)')}</label>
-      ${m.ajustes?.lan ? `<button class="btn fantasma mini" data-m="nodo">${tr('Datos para unir una Pi u otro PC')}</button><pre id="trNodo" class="tr-logs" hidden></pre>` : ''}
-      <details><summary class="sutil">${tr('Registro')}</summary><pre class="tr-logs">${esc((m.logs || []).join('\n'))}</pre></details>`;
-    const hacer = async (accion, datos) => { try { return await accionPlugin('dmn-trader', 'trading', accion, datos); } catch (e) { aviso(e.message, true); } finally { this.cargarMotor(); } };
-    $$('[data-m]', el).forEach(b => b.onclick = async () => {
-      b.disabled = true; const a = b.dataset.m;
-      if (a === 'mesa') { const r = await hacer('mesa'); if (r?.url) window.open(r.url, '_blank', 'noopener'); return; }
-      if (a === 'nodo') { const r = await hacer('nodo'); const p = $('#trNodo', el); if (r && p) { p.hidden = false; p.textContent = `En la Pi u otro equipo:\nDMN_TRADER_CENTRAL=${r.centrales[0] || ''}\nDMN_TRADER_CENTRAL_TOKEN=${r.token}\nDMN_TRADER_NODO=pi\n\nOtras direcciones: ${r.centrales.slice(1).join(' ') || '—'}`; } return; }
-      await hacer(a);
-    });
-    $('#trLan', el).onchange = e => hacer('ajustes', { lan: e.target.checked });
-  },
-
-  // ---------- piloto con DINERO REAL (activar/limitar pasa por el núcleo: aprobación explícita + auditoría) ----------
-  async cargarReal() {
-    const v = this.v, el = v && $('#trReal', v); if (!el) return;
-    if (el.contains(document.activeElement) && el.querySelector('input:focus')) return;   // no pisar lo que el usuario está escribiendo
-    let r, m = {}; try { [r, m] = await Promise.all([api('GET', '/trading/real', undefined, this.abort?.signal), accionPlugin('dmn-trader', 'trading', 'estado', {}, this.abort?.signal)]); }
-    catch (e) { el.innerHTML = `<div class="tr-tit">💰 ${tr('PILOTO REAL')}</div><p class="sutil">${esc(e.message)}</p>`; return; }
-    if (this.v !== v) return;
-    const L = r.limites || {}, num = (x, d = 4) => (x == null ? '—' : (+x).toFixed(d));
-    el.innerHTML = `<div class="tr-tit">💰 ${tr('PILOTO REAL · DINERO DE VERDAD')}<span class="tr-sub ${r.activo ? 'mal' : 'neutro'}">${r.activo ? tr('ACTIVO') : tr('En pausa')}</span></div>
-      <p class="sutil">${tr('Opera con TU dinero en GMGN (memecoins de Solana). Puedes perderlo. Apagado por defecto; los límites los pones tú y el pánico lo pausa.')}</p>
-      <div class="tr-fk"><div><small>${tr('Saldo')}</small><b>${num(r.saldo)} SOL</b></div><div><small>${tr('Al empezar')}</small><b>${num(r.saldoInicio)} SOL</b></div>
-        <div><small>${tr('Orden abierta')}</small><b>${r.orden ? esc(r.orden.simbolo || 'sí') : '—'}</b></div><div><small>${tr('Operaciones')}</small><b>${(r.ops || []).length}</b></div></div>
-      ${r.motivo ? `<p>${esc(r.motivo)}</p>` : ''}${r.aviso ? `<p class="sutil">${esc(r.aviso)}</p>` : ''}${r.panico ? `<p class="mal">${tr('Pánico activo: no se puede activar.')}</p>` : ''}
-      <div class="tr-ctl"><label>${tr('Clave API de GMGN')} <input id="trGmgn" type="password" autocomplete="off" placeholder="${m.gmgn ? tr('guardada (cifrada)') : tr('pégala aquí')}"></label>
-        <button class="btn fantasma mini" id="trGmgnOk">${tr('Guardar')}</button>${m.gmgn ? `<button class="btn fantasma mini" id="trGmgnNo">${tr('Quitar')}</button>` : ''}</div>
-      <div class="tr-ctl"><label>SOL ${tr('por operación')} <input id="trRop" type="number" min="0.005" max="0.1" step="0.005" value="${L.por_op_sol ?? 0.01}"></label>
-        <label>${tr('Pérdida máxima')} (SOL) <input id="trRpm" type="number" min="0.001" max="10" step="0.001" value="${L.perdida_max_sol ?? 0.008}"></label></div>
-      <div class="tr-ctl"><label>${tr('Operaciones/día')} <input id="trRod" type="number" min="1" max="50" step="1" value="${L.max_ops_dia ?? 6}"></label>
-        <label>${tr('Reserva')} (SOL) <input id="trRre" type="number" min="0" max="1" step="0.001" value="${L.reserva_sol ?? 0.005}"></label></div>
-      <label>${tr('Para activar, escribe')} <b>ACTIVO DINERO REAL</b> <input id="trRconf" autocomplete="off"></label>
-      <div class="tr-bot"><button class="btn peligro" id="trRact" ${r.panico ? 'disabled' : ''}>${r.activo ? tr('Aplicar límites') : tr('Activar con dinero real')}</button>
-        <button class="btn" id="trRpau" ${r.activo ? '' : 'disabled'}>⏸ ${tr('Pausar entradas')}</button></div>
-      <details><summary class="sutil">${tr('Últimas operaciones y registro')}</summary><pre class="tr-logs">${esc([...(r.ops || []).map(o => `${o.simbolo || ''} ${o.resultado || ''} ${o.pnl_sol ?? ''} SOL`), '', ...(r.log || []).map(x => Array.isArray(x) ? x[1] : x)].join('\n'))}</pre></details>`;
-    const real = async cuerpo => { try { await api('POST', '/trading/real', cuerpo); aviso(cuerpo.activo ? tr('Piloto real activo con esos límites') : tr('Piloto real en pausa')); } catch (e) { aviso(e.message, true); } finally { this.cargarReal(); } };
-    $('#trRpau', el).onclick = () => real({ activo: false });
-    $('#trRact', el).onclick = () => real({ activo: true, confirmacion: $('#trRconf', el).value.trim(),
-      limites: { por_op_sol: +$('#trRop', el).value, perdida_max_sol: +$('#trRpm', el).value, max_ops_dia: +$('#trRod', el).value, reserva_sol: +$('#trRre', el).value } });
-    $('#trGmgnOk', el).onclick = async () => { const c = $('#trGmgn', el).value.trim(); if (!c) return; try { await accionPlugin('dmn-trader', 'trading', 'guardarGmgn', { clave: c }); aviso(tr('Clave guardada cifrada; motor reiniciado')); } catch (e) { aviso(e.message, true); } this.cargarReal(); };
-    const no = $('#trGmgnNo', el); if (no) no.onclick = async () => { try { await accionPlugin('dmn-trader', 'trading', 'borrarGmgn'); } catch (e) { aviso(e.message, true); } this.cargarReal(); };
-  },
 });
 
 // estilos propios de la vista (una sola vez)
@@ -667,8 +586,6 @@ registrarVistaPlugin('dmn-trader', 'trading', {
   .tr-imp{display:flex;align-items:center;justify-content:center;font-weight:800;font-size:12px;border-radius:6px;height:26px;background:#1a2436}
   .tr-mc .ok{color:#3dff8a}.tr-mc .mal{color:#ff5470}.tr-mc .neutro{color:#9fb3c8}
   .tr-logs{max-height:160px;overflow:auto;font-size:11px;white-space:pre-wrap;word-break:break-word;background:#0b1220;border-radius:6px;padding:6px;margin:6px 0 0}
-  .tr-lan{display:flex;gap:6px;align-items:center;margin:8px 0;font-size:12px}
-  .tr-real{border:1px solid #ff547055}.tr-real .btn.peligro{background:#ff5470;color:#fff}
   @media (max-width:1300px){.tr-abajo{grid-template-columns:1fr 1fr}.tr-kpis{grid-template-columns:repeat(3,1fr)}.tr-cab{flex-wrap:wrap}}`;
   document.head.appendChild(st);
 })();

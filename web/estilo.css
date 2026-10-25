@@ -75,3 +75,46 @@ td button{padding:2px 7px;font-size:11px}
 .re-barra span.ar{top:-17px}.re-barra span.ab{top:13px}
 @media (max-width:700px){.re-pos{grid-template-columns:1fr}}
 #reVTok button{background:#1a2333;border:1px solid var(--borde);color:var(--tenue);border-radius:6px;padding:2px 8px;cursor:pointer}#reVTok button.activo{color:#fff;border-color:var(--verde)}
+
+/* ───── estructura: 6 secciones + subpestañas; REAL = dorado, SIM = azul ───── */
+:root{--real:#f5b942;--sim:#60a5fa;--capa:#0b0f17;--capa-1:#0b0f17;--capa-2:#162032;--txt:#e5e9f0}
+.chips{display:flex;gap:6px;flex:1;flex-wrap:wrap}
+.chip{font-size:11.5px;padding:3px 10px;border-radius:99px;border:1px solid var(--borde);color:var(--tenue);cursor:pointer;white-space:nowrap}
+.chip.on{color:var(--texto)}.chip.on:not(.real):not(.sim){border-color:var(--verde)}
+.chip.real{border-color:#4a3a14}.chip.real.on{border-color:var(--real);color:var(--real)}
+.chip.sim{border-color:#1e3a5f}.chip.sim.on{border-color:var(--sim);color:var(--sim)}
+.chip.alerta{border-color:var(--rojo);color:#fca5a5}.chip.apagado{opacity:.7}
+.pestanas button.real.on{border-bottom-color:var(--real);color:var(--real)}
+.subpestanas{display:flex;gap:4px;padding:8px 16px;background:#0e1522;border-bottom:1px solid var(--borde);overflow-x:auto}
+.subpestanas[hidden]{display:none}
+.subpestanas button{background:none;border:1px solid transparent;border-radius:99px;padding:5px 12px;color:var(--tenue);font-size:12.5px;white-space:nowrap}
+.subpestanas button.on{color:var(--texto);border-color:var(--acento);background:rgba(59,130,246,.12)}
+.subpestanas.real button.on{border-color:var(--real);background:rgba(245,185,66,.1);color:var(--real)}
+.subpestanas.sim button.on{border-color:var(--sim);background:rgba(96,165,250,.1);color:var(--sim)}
+.sello{display:inline-block;font-size:9.5px;font-weight:800;letter-spacing:.08em;border-radius:4px;padding:1px 6px;vertical-align:middle}
+.sello.real{color:#1a1203;background:var(--real)}.sello.sim{color:#06121f;background:var(--sim)}
+.zona-pag.real .panel{border-top:2px solid rgba(245,185,66,.55)}
+.zona-pag.sim .panel{border-top:2px solid rgba(96,165,250,.35)}
+.zona{border:1px solid var(--borde);border-radius:10px;padding:12px;margin-bottom:12px}
+.zona.real{border-color:rgba(245,185,66,.45);background:rgba(245,185,66,.03)}.zona.sim{border-color:rgba(96,165,250,.35);background:rgba(96,165,250,.03)}
+.zona-cab{font-weight:600;margin-bottom:10px;display:flex;gap:8px;align-items:center}
+.zona .tiles{margin-bottom:6px}.tile span.chico{display:block;margin-top:2px}
+.barra-sim{display:flex;align-items:center;gap:12px;padding:8px 16px;background:#0d1626;border-bottom:1px solid #1e3a5f}
+.decision{display:flex;gap:10px;padding:8px 0;border-bottom:1px solid #172133}.decision>span{font-size:16px}
+.decision.veta>span{filter:saturate(1.3)}
+.conex{display:flex;gap:10px;align-items:flex-start;padding:8px 0;border-bottom:1px solid #172133}.conex>span{font-size:14px;line-height:1.3}
+.mono.alto{max-height:calc(100vh - 230px)}
+/* grafo 3D (mismo módulo que la memoria de APOLO) */
+.grafo-caja{position:relative;height:calc(100vh - 230px);min-height:460px;border-radius:10px;overflow:hidden;background:var(--capa)}
+.grafo-info{position:absolute;left:12px;top:10px;z-index:2;pointer-events:none}
+.mv-3d{position:absolute;inset:0;display:block;outline:none;cursor:grab;touch-action:none;border-radius:inherit}
+.mv-etiquetas{position:absolute;inset:0;pointer-events:none;overflow:hidden;border-radius:inherit}
+.mv-etiquetas span{position:absolute;left:0;top:0;white-space:nowrap;color:var(--txt);font-weight:500;text-shadow:0 0 6px var(--capa-1),0 0 2px var(--capa-1);will-change:transform}
+.mv-etiquetas span.fuerte{font-weight:700;color:var(--verde)}
+.mv-actividad{position:absolute;left:50%;bottom:14px;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;gap:4px;pointer-events:none;max-width:70%}
+.mv-actividad div{padding:4px 12px;border-radius:99px;font-size:12px;color:var(--txt);background:var(--capa-2);border:1px solid #ff2d4a88;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;transition:opacity 1.4s}
+.mv-actividad div.fuera{opacity:0}
+.mv-aislado{position:absolute;left:50%;top:10px;transform:translateX(-50%);padding:6px 14px;border-radius:99px;border:1px solid var(--verde);background:rgba(22,32,50,.85);color:var(--txt);font-size:12.5px;font-weight:600;cursor:pointer}
+@media (max-width:700px){.chips{display:none}}
+.fila{display:flex;align-items:end}.fila label{color:var(--tenue)}.fila label input,.fila label select{margin-top:3px;color:var(--texto)}
+#reWallet a,.conex a{color:var(--sim);text-decoration:none}
