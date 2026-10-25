@@ -4,7 +4,7 @@ velas y precio con costes de DEX realistas, y el flujo del smart money (compras 
 Símbolos: 'TICKER@SOL' (las direcciones de Solana distinguen mayúsculas y el motor lo pone todo en mayúsculas, así que el
 símbolo se traduce a la dirección con un mapa guardado en la base de datos). Solo funciona en el equipo que tiene la key
 (~/.config/gmgn/.env o GMGN_API_KEY); en los demás, disponible() es False y el enjambre sigue como siempre."""
-import json, os, re, threading, time, urllib.error, urllib.parse, urllib.request, uuid
+import collections, json, os, re, threading, time, urllib.error, urllib.parse, urllib.request, uuid
 from . import db
 
 HOST = 'https://openapi.gmgn.ai'
@@ -24,6 +24,10 @@ MAPA = 'onchain_mapa'
 
 _cache, _lock = {}, threading.Lock()
 _pausa = {'hasta': 0}
+# GMGN admite ≈ 20 peticiones/s por key (x-ratelimit-limit, medido 2026-10-25: se recupera en < 1 s) y puede banear la key si
+# se abusa. Todo el motor (este cliente y gmgn-cli) comparte este cupo; las ráfagas de la fábrica o el laboratorio esperan turno.
+POR_SEG = 12
+_turnos, _turno_lock = collections.deque(), threading.Lock()
 _smart = {'ts': 0, 'trades': {}}  # tx → (ts, dirección, ±usd)
 _key = {'v': None, 'ts': 0}
 
@@ -52,9 +56,28 @@ def disponible():
     return bool(_api_key())
 
 
+def turno(espera_max=20.0):
+    """Reserva un hueco del cupo compartido; espera (como mucho espera_max s) en vez de fallar, también si GMGN pidió pausa."""
+    fin = time.time() + espera_max
+    while True:
+        with _turno_lock:
+            ahora = time.time()
+            if ahora >= _pausa['hasta']:
+                while _turnos and ahora - _turnos[0] >= 1:
+                    _turnos.popleft()
+                if len(_turnos) < POR_SEG:
+                    _turnos.append(ahora)
+                    return
+                dormir = 1 - (ahora - _turnos[0])
+            else:
+                dormir = _pausa['hasta'] - ahora
+        if time.time() + dormir > fin:
+            raise ErrorOnchain('GMGN: límite de peticiones, esperando')
+        time.sleep(min(dormir, 1) + 0.01)
+
+
 def _api(ruta, **q):
-    if time.time() < _pausa['hasta']:
-        raise ErrorOnchain('GMGN: límite de peticiones, esperando')
+    turno()
     k = _api_key()
     if not k:
         raise ErrorOnchain('GMGN: sin API key en este equipo')

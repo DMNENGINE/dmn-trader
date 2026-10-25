@@ -28,6 +28,11 @@ def _cli(*args, timeout=25, preflight=None):
     if opcion('--chain') != 'sol':
         raise ValueError('cadena GMGN no admitida por este piloto')
     def enviar():
+        try:
+            onchain.turno(espera_max=5)  # antes de la validación previa: así valida con datos de justo antes del envío
+        except onchain.ErrorOnchain:
+            from .presupuesto_gmgn import EntradaNoEnviada
+            raise EntradaNoEnviada('GMGN: límite de peticiones; no se envió') from None
         if preflight is not None:
             try:
                 preflight()
@@ -36,11 +41,13 @@ def _cli(*args, timeout=25, preflight=None):
                 if isinstance(ex,EntradaNoEnviada):
                     raise
                 raise EntradaNoEnviada('no se confirma validacion previa: '+type(ex).__name__) from None
-        return _cli_directo(*args, timeout=timeout)
+        return _cli_directo(*args, timeout=timeout, turno=False)
     return ejecutor.ejecutar('gmgn-sol', opcion('--from'), enviar)
 
 
-def _cli_directo(*args, timeout=25):
+def _cli_directo(*args, timeout=25, turno=True):
+    if turno:
+        onchain.turno()
     exe = shutil.which('gmgn-cli')
     r = subprocess.run([exe, *args, '--raw'], capture_output=True, text=True, encoding='utf-8', timeout=timeout,
                        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
