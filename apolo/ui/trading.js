@@ -210,8 +210,8 @@ registrarVistaPlugin('dmn-trader', 'trading', {
           <p class="tr-central" id="trCentral"></p></div>
         <div class="tr-card"><div class="tr-tit">${ic('trofeo')}${tr('MEJORES AGENTES')}</div><div id="trTop"></div></div>
         <div class="tr-card"><div class="tr-tit">${tr('LECCIONES')}</div><div id="trLec" class="tr-lec"></div></div>
-        <div class="tr-card" id="trMotor"></div>
-        <div class="tr-card tr-real" id="trReal"></div>
+        <div class="tr-card" id="trMotor"><div class="tr-tit">${ic('ajustes')}${tr('MOTOR')}</div><p class="sutil">${tr('Cargando…')}</p></div>
+        <div class="tr-card tr-real" id="trReal"><div class="tr-tit">💰 ${tr('PILOTO REAL')}</div><p class="sutil">${tr('Cargando…')}</p></div>
       </div></div>`;
     this.cv = $('#trCanvas', v); this.c = this.cv.getContext('2d'); this.c.imageSmoothingEnabled = false;
     this.cv.onmousemove = e => this.raton(e); this.cv.onmouseleave = () => { $('#trTip', v).hidden = true; };
@@ -226,9 +226,10 @@ registrarVistaPlugin('dmn-trader', 'trading', {
       catch (er) { if (this.v === v && this.ciclo === ciclo) aviso(er.message, true); } finally { this.controlPendiente = false; if (this.v === v && this.ciclo === ciclo) await this.cargar(); } };
     $('#trParar', v).onclick = async () => { const b = $('#trParar', v); if (b.disabled) return; b.disabled = true; try { const r = await api('POST', '/trading/parar', {}); if (r.estado !== 'parado' || !r.confirmada) throw new Error('Parada no confirmada. Reinicia APOLO si el núcleo no está actualizado.'); aviso('Parada confirmada por la central'); if (this.v === v && this.ciclo === ciclo) await this.cargar(); } catch (er) { aviso(er.message, true); } finally { b.disabled = false; } };
     this.fichaSala(null);
-    this.cargarMotor(); this.cargarReal();
+    this.cargarMotor();
     await this.cargar();
     if (this.v !== v || this.ciclo !== ciclo) return;
+    this.cargarReal();   // después del mapa: el estado del piloto es pesado en el motor y en frío retrasaba el primer mapa
     let vuelta = 0;
     clearInterval(this.t); this.t = setInterval(() => { if (document.hidden) return; this.cargar(); if (++vuelta % 3 === 0) { this.cargarMotor(); this.cargarReal(); } }, 5000);
     let ult = 0; const bucle = ts => { if (this.v !== v || this.ciclo !== ciclo) return; if (ts - ult > 66) { ult = ts; this.dibujar(ts); } this.raf = requestAnimationFrame(bucle); };
