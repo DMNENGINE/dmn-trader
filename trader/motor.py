@@ -3,7 +3,7 @@
 Gestión de riesgo: % de riesgo por operación, pérdida diaria máxima (bloquea la cuenta hasta mañana), máximo de posiciones,
 apalancamiento, stop obligatorio opcional. Cada operación cerrada queda en el diario con su R, MFE/MAE y notas.
 Cuentas "replay": practicar sobre velas históricas avanzando vela a vela, sin ver el futuro."""
-import json, threading, time, uuid
+import json, threading, time, uuid, math
 from . import datos, db, metricas, onchain
 
 _cerrojos, _cerrojo_g = {}, threading.Lock()
@@ -27,6 +27,52 @@ class ErrorOrden(Exception):
     pass
 
 
+def _numero(valor, nombre, cero=False):
+    if isinstance(valor, bool):
+        raise ErrorOrden(nombre + ' debe ser un numero finito')
+    try:
+        n = float(valor)
+    except (ValueError, TypeError, OverflowError):
+        raise ErrorOrden(nombre + ' debe ser un numero finito')
+    if not math.isfinite(n) or n < 0 or (not cero and n == 0):
+        raise ErrorOrden(nombre + ' fuera de rango')
+    return n
+
+
+def _validar_config(cfg):
+    for k, defecto in CONFIG_DEFECTO.items():
+        valor = cfg[k]
+        if isinstance(defecto, bool):
+            if not isinstance(valor, bool):
+                raise ErrorOrden(k + ' debe ser booleano')
+        elif isinstance(defecto, (int, float)):
+            cfg[k] = _numero(valor, k, cero=k in ('comision_fija', 'comision_pct', 'deslizamiento_pct', 'perdida_diaria_max_pct'))
+            if isinstance(defecto, int) and cfg[k] != int(cfg[k]):
+                raise ErrorOrden(k + ' debe ser entero')
+        elif k == 'comision_por_tipo':
+            if not isinstance(valor, dict):
+                raise ErrorOrden(k + ' debe ser objeto')
+            cfg[k] = {t: _numero(n, 'comision', cero=True) for t, n in valor.items()}
+    return cfg
+
+
+def _reservado(cid, excluir=None):
+    total = 0.0
+    c = _fila(cid)
+    for o in db.q("SELECT * FROM ordenes WHERE cuenta_id=? AND reduce=0 AND padre_id IS NULL AND estado='pendiente'", (cid,)):
+        if o['id'] == excluir:
+            continue
+        # Se persiste el precio de referencia en trail_ref para las entradas sin limite.
+        ref = o['limite'] or o['stop'] or o['trail_ref']
+        if not ref:
+            raise ErrorOrden('orden antigua sin reserva verificable: cancela o concilia antes de abrir')
+        b = barra(c, o['simbolo'])
+        fx = _fx(c, b.get('moneda'))
+        cfg = c['config']
+        total += o['cantidad'] * ref * fx * (1 + max([cfg['comision_pct'], onchain.COMISION_PCT if b.get('tipo_activo') == 'ONCHAIN' else 0, *(cfg.get('comision_por_tipo') or {}).values()]) / 100) + cfg['comision_fija']
+    return total
+
+
 def ahora():
     return int(time.time())
 
@@ -38,9 +84,9 @@ def hoy():
 
 
 def crear_cuenta(nombre, capital=10000, moneda='USD', config=None, tipo='simulada', replay=None):
-    cfg = {**CONFIG_DEFECTO, **(config or {})}
+    cfg = _validar_config({**CONFIG_DEFECTO, **(config or {})})
     tipo = 'replay' if replay else tipo
-    capital = float(capital)
+    capital = _numero(capital, 'capital')
     if capital <= 0:
         raise ErrorOrden('el capital tiene que ser positivo')
     cid = db.ex('INSERT INTO cuentas(nombre,tipo,moneda,capital_inicial,efectivo,creada,config) VALUES(?,?,?,?,?,?,?)',
@@ -63,13 +109,13 @@ def _fila(cid):
     c = db.uno('SELECT * FROM cuentas WHERE id=?', (cid,))
     if not c:
         raise ErrorOrden(f'no existe la cuenta {cid}')
-    c['config'] = {**CONFIG_DEFECTO, **json.loads(c['config'] or '{}')}
+    c['config'] = _validar_config({**CONFIG_DEFECTO, **json.loads(c['config'] or '{}')})
     return c
 
 
 def configurar(cid, cambios):
     c = _fila(cid)
-    cfg = {**c['config'], **{k: v for k, v in cambios.items() if k in CONFIG_DEFECTO}}
+    cfg = _validar_config({**c['config'], **{k: v for k, v in cambios.items() if k in CONFIG_DEFECTO}})
     db.ex('UPDATE cuentas SET config=? WHERE id=?', (json.dumps(cfg), cid))
     if 'nombre' in cambios:
         db.ex('UPDATE cuentas SET nombre=? WHERE id=?', (cambios['nombre'], cid))
@@ -122,10 +168,7 @@ def precio(c, simbolo):
 def _fx(c, moneda):
     if c['tipo'] == 'replay' or not moneda:
         return 1.0
-    try:
-        return datos.fx(moneda, c['moneda'])
-    except datos.ErrorDatos:
-        return 1.0
+    return _numero(datos.fx(moneda, c['moneda']), 'tipo de cambio')
 
 
 def _reloj(c):
@@ -210,7 +253,7 @@ def _control_dia(c, eq):
     if lim and c['equity_inicio_dia'] and (eq / c['equity_inicio_dia'] - 1) * 100 <= -lim:
         if c['bloqueada_hasta'] != hoy():
             db.ex('UPDATE cuentas SET bloqueada_hasta=? WHERE id=?', (hoy(), c['id']))
-            avisar(c, f'🛑 Cuenta «{c["nombre"]}» bloqueada hasta mañana: pérdida diaria de {lim}% alcanzada.')
+            avisos.append(f'🛑 Cuenta «{c["nombre"]}» bloqueada hasta mañana: pérdida diaria de {lim}% alcanzada.')
         return True
     return c['bloqueada_hasta'] == hoy()
 
@@ -244,7 +287,12 @@ def enviar(cid, *a, **k):
 
 
 def _enviar(cid, simbolo, lado, cantidad=None, tipo='mercado', limite=None, stop=None, trail_pct=None,
-           sl=None, tp=None, importe=None, nota=None, setup=None, origen='manual', oco=None, padre_id=None, reduce=False):
+           sl=None, tp=None, importe=None, nota=None, setup=None, origen='manual', oco=None, padre_id=None, reduce=False, _barra=None, _procesar_ahora=True):
+    from . import guardia
+    try:
+        guardia.admitir(cid, reduce)
+    except ValueError as e:
+        raise ErrorOrden(str(e))
     c = _fila(cid)
     simbolo, lado, tipo = simbolo.strip().upper(), lado.lower(), tipo.lower()
     lado = {'compra': 'buy', 'comprar': 'buy', 'buy': 'buy', 'long': 'buy', 'venta': 'sell', 'vender': 'sell', 'sell': 'sell', 'short': 'sell'}.get(lado)
@@ -252,8 +300,17 @@ def _enviar(cid, simbolo, lado, cantidad=None, tipo='mercado', limite=None, stop
         raise ErrorOrden('lado inválido: usa compra o venta')
     if tipo not in TIPOS:
         raise ErrorOrden(f'tipo inválido: {", ".join(TIPOS)}')
-    b = barra(c, simbolo)
-    ref = float(limite or stop or b['c'])
+    cantidad = _numero(cantidad, 'cantidad') if cantidad not in (None, '') else None
+    limite = _numero(limite, 'limite') if limite is not None else None
+    stop = _numero(stop, 'stop') if stop is not None else None
+    trail_pct = _numero(trail_pct, 'trailing') if trail_pct is not None else None
+    sl = _numero(sl, 'stop-loss') if sl is not None else None
+    tp = _numero(tp, 'take-profit') if tp is not None else None
+    importe = _numero(importe, 'importe') if importe is not None else None
+    if trail_pct is not None and trail_pct >= 100:
+        raise ErrorOrden('trailing debe ser menor de 100')
+    b = _barra if _barra is not None else barra(c, simbolo)
+    ref = _numero(limite or stop or b['c'], 'precio')
     if cantidad in (None, '', 0) and importe:
         cantidad = float(importe) / (ref * _fx(c, b.get('moneda')))
     cantidad = float(cantidad or 0)
@@ -277,7 +334,9 @@ def _enviar(cid, simbolo, lado, cantidad=None, tipo='mercado', limite=None, stop
             raise ErrorOrden('cuenta bloqueada por pérdida diaria máxima: hoy ya no se abren operaciones (regla de riesgo)')
         if signo < 0 and actual <= 0 and not cfg['permitir_cortos']:
             raise ErrorOrden('los cortos están desactivados en esta cuenta')
-        if not pos and r['posiciones_abiertas'] >= cfg['max_posiciones']:
+        pendientes = {o['simbolo'] for o in db.q("SELECT simbolo FROM ordenes WHERE cuenta_id=? AND reduce=0 AND estado='pendiente'", (cid,))}
+        existentes = {p['simbolo'] for p in posiciones(cid, False)}
+        if simbolo not in existentes | pendientes and len(existentes | pendientes) >= cfg['max_posiciones']:
             raise ErrorOrden(f'máximo de {cfg["max_posiciones"]} posiciones abiertas')
         protegida = pos and (actual > 0) == (signo > 0) and db.uno(  # ampliar (DCA) una posición que ya tiene su stop puesto
             "SELECT 1 FROM ordenes WHERE cuenta_id=? AND simbolo=? AND reduce=1 AND tipo IN ('stop','trailing') AND estado='pendiente'", (cid, simbolo))
@@ -297,25 +356,28 @@ def _enviar(cid, simbolo, lado, cantidad=None, tipo='mercado', limite=None, stop
                 avisos.append(msg)
         else:
             avisos.append('entrada sin stop-loss: un profesional siempre sabe dónde se sale')
-        nuevo = cantidad * ref * fx
+        reservado = _reservado(cid)
+        nuevo = cantidad * ref * fx * (1 + max([cfg['comision_pct'], onchain.COMISION_PCT if b.get('tipo_activo') == 'ONCHAIN' else 0, *(cfg.get('comision_por_tipo') or {}).values()]) / 100) + cfg['comision_fija']
+        r['poder_compra'] = max(0, r['poder_compra'] - reservado)
         if nuevo > r['poder_compra'] + 0.01 and not (actual and (actual > 0) != (signo > 0)):
             raise ErrorOrden(f'sin poder de compra: necesitas {nuevo:.2f} y tienes {r["poder_compra"]:.2f} {c["moneda"]}')
         if sl and tp and ((signo > 0 and float(tp) <= ref) or (signo < 0 and float(tp) >= ref)):
             raise ErrorOrden('el take-profit está del lado equivocado')
     t = _reloj(c)
-    oid = db.ex("""INSERT INTO ordenes(cuenta_id,simbolo,lado,tipo,cantidad,limite,stop,trail_pct,trail_ref,estado,creada,padre_id,oco,reduce,nota,setup,origen,sl,tp)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (cid, simbolo, lado, tipo, cantidad, limite, stop, trail_pct, b['c'] if tipo == 'trailing' else None,
-                 'espera' if padre_id else 'pendiente', t, padre_id, oco, 1 if reduce else 0, nota, setup, origen, sl, tp))
-    if not padre_id and (sl or tp):
-        grupo = uuid.uuid4().hex[:8]
-        lado_h = 'sell' if signo > 0 else 'buy'
-        if sl:
-            enviar(cid, simbolo, lado_h, cantidad, 'stop', stop=float(sl), padre_id=oid, oco=grupo, reduce=True, origen=origen)
-        if tp:
-            enviar(cid, simbolo, lado_h, cantidad, 'limite', limite=float(tp), padre_id=oid, oco=grupo, reduce=True, origen=origen)
+    with db.transaccion():
+        oid = db.ex("""INSERT INTO ordenes(cuenta_id,simbolo,lado,tipo,cantidad,limite,stop,trail_pct,trail_ref,estado,creada,padre_id,oco,reduce,nota,setup,origen,sl,tp)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (cid, simbolo, lado, tipo, cantidad, limite, stop, trail_pct, b['c'] if tipo == 'trailing' else ref,
+                     'espera' if padre_id else 'pendiente', t, padre_id, oco, 1 if reduce else 0, nota, setup, origen, sl, tp))
+        if not padre_id and (sl or tp):
+            grupo = uuid.uuid4().hex[:8]
+            lado_h = 'sell' if signo > 0 else 'buy'
+            if sl:
+                enviar(cid, simbolo, lado_h, cantidad, 'stop', stop=float(sl), padre_id=oid, oco=grupo, reduce=True, origen=origen, _barra=b)
+            if tp:
+                enviar(cid, simbolo, lado_h, cantidad, 'limite', limite=float(tp), padre_id=oid, oco=grupo, reduce=True, origen=origen, _barra=b)
     if not padre_id:
-        if c['tipo'] != 'replay':
+        if c['tipo'] != 'replay' and _procesar_ahora:
             procesar(cid, [simbolo])
         if not b.get('abierto', True) and tipo == 'mercado':
             avisos.append('mercado cerrado: la orden se ejecutará en la apertura')
@@ -325,6 +387,11 @@ def _enviar(cid, simbolo, lado, cantidad=None, tipo='mercado', limite=None, stop
 
 
 def cancelar(cid, oid):
+    with _cerrojo(cid), db.transaccion():
+        return _cancelar(cid, oid)
+
+
+def _cancelar(cid, oid):
     o = db.uno('SELECT * FROM ordenes WHERE id=? AND cuenta_id=?', (oid, cid))
     if not o or o['estado'] not in ('pendiente', 'espera'):
         raise ErrorOrden('esa orden no está pendiente')
@@ -333,18 +400,38 @@ def cancelar(cid, oid):
 
 
 def cerrar(cid, simbolo, porcentaje=100, nota=None):
+    with _cerrojo(cid):
+        return _cerrar(cid, simbolo, porcentaje, nota)
+
+
+def _cerrar(cid, simbolo, porcentaje=100, nota=None):
     simbolo = simbolo.upper()
     p = db.uno('SELECT * FROM posiciones WHERE cuenta_id=? AND simbolo=?', (cid, simbolo))
     if not p:
         raise ErrorOrden(f'no hay posición en {simbolo}')
-    qty = abs(p['cantidad']) * float(porcentaje) / 100
+    porcentaje = _numero(porcentaje, 'porcentaje')
+    if porcentaje > 100:
+        raise ErrorOrden('porcentaje debe ser menor o igual a 100')
+    qty = abs(p['cantidad']) * porcentaje / 100
     if float(porcentaje) >= 100:
-        db.ex("UPDATE ordenes SET estado='cancelada', motivo='posición cerrada a mano' WHERE cuenta_id=? AND simbolo=? AND reduce=1 AND estado IN ('pendiente','espera')",
-              (cid, simbolo))
+        pendiente = db.uno("SELECT * FROM ordenes WHERE cuenta_id=? AND simbolo=? AND reduce=1 AND tipo='mercado' AND estado IN ('pendiente','espera') AND cantidad>=? ORDER BY id LIMIT 1", (cid, simbolo, qty - EPS))
+        if pendiente:
+            return pendiente
+    # Las protecciones siguen hasta el cierre efectivo; _llenar cancela las hermanas al quedar plana.
     return enviar(cid, simbolo, 'sell' if p['cantidad'] > 0 else 'buy', qty, 'mercado', reduce=True, nota=nota or 'cierre manual')
 
 
 def mover_stop(cid, simbolo, stop=None, objetivo=None, trail_pct=None):
+    # Preparar datos antes de retirar la proteccion; el resto se revierte ante error.
+    with _cerrojo(cid):
+        c = _fila(cid)
+        b = barra(c, simbolo.upper())
+        fx = _fx(c, b.get('moneda'))
+        with db.transaccion():
+            return _mover_stop(cid, simbolo, stop, objetivo, trail_pct, b, fx)
+
+
+def _mover_stop(cid, simbolo, stop=None, objetivo=None, trail_pct=None, b=None, fx=1.0):
     """Pone o mueve el stop-loss / objetivo de una posición abierta (p. ej. stop a breakeven)."""
     simbolo = simbolo.upper()
     p = db.uno('SELECT * FROM posiciones WHERE cuenta_id=? AND simbolo=?', (cid, simbolo))
@@ -355,20 +442,20 @@ def mover_stop(cid, simbolo, stop=None, objetivo=None, trail_pct=None):
         t = db.uno('SELECT * FROM trades WHERE id=?', (p['trade_id'],))
         if t and not t['riesgo']:
             db.ex('UPDATE trades SET stop_inicial=?, riesgo=? WHERE id=?',
-                  (float(stop), abs(p['cantidad']) * abs(p['precio_medio'] - float(stop)) * _fx(_fila(cid), p['moneda']), t['id']))
+                  (float(stop), abs(p['cantidad']) * abs(p['precio_medio'] - float(stop)) * fx, t['id']))
     grupo = (db.uno("SELECT oco FROM ordenes WHERE cuenta_id=? AND simbolo=? AND reduce=1 AND estado='pendiente' AND oco IS NOT NULL", (cid, simbolo)) or {}).get('oco') \
         or uuid.uuid4().hex[:8]
     if stop is not None or trail_pct:
         db.ex("UPDATE ordenes SET estado='cancelada', motivo='stop movido' WHERE cuenta_id=? AND simbolo=? AND reduce=1 AND estado='pendiente' AND tipo IN ('stop','trailing')", (cid, simbolo))
         if trail_pct:
-            enviar(cid, simbolo, lado, abs(p['cantidad']), 'trailing', trail_pct=float(trail_pct), reduce=True, oco=grupo)
+            enviar(cid, simbolo, lado, abs(p['cantidad']), 'trailing', trail_pct=float(trail_pct), reduce=True, oco=grupo, _barra=b, _procesar_ahora=False)
         elif stop:
-            enviar(cid, simbolo, lado, abs(p['cantidad']), 'stop', stop=float(stop), reduce=True, oco=grupo)
+            enviar(cid, simbolo, lado, abs(p['cantidad']), 'stop', stop=float(stop), reduce=True, oco=grupo, _barra=b, _procesar_ahora=False)
     if objetivo is not None:
         db.ex("UPDATE ordenes SET estado='cancelada', motivo='objetivo movido' WHERE cuenta_id=? AND simbolo=? AND reduce=1 AND estado='pendiente' AND tipo='limite'", (cid, simbolo))
         if objetivo:
-            enviar(cid, simbolo, lado, abs(p['cantidad']), 'limite', limite=float(objetivo), reduce=True, oco=grupo)
-    return posiciones(cid)
+            enviar(cid, simbolo, lado, abs(p['cantidad']), 'limite', limite=float(objetivo), reduce=True, oco=grupo, _barra=b, _procesar_ahora=False)
+    return posiciones(cid, False)
 
 # ---------------- ejecución ----------------
 
@@ -406,6 +493,26 @@ def _precio_ejecucion(o, b, slip):
 
 
 def _llenar(c, o, px, ts, moneda, tipo_activo=None):
+    px = _numero(px, 'precio de ejecucion')
+    fx = _fx(c, moneda)
+    # Cotizaciones y reservas se consultan antes de abrir la transaccion SQLite.
+    r = resumen(c['id']) if not o['reduce'] else None
+    disponible = r['poder_compra'] - _reservado(c['id'], o['id']) if r else None
+    if r and _control_dia(c, r['equity']):
+        cancelar(c['id'], o['id'])
+        return False
+    avisos = []
+    with db.transaccion():
+        actual = db.uno('SELECT * FROM ordenes WHERE id=?', (o['id'],))
+        if not actual or actual['estado'] != 'pendiente':
+            return False
+        resultado = _llenar_guardado(_fila(c['id']), actual, px, ts, moneda, tipo_activo, fx, disponible, avisos, r['equity'] if r else None)
+    for texto in avisos:
+        avisar(c, texto)
+    return resultado
+
+
+def _llenar_guardado(c, o, px, ts, moneda, tipo_activo=None, fx=1.0, disponible=None, avisos=None, equity=None):
     cid, sym = c['id'], o['simbolo']
     cfg = c['config']
     p = db.uno('SELECT * FROM posiciones WHERE cuenta_id=? AND simbolo=?', (cid, sym))
@@ -417,9 +524,23 @@ def _llenar(c, o, px, ts, moneda, tipo_activo=None):
             return
         if abs(q) >= abs(actual) - EPS:
             q = -actual
-    fx = _fx(c, moneda or (p or {}).get('moneda'))
     pct = (cfg.get('comision_por_tipo') or {}).get(tipo_activo or '', onchain.COMISION_PCT if tipo_activo == 'ONCHAIN' else cfg['comision_pct'])
     com = cfg['comision_fija'] + abs(q) * px * fx * pct / 100
+    if not o['reduce'] and (not actual or (actual > 0) == (q > 0) or abs(q) > abs(actual)):
+        if abs(q) * px * fx + com > disponible + 0.001:
+            db.ex("UPDATE ordenes SET estado='cancelada', motivo='capital insuficiente al ejecutar' WHERE id=? OR (padre_id=? AND estado='espera')", (o['id'], o['id']))
+            return False
+    if not o['reduce'] and o['sl'] and (not actual or (actual > 0) == (q > 0)):
+        sl = _numero(o['sl'], 'stop-loss')
+        if (q > 0 and sl >= px) or (q < 0 and sl <= px) or (cfg['riesgo_estricto'] and abs(q) * abs(px-sl) * fx > max(0, equity) * cfg['riesgo_max_pct'] / 100 + .001):
+            db.ex("UPDATE ordenes SET estado='cancelada', motivo='stop o riesgo invalido al ejecutar' WHERE id=? OR (padre_id=? AND estado='espera')", (o['id'], o['id']))
+            return False
+    from . import guardia
+    try:
+        guardia.admitir(cid, o['reduce'])
+    except ValueError:
+        db.ex("UPDATE ordenes SET estado='cancelada', motivo='guardia del enjambre' WHERE id=?", (o['id'],))
+        return
     db.ex('UPDATE cuentas SET efectivo=efectivo-? WHERE id=?', (q * px * fx + com, cid))
     pnl = 0.0
     nuevo = actual + q
@@ -452,7 +573,7 @@ def _llenar(c, o, px, ts, moneda, tipo_activo=None):
             db.ex('DELETE FROM posiciones WHERE cuenta_id=? AND simbolo=?', (cid, sym))
             db.ex("UPDATE ordenes SET estado='cancelada', motivo='posición cerrada' WHERE cuenta_id=? AND simbolo=? AND reduce=1 AND estado IN ('pendiente','espera') AND id<>?",
                   (cid, sym, o['id']))
-            avisar(c, f'{"✅" if neto > 0 else "❌"} {sym} cerrado: {neto:+.2f} {c["moneda"]}' + (f' ({neto / t["riesgo"]:+.2f}R)' if t['riesgo'] else ''))
+            avisos.append(f'{"✅" if neto > 0 else "❌"} {sym} cerrado: {neto:+.2f} {c["moneda"]}' + (f' ({neto / t["riesgo"]:+.2f}R)' if t['riesgo'] else ''))
             if nuevo != 0:  # vuelta: abre la parte sobrante en sentido contrario
                 tid = db.ex("INSERT INTO trades(cuenta_id,simbolo,direccion,estado,abierto,cantidad,entrada,comisiones,mfe,mae) VALUES(?,?,?,?,?,?,?,?,0,0)",
                             (cid, sym, 'largo' if nuevo > 0 else 'corto', 'abierto', ts, abs(nuevo), px, 0))
@@ -470,6 +591,7 @@ def _llenar(c, o, px, ts, moneda, tipo_activo=None):
     pos_tras = db.uno('SELECT cantidad FROM posiciones WHERE cuenta_id=? AND simbolo=?', (cid, sym))
     if pos_tras:  # tras ampliar o reducir, los stops/objetivos cubren la posición entera
         db.ex("UPDATE ordenes SET cantidad=? WHERE cuenta_id=? AND simbolo=? AND reduce=1 AND estado='pendiente'", (abs(pos_tras['cantidad']), cid, sym))
+    return True
 
 
 def procesar(cid, simbolos=None):
@@ -502,8 +624,8 @@ def _procesar(cid, simbolos=None):
             b = dict(b, o=b['c'], h=b['c'], l=b['c'])
         px = _precio_ejecucion(o, b, slip)
         if px is not None:
-            _llenar(c, o, px, b['t'], b.get('moneda'), b.get('tipo_activo'))
-            n += 1
+            if _llenar(c, o, px, b['t'], b.get('moneda'), b.get('tipo_activo')):
+                n += 1
     for p in db.q('SELECT * FROM posiciones WHERE cuenta_id=?', (cid,)):  # MFE / MAE: lo mejor y lo peor que llegó a ir
         try:
             b = barras.get(p['simbolo']) or barra(c, p['simbolo'])

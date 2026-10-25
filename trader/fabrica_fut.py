@@ -148,7 +148,7 @@ def stats_usd(r):
 def evaluar(e, D, desde=None):
     ops = fabrica.simular(e, D, con_idx=True)
     u = usd(e, D, ops)
-    tr = [x for o, x in zip(ops, u) if o[0] < D.corte]
+    tr = [x for o, x in zip(ops, u) if o[0] + e['hold'] * BARRA < D.corte]
     te = [x for o, x in zip(ops, u) if o[0] >= D.corte]
     vi = [x for o, x in zip(ops, u) if desde and o[0] >= desde]
     return {'entreno': stats_usd(tr), 'prueba': stats_usd(te), 'vivo': stats_usd(vi), 'todo': stats_usd(u)}
@@ -165,6 +165,8 @@ def promovidas(D=None):
         D_ = D or Datos()
         out = []
         for e in _candidatas():
+            if not str(e['id']).startswith('FM') and e.get('version') != fabrica.version(e):
+                continue
             ev = evaluar(e, D_, e['desde'])
             v = ev['vivo']
             if v['n'] >= PROMO['vivo_n'] and (v['medio'] or 0) >= PROMO['vivo_usd'] and (v['gana_pct'] or 0) >= PROMO['vivo_gana'] and (ev['prueba']['medio'] or 0) > 0:

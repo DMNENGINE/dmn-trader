@@ -87,7 +87,9 @@
       <p class="tenue chico">Muchos agentes operan solos con microoperaciones simuladas. Cada pérdida pasa una autopsia con su arreglo; al quebrar, cada agente prueba soluciones en datos reales; cada 2 h el 20 % peor se reemplaza por hijos de los mejores; lo que pierde para todos se bloquea para todos.</p>
       <div class="fila2"><div><small class="tenue">Agentes por equipo (0 = parado)</small><div id="agPorNodo" class="fila2"></div></div><label>Mercados <select id="agMerc"><option value="cripto,acciones,futuros">Cripto + acciones + futuros</option><option value="cripto,acciones">Cripto + acciones</option><option value="futuros">Solo futuros</option><option value="cripto">Solo cripto</option><option value="acciones">Solo acciones</option></select></label></div>
       <div class="fila2"><label>Cada uno empieza con ($) <input id="agCap" type="number" step="any" value="1"></label><label>Meta ($) <input id="agMeta" type="number" step="any" value="100"></label></div>
-      <label>Hasta (hora, vacío = sin fin) <input id="agHasta" placeholder="07:00"></label>
+      <label>Hasta (hora local de la central) <input id="agHasta" placeholder="07:00"></label>
+      <div class="fila2"><label>Duración máxima (min) <input id="agDuracion" type="number" min="1" max="1440" value="60"></label><label>Pérdida acumulada máxima (%) <input id="agPerdida" type="number" min="0.1" max="100" step="0.1" value="10"></label></div>
+      <p class="tenue">Enjambre simulado. La guardia del servidor conserva los límites aunque APOLO se cierre. Detén una sesión supervisada antes de cambiar su plan.</p>
       <div class="fila2"><button id="agIniciar" class="enviar">▶ Empezar / redimensionar</button><button id="agParar" class="enviar venta">⏹ Parar todos</button></div>
       <div id="agMsg" class="msg"></div>
     </div>

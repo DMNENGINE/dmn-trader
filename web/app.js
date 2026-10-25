@@ -277,7 +277,8 @@ $('#btnBT').onclick = async () => { msg('#bMsg', 'calculando…', true);
     const dedup = arr => { const s = new Set(); return arr.filter(p => !s.has(p.t) && s.add(p.t)).map(p => ({ time: p.t, value: p.v })); };
     gBT.a.setData(dedup(r.curva)); gBT.b.setData(r.referencia ? dedup(r.referencia.curva) : []); gBT.timeScale().fitContent();
     const mc = r.montecarlo; $('#btMC').innerHTML = mc ? `Drawdown mediano <b>${mc.dd_mediano}%</b> · en el 5 % peor de los casos <b>${mc.dd_95}%</b> · peor <b>${mc.dd_peor}%</b><br>
-      Capital final: 5 % peor <b>${n(mc.final_5)}</b> · mediano <b>${n(mc.final_mediano)}</b><br>Probabilidad de acabar perdiendo: <b>${mc.prob_perdida}%</b>` : '<span class="tenue">Pocos trades para Monte Carlo.</span>';
+      Permutación del orden de los mismos trades: mide drawdown; no estima la probabilidad de beneficio futuro.
+      ${r.bootstrap ? `<br>Remuestreo por bloques: capital final percentiles 5–95 <b>${n(r.bootstrap.final_5)}–${n(r.bootstrap.final_95)}</b>. Condicional al historial, sin garantía de rentabilidad.` : ''}` : '<span class="tenue">Pocos trades para Monte Carlo.</span>';
     $('#btTrades').innerHTML = tabla([['Entrada', x => fecha(x.entrada_t)], ['Salida', x => fecha(x.salida_t)], ['Lado', x => x.lado], ['Precio ent.', x => np(x.entrada)], ['Precio sal.', x => np(x.salida)], ['P&L', x => sg(x.pnl)], ['R', x => x.r != null ? sg(x.r) : '—'], ['Motivo', x => x.motivo]], r.lista_trades.slice().reverse());
   } catch (e) { msg('#bMsg', e.message); } };
 $('#btnOpt').onclick = async () => { const rangos = {}; $$('[data-rango]').forEach(i => rangos[i.dataset.rango] = i.value.split(',').map(Number).filter(x => !isNaN(x)));
@@ -352,13 +353,13 @@ $('#agIniciar').onclick = async () => { try {
   const hecho = [];
   for (const i of $('#agPorNodo').querySelectorAll('input')) {
     const nodo = i.dataset.nodo, k = +i.value;
-    if (k > 0) await api('/enjambre/iniciar', 'POST', { nodo, agentes: k, capital: +$('#agCap').value, meta: +$('#agMeta').value, hasta: $('#agHasta').value || null, mercados: $('#agMerc').value.split(',') });
+    if (k > 0) await api('/enjambre/iniciar', 'POST', { nodo, modo: 'simulado', agentes: k, capital: +$('#agCap').value, meta: +$('#agMeta').value, hasta: $('#agHasta').value || null, mercados: $('#agMerc').value.split(','), duracionMin: +$('#agDuracion').value, perdidaMaxPct: +$('#agPerdida').value });
     else await api('/enjambre/parar', 'POST', { nodo });
     hecho.push(`${nodo}: ${k || 'parado'}`);
   }
   msg('#agMsg', hecho.join(' · ') + ' (los otros equipos lo aplican en ≤ 10 s)', true); setTimeout(cargarAgente, 1500); } catch (e) { msg('#agMsg', e.message); } };
 $('#agParar').onclick = async () => { try { for (const i of $('#agPorNodo').querySelectorAll('input')) { await api('/enjambre/parar', 'POST', { nodo: i.dataset.nodo }); i.value = 0; }
-  msg('#agMsg', 'Parados todos.', true); cargarAgente(); } catch (e) { msg('#agMsg', e.message); } };
+  msg('#agMsg', 'Parada solicitada a todos los nodos. Comprueba su estado: una orden remota pendiente no confirma la parada.', true); cargarAgente(); } catch (e) { msg('#agMsg', e.message); } };
 setInterval(() => { if (!document.hidden && E.pag === 'agente') cargarAgente(); }, 10000);
 
 // ---------- cuenta real (GMGN) ----------
@@ -443,13 +444,22 @@ async function cargarPiloto() {
   if (document.activeElement?.closest?.('#piPorOp,#piPerd,#piOps,#piUmbral') == null) {
     $('#piPorOp').value = c.por_op_sol; $('#piPerd').value = c.perdida_max_sol; $('#piOps').value = c.max_ops_dia; $('#piUmbral').value = c.umbral; }
   const vivo = p.ts && ahora - p.ts < 120;
-  $('#piEstado').innerHTML = `${c.activo ? '<span class="verde">● ACTIVO</span>' : '<span class="tenue">○ parado</span>'}${p.ts ? ` · ${vivo ? 'PC conectado' : '<span class="ambar">PC sin responder</span>'}` : ' · <span class="ambar">esperando al PC</span>'}${p.motivo ? ` · <span class="ambar">${esc(p.motivo)}</span>` : ''}${p.saldo_inicio ? ` · resultado ${sg(((p.saldo || p.saldo_inicio) - p.saldo_inicio), 4)} SOL` : ''}${p.error && p.error_ts > (p.ts || 0) - 60 ? ` · <span class="rojo">${esc(p.error)}</span>` : ''}`;
+  $('#piEstado').innerHTML = `${c.activo ? '<span class="verde">● ACTIVO</span>' : '<span class="tenue">○ parado</span>'}${p.ts ? ` · ${vivo ? 'PC conectado' : '<span class="ambar">PC sin responder</span>'}` : ' · <span class="ambar">esperando al PC</span>'}${p.motivo ? ` · <span class="ambar">${esc(p.motivo)}</span>` : ''}${p.saldo_inicio ? ` · variación de saldo ${sg(((p.saldo ?? p.saldo_inicio) - p.saldo_inicio), 4)} SOL` : ''}${p.error && p.error_ts > (p.ts || 0) - 60 ? ` · <span class="rojo">${esc(p.error)}</span>` : ''}`;
+  const supervision = p.supervision;
+  if (supervision) $('#piEstado').innerHTML += `<div class="chico" style="margin-top:6px"><b>${esc(({apagado:'Piloto apagado',validando:'Validando estrategias',esperando_senal:'Esperando señal',protegida:'Protecciones verificadas',conciliacion:'Conciliación pendiente',saliendo:'Confirmando salida',requiere_revision:'Requiere revisión'})[supervision.estado] || supervision.estado)}</b> · ${esc(supervision.motivo)}</div>`;
   const o = p.orden;
   $('#piOrden').innerHTML = o ? `<div class="re-bot" style="border-left-color:var(--ambar)">${o.entro ? `Dentro de <b>${esc(o.simbolo)}</b> desde ${fecha(o.entro)} a ${np(o.precio_entrada)} $` : `Esperando comprar <b>${esc(o.simbolo)}</b> a ${np(o.compra)} $ (${o.estrategia ? esc(o.estrategia) : o.pts + ' pts'})`}${o.estrategia ? ` · 🏭 ${esc(o.estrategia)}` : ''} con ${n(o.sol, 3)} SOL · TP +${n(o.tp, 0)} % / SL −${n(o.sl, 0)} %${o.pnl_pct != null ? ` · va ${sg(o.pnl_pct, 1)} %` : ''}${o.stop_dyn ? ` · 🔒 stop subido a ${np(o.stop_dyn)} $` : ''}${o.salida ? ` · 🚪 saliendo: ${esc(o.salida)}` : ''}${o.ia && o.ia.motivo ? `<div class="chico">🧠 IA (${fecha(o.ia.ts)}): <b>${esc(o.ia.accion)}</b> ${n((o.ia.confianza || 0) * 100, 0)} % — ${esc(o.ia.motivo)}</div>` : ''}</div>` : '<div class="tenue chico">Sin orden del piloto ahora.</div>';
+  if (o && o.modo === 'mercado' && !o.proteccion_verificada) $('#piOrden').innerHTML += '<div class="tenue chico">Los niveles TP/SL previstos todavía no son protecciones verificadas.</div>';
+  if (supervision && supervision.incidencias?.length) $('#piOrden').innerHTML += `<div class="re-bot" style="border-left-color:var(--rojo)"><b>Incidencias pendientes</b>${supervision.incidencias.map(x => `<div class="chico">${esc(x.motivo)}</div>`).join('')}<div class="tenue chico">Resolver la incidencia no activa automáticamente el piloto.</div></div>`;
+  if (supervision && (supervision.requiere_revision || p.intencion_entrada)) $('#piOrden').innerHTML += `<button id="piConciliado" class="ambar" style="margin-top:6px">✅ Ya lo revisé en GMGN</button>`;
+  const bc = $('#piConciliado');
+  if (bc) bc.onclick = () => { if (confirm('¿Revisaste en GMGN las órdenes y la wallet?
+Se resuelven las incidencias y se olvida la entrada sin confirmar (si la hubiera). Una orden que siga abierta en GMGN y no esté en el panel tendrás que cerrarla tú.')) guardarPiloto({ conciliado: Math.floor(Date.now() / 1000) }); };
   $('#piScan').innerHTML = ((p.ultimo_scan || {}).top || []).some(x => x.estrategia) ? tabla([['Token', x => esc(x.simbolo)], ['Estrategia', x => esc(x.estrategia)], ['TP', x => '+' + n(x.tp, 0) + ' %'], ['SL', x => '−' + n(x.sl, 0) + ' %'], ['Máx.', x => x.hold * 5 + ' min']], p.ultimo_scan.top, '') : tabla([['Token', x => esc(x.simbolo)], ['Pts', x => x.pts], ['Desde máx. 4h', x => sg(x.ret, 1) + ' %'], ['24h', x => sg(x.t24, 1) + ' %'], ['RSI15', x => x.rsi], ['ATR15', x => n(x.atr, 1) + ' %'], ['Smart $', x => n(x.smart, 0)]],
     (p.ultimo_scan || {}).top || [], 'Aún no ha escaneado.') + (p.ultimo_scan ? `<div class="tenue chico">${fecha(p.ultimo_scan.ts)}</div>` : '');
-  $('#piOps2').innerHTML = tabla([['Fecha', x => fecha(x.creada)], ['Token', x => esc(x.simbolo)], ['Resultado', x => ({ tp: '<span class="verde">TP</span>', sl: '<span class="rojo">SL</span>', no_entro: 'no entró', fallo_compra: '<span class="ambar">fallo compra</span>' })[x.resultado] || esc(x.resultado)], ['SOL', x => sg(x.pnl_sol, 4)]],
+  $('#piOps2').innerHTML = tabla([['Fecha', x => fecha(x.creada)], ['Token', x => esc(x.simbolo)], ['Resultado', x => ({ tp: '<span class="verde">TP</span>', sl: '<span class="rojo">SL</span>', no_entro: 'no entró', fallo_compra: '<span class="ambar">fallo compra</span>' })[x.resultado] || esc(x.resultado)], ['Neto SOL', x => x.pnl_confirmado ? sg(x.pnl_sol, 4) : 'pendiente'], ['Flujo de recibos SOL', x => sg(x.contabilidad?.flujo_sol_identificado, 6)], ['Recibos', x => x.contabilidad ? `${x.contabilidad.recibos_verificados} verificados / ${x.contabilidad.recibos_pendientes} pendientes${x.contabilidad.firmas_faltantes?.length ? "; faltan firmas: " + x.contabilidad.firmas_faltantes.map(esc).join(", ") : ""}` : '—']],
     (p.ops || []).slice().reverse().slice(0, 20), 'Sin operaciones todavía.');
+  if ((p.ops || []).length) $('#piOps2').innerHTML += '<div class="tenue chico">El flujo de recibos muestra movimientos identificados. El neto permanece pendiente mientras falten costes o recibos; un depósito no se cuenta como ganancia.</div>';
   const L = p.lab;
   const labTabla = (X, nombre) => `<div class="chico" style="margin-top:8px"><b>${nombre}</b></div>` + tabla([['Modelo', x => esc(x.modelo)], ['Preguntas', x => x.preguntas], ['Aprueba', x => n(x.aprueba_pct, 0) + ' %'], ['Acierto', x => n(x.acierto_pct, 0) + ' %'],
     ['Resultado siguiéndolo', x => sg(x.resultado_siguiendolo_pct, 1) + ' %'], ['Por entrada', x => sg(x.medio_por_entrada_pct, 1) + ' %'], ['Tarda', x => n(x.ms_medio / 1000, 1) + ' s'], ['Errores', x => x.errores]],
@@ -459,14 +469,30 @@ async function cargarPiloto() {
     + (L.smart && (L.smart.senales || []).length ? `<div class="tenue chico">Últimas señales: ${L.smart.senales.slice(0, 8).map(x => `${esc(x.simbolo)} (${x.pts} wallets, +${x.neto} $, ${x.estrategia === 'smart' ? 'asentada' : 'nueva'})`).join(' · ')}</div>` : '')
     + `<div class="tenue chico">Modelos: ${(L.instalados || []).map(esc).join(', ')}</div>` : '<div class="tenue chico">Solo en el PC.</div>';
   const F = p.fabrica, est = x => x && x.n ? `${x.n} · ${sg(x.medio, 1)} % · ${x.gana_pct} % gana` : '—';
-  $('#piFab').innerHTML = F && F.muestras ? `<div class="tenue chico">${F.muestras.listas} muestras listas (${F.muestras.vivas} en vivo, ${F.muestras.tokens} tokens) · ${F.muestras.pendientes} esperando su resultado · entrena con lo anterior a ${fecha(F.corte)} y valida con lo posterior · ${esc(F.msg || '')}${F.evo ? ` · última evolución ${fecha(F.evo)}` : ''}</div>`
-    + `<div class="re-bot" style="margin-top:6px;border-left-color:var(--verde)">💰 <b>Al dinero real</b> (en vivo ≥ ${F.promo ? F.promo.vivo_n : 10} ops, ≥ +${F.promo ? F.promo.vivo_medio : 1.5} %/op, ≥ ${F.promo ? F.promo.vivo_gana : 35} % ganadoras): ${(F.promovidas || []).length ? F.promovidas.map(x => `<b>${esc(x.nombre)}</b> (${est(x.vivo)})`).join(' · ') : '<span class="tenue">ninguna todavía — el piloto real espera</span>'}</div>`
-    + `<div class="chico" style="margin-top:6px"><b>Estrategias manuales</b> (operaciones · media neta con costes · % ganadoras)</div>`
-    + tabla([['Estrategia', x => `<b>${esc(x.nombre)}</b><div class="tenue chico">${esc(x.regla)}</div>`], ['Entreno', x => est(x.entreno)], ['Validación', x => est(x.prueba)], ['En vivo', x => est(x.vivo)]], F.manuales || [], '')
-    + `<div class="chico" style="margin-top:6px"><b>🏆 Salón del generador</b>: inventadas que ganan también con datos que no vieron. «En vivo» = desde que se descubrieron: es la prueba que cuenta.</div>`
-    + tabla([['Id', x => esc(x.id)], ['Regla', x => `<span class="chico">${esc(x.regla)}</span>`], ['Entreno', x => est(x.entreno)], ['Validación', x => est(x.prueba)], ['En vivo', x => est(x.vivo)]], F.salon || [], 'Ninguna pasa la validación todavía.')
+  $('#piFab').innerHTML = F && F.muestras ? `<div class="tenue chico">${F.muestras.listas} muestras listas (${F.muestras.vivas} en vivo, ${F.muestras.tokens} tokens) · ${F.muestras.pendientes} esperando su resultado · entrena con lo anterior a ${fecha(F.corte)} · selección hasta ${fecha(F.validacion?.seleccion_hasta || F.corte)} · ${esc(F.msg || '')}${F.evo ? ` · última evolución ${fecha(F.evo)}` : ''}</div>`
+    + `<div class="re-bot" style="margin-top:6px;border-left-color:var(--verde)">💰 <b>Candidatas que superan los filtros</b> (en vivo ≥ ${F.promo ? F.promo.vivo_n : 10} ops, ≥ +${F.promo ? F.promo.vivo_medio : 1.5} %/op, ≥ ${F.promo ? F.promo.vivo_gana : 35} % ganadoras): ${(F.promovidas || []).length ? F.promovidas.map(x => `<b>${esc(x.nombre)}</b> (${est(x.vivo)})`).join(' · ') : '<span class="tenue">ninguna todavía — el piloto real espera</span>'}</div>`
+    + `<div class="chico" style="margin-top:6px"><b>Reglas registradas (propuestas en simulación)</b> (operaciones · media neta con costes · % ganadoras)</div>`
+    + tabla([['Estrategia', x => `<b>${esc(x.nombre)}</b><div class="tenue chico">${esc(x.regla)}</div>`], ['Entreno', x => est(x.entreno)], ['Validación', x => est(x.prueba)], ['En vivo', x => est(x.vivo)], ['Adverso', x => est(x.estres?.adverso)], ['Parcial', x => est(x.estres?.parcial)], ['Con demora', x => est(x.estres?.demora)]], F.manuales || [], '')
+    + `<div class="chico" style="margin-top:6px"><b>🏆 Salón del generador</b>: propuestas que superan la selección histórica y necesitan validación posterior. «En vivo» sigue siendo simulación con datos posteriores al registro.</div>`
+    + tabla([['Id', x => esc(x.id)], ['Regla', x => `<span class="chico">${esc(x.regla)}</span>`], ['Entreno', x => est(x.entreno)], ['Validación', x => est(x.prueba)], ['En vivo', x => est(x.vivo)], ['Adverso', x => est(x.estres?.adverso)], ['Parcial', x => est(x.estres?.parcial)], ['Con demora', x => est(x.estres?.demora)]], F.salon || [], 'Ninguna pasa la validación todavía.')
     : `<div class="tenue chico">${F && F.error ? esc(F.error) : 'Solo en el PC.'}</div>`;
   pintarConciencia(p.conciencia);
+  if (F && F.validacion) $('#piFab').innerHTML += `<div class="re-bot"><b>Validación registrada</b><div class="chico">Datos reservados desde ${fecha(F.validacion.reservado_desde)}. Evaluaciones de reglas: ${n(F.validacion.reglas_probadas || 0, 0)}.</div><div class="chico">Para aprobar: al menos ${F.promo.vivo_n} operaciones en ${F.promo.dias} días y ${F.promo.tokens} tokens, sin concentración excesiva, con resultado positivo en las pruebas adversas.</div><div class="tenue chico">Los datos reservados no se usan para seleccionar reglas. ${n(F.muestras?.cuarentena_temporal || 0, 0)} muestras antiguas conservadas y apartadas de la validación temporal.</div></div>`;
+
+  if (p.observatorio) {
+    const O = p.observatorio, C = O.costes_acumulados || {}, R = O.conciliacion, V = p.observatorio_servicio;
+    $('#piFab').innerHTML += `<div class="re-bot"><b>Observatorio sin dinero real · ${esc(O.dia_utc)} UTC</b>
+      <div class="chico">Servicio: ${esc(V?.estado || 'pendiente')} ${V?.ts ? '· ' + fecha(V.ts) : ''}. ${n(O.sombra_pendientes || 0,0)} señales en observación; ${n(O.sombra_completas || 0,0)} completas.</div>
+      <div class="chico">Variación media cotizada al vencimiento: ${O.media_cotizada_pct == null ? 'pendiente' : sg(O.media_cotizada_pct,2) + ' %'}. Es una cotización hipotética; no demuestra ejecución, TP/SL ni beneficio neto.</div>
+      <div class="chico">Recibos acumulados: ${n(C.recibos || 0,0)}. Comisión de red medida: ${C.comision_red_sol == null ? 'pendiente' : n(C.comision_red_sol,9) + ' SOL'}.</div>
+      <div class="tenue chico">Mínimo viable completo: pendiente de todos los costes. ${C.minimo_parcial_solo_red_sol == null ? '' : 'Suelo parcial solo de red: ' + n(C.minimo_parcial_solo_red_sol,6) + ' SOL para un margen hipotético de ' + n(C.margen_hipotetico_pct,1) + ' %; excluye otros costes.'}</div>
+      <div class="chico">Conciliación independiente: ${R ? esc(R.estado) + ' · ' + esc(R.motivo) + ' · ' + fecha(R.ts) : 'sin posición local que conciliar'}.</div>
+      <div class="chico"><b>Decisiones del día</b>: ${Object.entries(O.decisiones || {}).map(([k,v]) => esc(k) + ': ' + n(v,0)).join(' · ') || 'todavía sin registros'}</div>
+      ${(O.motivos || []).map(x => `<div class="tenue chico">${esc(x.motivo)}: ${n(x.n,0)}</div>`).join('')}
+      ${(O.ultimas || []).slice(0,8).map(x => `<div class="chico">${fecha(x.ts)} · ${esc(x.regla || '')} ${esc(x.tipo)} · ${esc(x.motivo)}</div>`).join('')}
+      <div class="tenue chico">El modo sombra solo consulta. No promueve estrategias ni activa el piloto.</div></div>`;
+  }
+
   const U = p.futuros, FF = U && U.fabrica, usd = x => x && x.n ? `${x.n} · ${sg(x.medio, 1)} $ · ${x.gana_pct} % gana` : '—';
   if (U && U.cfg && document.activeElement?.closest?.('#fuCuenta,#fuFreno,#fuQty') == null) {
     const fc = U.cfg, reales = (U.cuentas || []).filter(x => !x.simulada).map(x => x.nombre);

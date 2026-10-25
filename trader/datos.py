@@ -1,7 +1,7 @@
 """Datos de mercado REALES (Yahoo Finance, sin clave): cotizaciones, velas, búsqueda de símbolos y divisas.
 Cubre acciones, ETF, índices (^GSPC), divisas (EURUSD=X), cripto (BTC-USD), futuros (GC=F) y materias primas.
 Todo se cachea en memoria para no martillear a Yahoo (cotización 8 s, velas según intervalo)."""
-import json, time, threading, urllib.request, urllib.parse, urllib.error
+import json, time, threading, urllib.request, urllib.parse, urllib.error, math
 from . import onchain
 
 UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) DMN-Trader/1.0'
@@ -17,9 +17,28 @@ NT, NT_FRESCO = {}, 600
 
 
 def recibir_nt(d):
+    preparados = {}
+    ahora = time.time()
     for s, x in (d or {}).items():
-        if s.endswith('=F'):
-            NT[s] = {'ts': time.time(), '1m': x.get('1m') or [], '5m': x.get('5m') or []}
+        if not s.endswith('=F'):
+            continue
+        series = {}
+        for intervalo in ('1m', '5m'):
+            barras = x.get(intervalo) or []
+            anterior = -1
+            for b in barras:
+                valores = [b[k] for k in ('t', 'o', 'h', 'l', 'c', 'v')]
+                if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) for v in valores):
+                    raise ErrorDatos('vela NT no numerica o no finita')
+                if b['t'] <= anterior or b['t'] > ahora + 60 or b['l'] <= 0 or b['v'] < 0 or not (b['l'] <= min(b['o'], b['c']) <= max(b['o'], b['c']) <= b['h']):
+                    raise ErrorDatos('vela NT incoherente o fuera de orden')
+                anterior = b['t']
+            if barras and ahora - barras[-1]['t'] > NT_FRESCO:
+                raise ErrorDatos('velas NT obsoletas')
+            series[intervalo] = [dict(b) for b in barras]
+        preparados[s] = {'ts': ahora, **series}
+    with _lock:
+        NT.update(preparados)
     return {'ok': True, 'simbolos': sorted(NT)}
 
 
@@ -28,7 +47,7 @@ def _nt(simbolo, intervalo):
     if not x or time.time() - x['ts'] > NT_FRESCO:
         return None
     if intervalo in ('1m', '5m'):
-        return [dict(b) for b in x[intervalo]] or None
+        return [dict(b) for b in x[intervalo]] if x[intervalo] and time.time() - x[intervalo][-1]['t'] <= NT_FRESCO else None
     seg = {'15m': 900}.get(intervalo)  # 1 h sigue en Yahoo: hace falta más historia que la que se manda
     if not seg or not x['5m']:
         return None

@@ -1,7 +1,7 @@
 """Servidor HTTP de DMN Trader: API JSON (/api/...) + panel web (web/). Un hilo de fondo ejecuta órdenes y alertas.
 Arranque: python -m trader.servidor  [--host 0.0.0.0] [--puerto 8777]
 Si se expone fuera de este PC, poner DMN_TRADER_TOKEN: se pedirá en la cabecera x-token (o ?token=)."""
-import argparse, json, mimetypes, os, re, threading, time, traceback
+import argparse, json, mimetypes, os, re, threading, time, traceback, ipaddress, hmac
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from . import datos, db, motor, analisis, backtest, agente, real, piloto, updown
@@ -273,6 +273,8 @@ def r_ajustes_set(q, b):
 
 def _hasta(hasta):
     if isinstance(hasta, str) and ':' in hasta:  # "07:00" → la próxima vez que sean esas horas (hora local del servidor)
+        if not re.fullmatch(r'([01]\d|2[0-3]):[0-5]\d', hasta):
+            raise ValueError('hora invalida; usa HH:mm')
         hh, mm = map(int, hasta.split(':'))
         t = time.localtime()
         fin = time.mktime((t.tm_year, t.tm_mon, t.tm_mday, hh, mm, 0, 0, 0, -1))
@@ -294,11 +296,30 @@ def r_enj_mapa(q, b):
 
 @ruta('POST', '/api/enjambre/iniciar')
 def r_enj_ini(q, b):
+    if not isinstance(b, dict) or b.get('modo', 'simulado') != 'simulado':
+        raise ValueError('esta ruta controla solo el enjambre simulado')
+    n = b.get('agentes', 50)
+    if isinstance(n, bool) or not isinstance(n, int) or not 1 <= n <= 2000:
+        raise ValueError('agentes debe ser un entero entre 1 y 2000')
+    for k in ('capital', 'meta'):
+        if k in b and (isinstance(b[k], bool) or not isinstance(b[k], (int, float))):
+            raise ValueError(k + ' debe ser numerico')
+    limites = {'duracion_min': b.get('duracionMin'), 'perdida_max_pct': b.get('perdidaMaxPct')}
+    if b.get('modo') == 'simulado' and any(v is None for v in limites.values()):
+        raise ValueError('el autopiloto requiere duracionMin y perdidaMaxPct')
+    if any(v is not None for v in limites.values()):
+        from . import guardia
+        guardia.validar(*limites.values())
     if b.get('nodo') and b['nodo'] != agente.NODO:  # otro equipo (el PC): se le deja la orden
+        if limites['duracion_min'] is not None:
+            remoto = db.uno('SELECT datos FROM ag_nodos WHERE nodo=?', (b['nodo'],))
+            capacidades = ((json.loads(remoto['datos']) if remoto else {}).get('kpis') or {}).get('capacidades', [])
+            if 'dmn-guardia/1' not in capacidades:
+                raise ValueError('actualiza primero el nodo remoto: no confirma guardia persistente')
         return agente.ordenar(b['nodo'], {'accion': 'iniciar', 'n': int(b.get('agentes', 50)), 'capital': float(b.get('capital', 1)), 'meta': float(b.get('meta', 100)),
-                                          'mercados': b.get('mercados') or ['cripto', 'acciones'], 'hasta': _hasta(b.get('hasta'))})
+                                          'mercados': b.get('mercados') or ['cripto', 'acciones'], 'hasta': _hasta(b.get('hasta')), **limites})
     return agente.iniciar(int(b.get('agentes', 50)), float(b.get('capital', 1)), float(b.get('meta', 100)),
-                          b.get('mercados') or ['cripto', 'acciones'], _hasta(b.get('hasta')))
+                          b.get('mercados') or ['cripto', 'acciones'], _hasta(b.get('hasta')), hasta_solicitado=b.get('hasta'), **limites)
 
 
 @ruta('POST', '/api/enjambre/parar')
@@ -369,6 +390,14 @@ def r_real(q, b):
     return real.estado()
 
 
+@ruta('POST', '/api/ejecutor/verificar')
+def r_ejecutor(q, b):
+    from . import ejecutor
+    if not TOKEN:
+        raise ValueError('autoridad requiere autenticacion configurada')
+    return ejecutor.verificar(b)
+
+
 @ruta('POST', '/api/real/nodo')
 def r_real_nodo(q, b):
     return real.recibir(b)
@@ -383,6 +412,12 @@ def r_piloto(q, b):
     if piloto._hilo['t'] and piloto._hilo['t'].is_alive():
         return {**piloto.estado(), 'aqui': True}
     return {**((real.estado().get('piloto')) or {}), 'cfg': piloto.cfg(), 'aqui': False}
+
+
+@ruta('GET', '/api/gmgn/informe')
+def r_gmgn_informe(q, b):
+    from . import observatorio_gmgn as O
+    return O.informe(q.get('dia'))
 
 
 @ruta('POST', '/api/piloto/config')
@@ -433,6 +468,7 @@ def bucle():
     ultima_foto = {}
     while True:
         try:
+            agente.drenar_cierres()
             for c in db.q("SELECT id FROM cuentas WHERE tipo='simulada' AND archivada=0"):
                 cid = c['id']
                 activa = db.uno("SELECT 1 x FROM ordenes WHERE cuenta_id=? AND estado='pendiente' UNION SELECT 1 FROM posiciones WHERE cuenta_id=? LIMIT 1", (cid, cid))
@@ -479,11 +515,27 @@ class Manejador(BaseHTTPRequestHandler):
         self.wfile.write(cuerpo)
 
     def _autorizado(self, qs):
-        if not TOKEN or self.client_address[0] in ('127.0.0.1', '::1'):
-            return True
-        return self.headers.get('x-token') == TOKEN or qs.get('token') == TOKEN
+        if not TOKEN:
+            return self.client_address[0] in ('127.0.0.1', '::1')
+        recibido = self.headers.get('x-token') or (qs.get('token') if self.command == 'GET' else '') or ''
+        return hmac.compare_digest(recibido.encode(), TOKEN.encode())
 
     def _atender(self, metodo):
+        host = self.headers.get('host', '')
+        try:
+            nombre = urlparse('http://' + host).hostname if host else ''
+        except ValueError:
+            return self._json(421, {'error': 'host no permitido'})
+        permitidos = {x.strip().lower() for x in os.environ.get('DMN_TRADER_HOSTS', '').split(',') if x.strip()}
+        try:
+            literal = bool(ipaddress.ip_address(nombre))
+        except ValueError:
+            literal = False
+        if nombre and nombre.lower() not in permitidos and nombre.lower() != 'localhost' and not nombre.lower().endswith('.localhost') and not literal:
+            return self._json(421, {'error': 'host no permitido'})
+        origen = self.headers.get('origin')
+        if metodo != 'GET' and (self.headers.get('sec-fetch-site') == 'cross-site' or (origen and (urlparse(origen).scheme not in ('http', 'https') or urlparse(origen).netloc.lower() != host.lower()))):
+            return self._json(403, {'error': 'origen no permitido'})
         u = urlparse(self.path)
         qs = {k: v[-1] for k, v in parse_qs(u.query).items()}
         if not u.path.startswith('/api/'):
@@ -491,10 +543,17 @@ class Manejador(BaseHTTPRequestHandler):
         if not self._autorizado(qs):
             return self._json(401, {'error': 'falta el token (x-token)'})
         cuerpo = None
-        n = int(self.headers.get('content-length') or 0)
+        try:
+            n = int(self.headers.get('content-length') or 0)
+            if not 0 <= n <= 8 * 1024 * 1024:
+                raise ValueError()
+        except ValueError:
+            return self._json(400, {'error': 'longitud de cuerpo invalida'})
         if n:
             try:
-                cuerpo = json.loads(self.rfile.read(n).decode('utf-8'))
+                def no_finito(valor):
+                    raise ValueError('numero JSON no finito')
+                cuerpo = json.loads(self.rfile.read(n).decode('utf-8'), parse_constant=no_finito)
             except Exception:
                 return self._json(400, {'error': 'JSON inválido'})
         for m, rx, fn in RUTAS:
@@ -502,7 +561,11 @@ class Manejador(BaseHTTPRequestHandler):
             if m == metodo and mt:
                 try:
                     return self._json(200, fn(qs, cuerpo or {}, **mt.groupdict()))
-                except (motor.ErrorOrden, ValueError) as e:
+                except motor.ErrorOrden as e:
+                    if str(e).startswith('CIERRES_PENDIENTES:'):
+                        return self._json(409, {'error': str(e), 'codigo': 'CIERRES_PENDIENTES'})
+                    return self._json(400, {'error': str(e)})
+                except ValueError as e:
                     return self._json(400, {'error': str(e)})
                 except KeyError as e:
                     return self._json(400, {'error': f'falta el parámetro {e}'})
@@ -515,7 +578,9 @@ class Manejador(BaseHTTPRequestHandler):
 
     def _estatico(self, ruta_):
         f = os.path.normpath(os.path.join(WEB, (ruta_.lstrip('/') or 'index.html')))
-        if not f.startswith(WEB) or not os.path.isfile(f):
+        if os.path.commonpath([os.path.realpath(WEB), os.path.realpath(f)]) != os.path.realpath(WEB):
+            return self._json(403, {'error': 'ruta no permitida'})
+        if not os.path.isfile(f):
             f = os.path.join(WEB, 'index.html')
         with open(f, 'rb') as h:
             datos_ = h.read()
@@ -545,6 +610,8 @@ def preparar():
             db.ex('INSERT OR IGNORE INTO vigilancia(simbolo,anadido) VALUES(?,?)', (s, i))
         db.poner_ajuste('vigilancia_iniciada', True)
     agente.preparar()
+    from . import guardia
+    guardia.arrancar()
     if (agente.estado() or {}).get('activo'):
         agente.arrancar_hilo()  # el reto sigue tras un reinicio
     updown.preparar()
@@ -563,6 +630,8 @@ def main():
     ap.add_argument('--host', default=os.environ.get('DMN_TRADER_HOST', '127.0.0.1'))
     ap.add_argument('--puerto', type=int, default=int(os.environ.get('DMN_TRADER_PUERTO', 8777)))
     a = ap.parse_args()
+    if a.host not in ('127.0.0.1', '::1', 'localhost') and not TOKEN:
+        raise ValueError('DMN_TRADER_TOKEN es obligatorio para escuchar fuera de localhost')
     preparar()
     threading.Thread(target=bucle, daemon=True).start()
     print(f'DMN Trader {VERSION} en http://{a.host}:{a.puerto}  (base: {db.RUTA})', flush=True)

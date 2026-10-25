@@ -73,6 +73,28 @@ def montecarlo(pnls, capital, n=500, semilla=7):
     dds.sort()
     finales.sort()
     pct = lambda xs, q: round(xs[min(len(xs) - 1, int(q * len(xs)))], 2)
-    return {'dd_mediano': pct(dds, .5), 'dd_95': pct(dds, .95), 'dd_peor': round(dds[-1], 2),
+    return {'metodo': 'permutacion_orden', 'incertidumbre_beneficio': False, 'dd_mediano': pct(dds, .5), 'dd_95': pct(dds, .95), 'dd_peor': round(dds[-1], 2),
             'final_5': pct(finales, .05), 'final_mediano': pct(finales, .5),
             'prob_perdida': round(sum(1 for f in finales if f < capital) / n * 100, 1)}
+
+
+def bootstrap_bloques(pnls, capital, n=500, bloque=3, semilla=7):
+    """Remuestreo condicional del historial; no es probabilidad calibrada de beneficio futuro."""
+    if len(pnls) < 5:
+        return None
+    if n < 1 or bloque < 1:
+        raise ValueError('n y bloque deben ser positivos')
+    rnd, finales, dds = random.Random(semilla), [], []
+    for _ in range(n):
+        muestra = []
+        while len(muestra) < len(pnls):
+            inicio = rnd.randrange(len(pnls))
+            muestra.extend(pnls[(inicio+j) % len(pnls)] for j in range(bloque))
+        eq = [capital]
+        for pnl in muestra[:len(pnls)]:
+            eq.append(eq[-1] + pnl)
+        finales.append(eq[-1]); dds.append(curva(eq)[1])
+    finales.sort(); dds.sort()
+    return {'metodo': 'bootstrap_bloques', 'bloque': bloque, 'semilla': semilla, 'n': n,
+            'final_5': round(finales[int(.05*n)], 2), 'final_95': round(finales[min(n-1,int(.95*n))], 2),
+            'dd_95': round(dds[min(n-1,int(.95*n))],2), 'advertencia': 'condicional al historial; no predice rentabilidad real'}

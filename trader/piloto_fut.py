@@ -6,8 +6,10 @@
   `real_perdida_dia` $ se para hasta el día siguiente, y ninguna entrada arriesga más de lo que queda de ese margen.
   Además la cuenta tiene que estar en `cuentas_orden` de Documents/NinjaTrader 8/dmn/puente.json (el AddOn rechaza las demás).
 Toda entrada lleva stop y objetivo (OCO) que pone el AddOn al llenarse; el piloto cierra por tiempo al pasar el `hold`."""
-import json, os, threading, time, urllib.request
-from . import db
+import hashlib
+import urllib.parse
+import json, os, threading, time, urllib.request, math
+from . import db, ejecutor
 
 PUENTE = os.environ.get('DMN_NT_PUENTE', 'http://localhost:36990')
 TOKEN = os.path.join(os.path.expanduser('~'), 'Documents', 'NinjaTrader 8', 'dmn', 'token.txt')
@@ -20,6 +22,12 @@ _hilo = {'t': None}
 
 class SinPuente(Exception):
     pass
+
+
+def riesgo_total(por_contrato, qty):
+    if isinstance(por_contrato, bool) or not isinstance(por_contrato, (int, float)) or not math.isfinite(por_contrato) or por_contrato <= 0 or isinstance(qty, bool) or not isinstance(qty, int) or qty < 1:
+        raise ValueError('riesgo o cantidad invalidos')
+    return por_contrato * qty
 
 
 def puente(ruta, cuerpo=None, timeout=70):
@@ -39,21 +47,43 @@ def puente(ruta, cuerpo=None, timeout=70):
 
 
 def cfg():
-    return {**DEFECTO, **(db.ajuste(EST + '_cfg') or {})}
+    c = {**DEFECTO, **(db.ajuste(EST + '_cfg') or {})}
+    if any(not isinstance(c[k], bool) for k in ('activo', 'real_activo')) or isinstance(c['qty'], bool) or not isinstance(c['qty'], int) or not 1 <= c['qty'] <= 2 or isinstance(c['real_perdida_dia'], bool) or not isinstance(c['real_perdida_dia'], (int, float)) or not math.isfinite(c['real_perdida_dia']) or c['real_perdida_dia'] < 0 or (c['real_activo'] and not c['real_perdida_dia']):
+        return {**DEFECTO, 'activo': False, 'real_activo': False, 'error_cfg': 'configuracion persistida invalida; piloto bloqueado'}
+    return c
 
 
 def poner_cfg(c):
+    if not isinstance(c, dict):
+        raise ValueError('configuracion debe ser un objeto')
+    for k in ('activo', 'real_activo'):
+        if k in c and not isinstance(c[k], bool):
+            raise ValueError(k + ' debe ser booleano')
+    for k in ('real_perdida_dia', 'qty', 'cerrar_todo'):
+        if k in c and (isinstance(c[k], bool) or not isinstance(c[k], (int, float)) or not math.isfinite(c[k]) or c[k] < 0):
+            raise ValueError(k + ' debe ser numerico, finito y no negativo')
+    if 'qty' in c and (not isinstance(c['qty'], int) or not 1 <= c['qty'] <= 2):
+        raise ValueError('qty debe ser 1 o 2')
     nuevo = {**cfg(), **{k: v for k, v in (c or {}).items() if k in DEFECTO and k not in ('cambiado', 'cada')}}
     nuevo['real_perdida_dia'] = max(0.0, min(float(nuevo['real_perdida_dia']), 500.0))
     nuevo['qty'] = max(1, min(int(nuevo['qty']), 2))
+    if nuevo['real_activo'] and nuevo['real_perdida_dia'] <= 0:
+        raise ValueError('activar real requiere un limite diario positivo')
     nuevo['cambiado'] = int(time.time())
     db.poner_ajuste(EST + '_cfg', nuevo)
     return nuevo
 
 
 def cfg_mas_nueva(otra):
-    if isinstance(otra, dict) and otra.get('cambiado', 0) > cfg().get('cambiado', 0):
-        db.poner_ajuste(EST + '_cfg', otra)
+    from .sincronia import fecha
+    if not isinstance(otra, dict):
+        return
+    ts = fecha(otra)
+    with db.transaccion():
+        if ts > fecha(cfg()):
+            validada = poner_cfg(otra)
+            validada['cambiado'] = ts
+            db.poner_ajuste(EST + '_cfg', validada)
 
 
 def _est():
@@ -114,7 +144,89 @@ def reenviar_velas():
 
 def _pnl_hoy(e):
     hoy = time.strftime('%Y-%m-%d')
-    return sum(o.get('pnl') or 0 for o in e.get('ops') or [] if o.get('real') and time.strftime('%Y-%m-%d', time.localtime(o['cerrada'])) == hoy)
+    _preparar_resultados()
+    for o in e.get('ops') or []:
+        if o.get('orden') and o.get('cuenta') and o.get('cerrada') and o.get('pnl') is not None:
+            _registrar_resultado(o)
+    cuenta = cfg().get('cuenta_real')
+    fila = db.uno('SELECT COALESCE(SUM(pnl),0) pnl FROM fut_resultados WHERE dia=? AND real=1' + (' AND cuenta=?' if cuenta else ''), (hoy, cuenta) if cuenta else (hoy,))
+    return fila['pnl']
+
+
+def _preparar_resultados():
+    db.ex('''CREATE TABLE IF NOT EXISTS fut_resultados (
+        cuenta TEXT NOT NULL, orden TEXT NOT NULL, inst TEXT NOT NULL, cerrado INTEGER NOT NULL,
+        dia TEXT NOT NULL, real INTEGER NOT NULL, pnl REAL NOT NULL, PRIMARY KEY(cuenta,orden))''')
+
+
+def _registrar_resultado(op):
+    pnl = op['pnl']
+    if isinstance(pnl, bool) or not isinstance(pnl, (int, float)) or not math.isfinite(pnl):
+        raise SinPuente('PnL no verificable para el libro durable')
+    _preparar_resultados()
+    dia = time.strftime('%Y-%m-%d', time.localtime(op['cerrada']))
+    valores = (op['cuenta'], op['orden'], op.get('full') or op['nt'], op['cerrada'], dia, 1 if op.get('real') else 0, pnl)
+    with db.transaccion():
+        previo = db.uno('SELECT pnl,inst,real FROM fut_resultados WHERE cuenta=? AND orden=?', valores[:2])
+        if previo and (previo['pnl'] != pnl or previo['inst'] != valores[2] or previo['real'] != valores[5]):
+            raise SinPuente('resultado corregido: requiere conciliacion del libro')
+        db.ex('INSERT OR IGNORE INTO fut_resultados(cuenta,orden,inst,cerrado,dia,real,pnl) VALUES(?,?,?,?,?,?,?)', valores)
+
+
+def _autorizar_envio(c, e, cuenta, real, riesgo):
+    actual = cfg()
+    campos = ('activo','real_activo','cuenta_sim','cuenta_real','qty','real_perdida_dia','cambiado')
+    if not actual['activo'] or any(actual.get(k) != c.get(k) for k in campos):
+        raise SinPuente('piloto desactivado o configuracion modificada antes del envio')
+    if real and (not actual['real_activo'] or actual.get('cuenta_real') != cuenta):
+        raise SinPuente('cuenta real no autorizada en la configuracion actual')
+    if not real and actual.get('cuenta_sim') != cuenta:
+        raise SinPuente('cuenta simulada distinta de la configurada')
+    estado_actual = puente('/estado')
+    if estado_actual.get('contrato') != 'dmn-puente/2' or estado_actual.get('libro_sano') is False or estado_actual.get('riesgo_bloqueado') is True:
+        raise SinPuente('puente no conciliado antes del envio')
+    cu = next((x for x in estado_actual.get('cuentas', []) if x.get('nombre') == cuenta), None)
+    if not cu or cu.get('conectada') is not True or cu.get('simulada') is not (not real):
+        raise SinPuente('naturaleza o conexion de cuenta no confirmada')
+    if real:
+        valores = [cu.get('realizado'), cu.get('no_realizado')]
+        if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) for v in valores):
+            raise SinPuente('riesgo de cuenta no verificable antes del envio')
+        clave = time.strftime('%Y-%m-%d') + '|' + cuenta
+        base = e.get('riesgo_cuentas', {}).get(clave)
+        if base is None:
+            raise SinPuente('sesion de riesgo sin base persistida')
+        pnl = min(cu['realizado'] + cu['no_realizado'], cu['realizado'] - base + cu['no_realizado'], _pnl_hoy(e))
+        if riesgo_total(riesgo, actual['qty']) > actual['real_perdida_dia'] + min(0, pnl):
+            raise SinPuente('presupuesto diario agotado antes del envio')
+
+
+def _conciliar_orden(o):
+    q = urllib.parse.urlencode({'cuenta': o['cuenta'], 'nombre': o['orden']})
+    n = puente('/orden/estado?' + q)
+    if not isinstance(n, dict) or n.get('cuenta') != o['cuenta'] or n.get('nombre') != o['orden']:
+        raise SinPuente('respuesta de conciliacion fuera de ambito')
+    estado = n.get('estado')
+    if estado not in ('abierta_protegida','abierta_sin_proteccion','cerrada','sin_ejecucion','pendiente','desconocida'):
+        raise SinPuente('estado de conciliacion no reconocido')
+    if estado not in ('desconocida',) and n.get('inst') != o.get('full', o['nt']):
+        raise SinPuente('instrumento de conciliacion distinto')
+    if estado in ('abierta_protegida','abierta_sin_proteccion'):
+        cantidad, prevista = n.get('cantidad'), o.get('qty')
+        if isinstance(cantidad, bool) or not isinstance(cantidad, int) or isinstance(prevista, bool) or not isinstance(prevista, int) or not 0 < cantidad <= prevista:
+            raise SinPuente('cantidad propia no verificable')
+        if n.get('lado') != ('buy' if o['lado'] == 1 else 'sell'):
+            raise SinPuente('lado de conciliacion distinto')
+    if estado == 'cerrada':
+        cierre = n.get('cierre')
+        if not isinstance(cierre, dict) or any(cierre.get(k) != v for k,v in [('cuenta',o['cuenta']),('nombre',o['orden']),('inst',o.get('full',o['nt']))]):
+            raise SinPuente('cierre de conciliacion fuera de ambito')
+        cantidad, prevista = cierre.get('qty'), o.get('qty')
+        if isinstance(cantidad, bool) or not isinstance(cantidad, int) or isinstance(prevista, bool) or not isinstance(prevista, int) or not 0 < cantidad <= prevista:
+            raise SinPuente('cantidad cerrada no verificable')
+    if estado == 'sin_ejecucion' and (type(n.get('cantidad')) is not int or n['cantidad'] != 0):
+        raise SinPuente('cancelacion sin ejecucion no confirmada')
+    return n
 
 
 def paso():
@@ -129,40 +241,100 @@ def paso():
         db.poner_ajuste(EST, e)
         return
     e['error'] = None
+    if not isinstance(est, dict) or not isinstance(est.get('cuentas'), list):
+        raise SinPuente('estado del puente incompleto')
+    for cuenta in est['cuentas']:
+        for campo in ('saldo', 'realizado', 'no_realizado'):
+            valor = cuenta.get(campo)
+            if isinstance(valor, bool) or not isinstance(valor, (int, float)) or not math.isfinite(valor):
+                raise SinPuente('riesgo de cuenta no verificable')
     cuentas = {x['nombre']: x for x in est['cuentas']}
     e['cuentas'] = [{k: x[k] for k in ('nombre', 'conexion', 'conectada', 'simulada', 'saldo', 'realizado', 'no_realizado')} for x in est['cuentas']]
     e['permitidas'] = est.get('permitidas')
+    e['riesgo_bloqueado'] = est.get('riesgo_bloqueado') is True
+    e['motivo_riesgo'] = est.get('motivo_riesgo')
     ab = e.setdefault('abiertas', {})
     libro = None
     if c.get('cerrar_todo', 0) > e.get('cerrar_hecho', 0):
-        e['cerrar_hecho'] = c['cerrar_todo']
+        cierres_confirmados = True
         for o in ab.values():
             try:
                 puente('/cerrar', {'cuenta': o['cuenta'], 'inst': o['nt']})
             except SinPuente as ex:
+                cierres_confirmados = False
                 _log(e, f"⚠️ No pude cerrar {o['nt']}: {ex}")
+        if cierres_confirmados:
+            e['cerrar_hecho'] = c['cerrar_todo']
         _log(e, f'🧹 Cerrar todo (desde el panel): {len(ab)} posiciones')
     # 1) cierres: la posición ya no está (stop/objetivo) o se pasó del tiempo
     for k, o in list(ab.items()):
         cu = cuentas.get(o['cuenta'])
         if not cu:
             continue
-        viva = any(p['inst'] == o.get('full', o['nt']) for p in cu['posiciones'])  # NinjaTrader las nombra 'MES DEC26'
-        if not viva and time.time() - o['ts'] > 20:
+        cerrado_confirmado = False
+        if 'dmn-orden-estado/1' in est.get('capacidades', []):
+            try:
+                conciliada = _conciliar_orden(o)
+            except SinPuente as ex:
+                o['estado'] = 'pendiente_conciliacion'
+                e['error'] = str(ex)
+                continue
+            estado_orden = conciliada['estado']
+            if estado_orden == 'sin_ejecucion':
+                del ab[k]
+                _log(e, 'orden no ejecutada confirmada por el puente: ' + o['orden'])
+                db.poner_ajuste(EST, e)
+                continue
+            if estado_orden == 'abierta_protegida':
+                o['estado'] = 'enviada'
+                o.pop('sin_proteccion_desde', None)
+                o['qty_ejecutada'] = conciliada['cantidad']
+                viva = True
+            elif estado_orden == 'abierta_sin_proteccion':
+                o['estado'] = 'pendiente_conciliacion'
+                ahora = time.time()
+                o.setdefault('sin_proteccion_desde', ahora)
+                if est.get('riesgo_bloqueado') is True or ahora - o['sin_proteccion_desde'] >= 5:
+                    try:
+                        puente('/cerrar', {'cuenta':o['cuenta'],'inst':o['nt']})
+                    except SinPuente as ex:
+                        e['error'] = 'cierre de posicion propia sin proteccion pendiente: ' + str(ex)[:120]
+                continue
+            elif estado_orden == 'cerrada':
+                viva = False
+                cerrado_confirmado = True
+                registro = conciliada['cierre']
+                if libro is None: libro = {}
+                libro[(o['cuenta'],o.get('full',o['nt']),o['orden'])] = registro
+            else:
+                o['estado'] = 'pendiente_conciliacion'
+                continue
+        else:
+            viva = any(p['inst'] == o.get('full', o['nt']) for p in cu['posiciones'])
+        if not viva and (cerrado_confirmado or time.time() - o['ts'] > 20):
             if libro is None:
                 try:
-                    libro = {x['nombre']: x for x in puente('/cerradas')['cerradas']}
+                    libro = {(x['cuenta'], x['inst'], x['nombre']): x for x in puente('/cerradas')['cerradas']}
                 except SinPuente:
                     libro = {}
-            if o.get('orden') in libro:
-                pnl = libro[o['orden']]['pnl']  # exacto: precio de entrada y salida y comisión de NinjaTrader
+            clave_orden = (o['cuenta'], o.get('full', o['nt']), o.get('orden'))
+            if clave_orden in libro:
+                pnl = libro[clave_orden]['pnl']
+                if isinstance(pnl, bool) or not isinstance(pnl, (int, float)) or not math.isfinite(pnl):
+                    o['estado'] = 'pendiente_conciliacion'
+                    continue
+                # Resultado exclusivo de esta cuenta, instrumento y orden.
             elif time.time() - o['ts'] < 120:
                 continue  # el libro aún no la tiene
             else:
-                pnl = round(cu['realizado'] - o['realizado_antes'], 2)
+                o['estado'] = 'pendiente_conciliacion'
+                continue  # no atribuir operaciones manuales al piloto
             op = {**o, 'cerrada': int(time.time()), 'pnl': pnl}
-            e['ops'] = (e.get('ops') or [])[-299:] + [op]
-            del ab[k]
+            with db.transaccion():
+                _registrar_resultado(op)
+                e['ops'] = (e.get('ops') or [])[-299:] + [op]
+                del ab[k]
+                db.poner_ajuste(EST, e)
             _log(e, f"{'🎯' if pnl > 0 else '🛑'} {o['cuenta']} {o['nt']} ({o['estrategia']}): {pnl:+.2f} $")
             try:
                 conciencia.operacion_real({'id': f"fut-{o['ts']}", 'simbolo': o['nt'], 'token': o['inst'], 'resultado': 'gana' if pnl > 0 else 'pierde',
@@ -176,6 +348,21 @@ def paso():
             except SinPuente as ex:
                 _log(e, f"⚠️ No pude cerrar {o['nt']}: {ex}")
     if not c['activo']:
+        db.poner_ajuste(EST, e)
+        return
+    if est.get('riesgo_bloqueado') is True:
+        e['error'] = 'NinjaTrader: entradas bloqueadas por riesgo; ' + str(est.get('motivo_riesgo') or 'conciliacion necesaria')[:160]
+        db.poner_ajuste(EST, e)
+        return
+    if est.get('libro_sano') is False:
+        e['error'] = 'libro del puente pendiente de conciliacion; entradas bloqueadas'
+        db.poner_ajuste(EST, e)
+        return
+    if est.get('contrato') != 'dmn-puente/2':
+        e['error'] = 'puente sin contrato de ejecuciones parciales; compila la version nueva'
+        db.poner_ajuste(EST, e)
+        return
+    if any(o.get('estado') == 'pendiente_conciliacion' for o in ab.values()):
         db.poner_ajuste(EST, e)
         return
     # 2) entradas, una vez por vela de 5 min
@@ -196,8 +383,20 @@ def paso():
     candidatas = ff._candidatas()
     promovidas = ff.promovidas()
     planes = [(c['cuenta_sim'], False, candidatas)]
+    cu_real = cuentas.get(c.get('cuenta_real'))
+    pnl_cuenta = None
+    if cu_real:
+        dia = time.strftime('%Y-%m-%d')
+        clave = dia + '|' + cu_real['nombre']
+        bases = e.setdefault('riesgo_cuentas', {})
+        if clave not in bases:
+            bases[clave] = cu_real['realizado']
+            db.poner_ajuste(EST, e)
+        pnl_cuenta = cu_real['realizado'] - bases[clave] + cu_real['no_realizado']
+        # El libro local solo puede endurecer el presupuesto, nunca ampliarlo.
+        pnl_cuenta = min(pnl_cuenta, cu_real['realizado'] + cu_real['no_realizado'], _pnl_hoy(e))
     if c.get('cuenta_real') and c.get('real_activo'):
-        if _pnl_hoy(e) <= -c['real_perdida_dia']:
+        if pnl_cuenta is None or pnl_cuenta <= -c['real_perdida_dia']:
             if e.get('freno') != time.strftime('%Y-%m-%d'):
                 e['freno'] = time.strftime('%Y-%m-%d')
                 _log(e, f"⏸️ Cuenta real: pérdida del día {_pnl_hoy(e):+.2f} $ llegó al límite de {c['real_perdida_dia']} $: parada hasta mañana")
@@ -207,28 +406,51 @@ def paso():
         cu = cuentas.get(cuenta)
         if not cu or not cu['conectada']:
             continue
+        if not real and cu.get('simulada') is not True:
+            _log(e, 'Bloqueada cuenta no simulada en el plan de simulacion')
+            continue
         for x in ff.senales_ahora(ests, barras):
             if (cuenta, x['nt']) in ocupado or any(p['inst'] == x['full'] for p in cu['posiciones']):
                 continue
             if real:
                 if any(o['real'] for o in ab.values()):
                     break  # en la real, una posición a la vez
-                margen = c['real_perdida_dia'] + _pnl_hoy(e)
-                if x['riesgo_usd'] > margen:
-                    _log(e, f"🚫 REAL {x['nt']} ({x['estrategia']}): arriesga {x['riesgo_usd']} $ y solo quedan {margen:.2f} $ del día")
+                margen = c['real_perdida_dia'] + min(0, pnl_cuenta)
+                if riesgo_total(x['riesgo_usd'], c['qty']) > margen:
+                    _log(e, f"🚫 REAL {x['nt']}: el riesgo total supera el margen diario")
                     continue
+            solicitud = f"{x['est_id']}-{vela}"
             try:
-                r = puente('/orden', {'cuenta': cuenta, 'inst': x['nt'], 'lado': 'buy' if x['lado'] == 1 else 'sell', 'qty': c['qty'] if real else 1,
-                                      'sl_ticks': x['sl_ticks'], 'tp_ticks': x['tp_ticks'], 'id': f"{x['est_id']}-{vela}"})
+                _autorizar_envio(c, e, cuenta, real, x['riesgo_usd'])
             except SinPuente as ex:
-                _log(e, f"⚠️ {cuenta} {x['nt']}: orden rechazada: {ex}")
+                _log(e, f'entrada bloqueada: {ex}')
                 continue
+            nombre = 'DMN-E-' + hashlib.sha256((cuenta + '|' + x['full'] + '|' + solicitud).encode()).hexdigest().upper()[:32]
             ab[f"{cuenta}|{x['nt']}"] = {'cuenta': cuenta, 'real': real, 'nt': x['nt'], 'full': x['full'], 'inst': x['inst'], 'lado': x['lado'], 'ts': int(time.time()),
-                                        'hold': x['hold'], 'estrategia': x['estrategia'], 'est_id': x['est_id'], 'orden': r.get('nombre'),
-                                        'sl_ticks': x['sl_ticks'], 'tp_ticks': x['tp_ticks'], 'riesgo_usd': x['riesgo_usd'], 'realizado_antes': cu['realizado']}
+                                        'hold': x['hold'], 'qty': c['qty'] if real else 1, 'estrategia': x['estrategia'], 'est_id': x['est_id'], 'orden': nombre, 'estado': 'pendiente_conciliacion',
+                                        'sl_ticks': x['sl_ticks'], 'tp_ticks': x['tp_ticks'], 'riesgo_usd': riesgo_total(x['riesgo_usd'], c['qty'] if real else 1), 'realizado_antes': cu['realizado']}
+            db.poner_ajuste(EST, e)  # intencion durable antes del envio, tambien si se pierde la respuesta
+            try:
+                cuerpo = {'cuenta': cuenta, 'inst': x['nt'], 'lado': 'buy' if x['lado'] == 1 else 'sell', 'qty': c['qty'] if real else 1,
+                                      'sl_ticks': x['sl_ticks'], 'tp_ticks': x['tp_ticks'], 'id': solicitud}
+                if real:
+                    r = ejecutor.ejecutar('ninjatrader', cuenta, lambda: puente('/orden', cuerpo))
+                else:
+                    r = puente('/orden', cuerpo)
+                ab[f"{cuenta}|{x['nt']}"]['orden'] = r.get('nombre') or nombre
+                ab[f"{cuenta}|{x['nt']}"]['estado'] = 'enviada'
+            except ejecutor.Bloqueado as ex:
+                ab.pop(f"{cuenta}|{x['nt']}", None)
+                _log(e, f'{cuenta}: entrada no enviada; {ex}')
+                db.poner_ajuste(EST, e)
+                continue
+            except (SinPuente, ValueError) as ex:
+                _log(e, f"{cuenta} {x['nt']}: respuesta desconocida; conciliar antes de repetir")
+                db.poner_ajuste(EST, e)
+                continue
             ocupado.add((cuenta, x['nt']))
             _log(e, f"{'💵 REAL' if real else '🧪 Sim'} {'compra' if x['lado'] == 1 else 'vende en corto'} {x['nt']} por «{x['estrategia']}»: "
-                    f"stop {x['sl_ticks']} ticks / objetivo {x['tp_ticks']} ticks (arriesga {x['riesgo_usd']} $), máx. {x['hold'] * 5} min")
+                    f"stop {x['sl_ticks']} ticks / objetivo {x['tp_ticks']} ticks (arriesga {riesgo_total(x['riesgo_usd'], c['qty'] if real else 1)} $), máx. {x['hold'] * 5} min")
     db.poner_ajuste(EST, e)
 
 

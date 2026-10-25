@@ -15,6 +15,8 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Text;
+using System.Security.Cryptography;
+using System.Globalization;
 using System.Threading;
 using System.Web.Script.Serialization;
 using NinjaTrader.Cbi;
@@ -31,12 +33,74 @@ namespace NinjaTrader.NinjaScript.AddOns
 		private string token;
 		private readonly JavaScriptSerializer json = new JavaScriptSerializer { MaxJsonLength = 64 * 1024 * 1024 };
 		// entradas a la espera de llenarse: nombre de la orden → (sl_ticks, tp_ticks)
-		private readonly Dictionary<string, int[]> brackets = new Dictionary<string, int[]>();
+		
+		private readonly object ordenLock = new object();
+		private readonly Dictionary<string, string> ejecucionesVistas = new Dictionary<string, string>();
+		private bool libroSano = true;
+		private bool riesgoBloqueado;
+		private string motivoRiesgo;
+		private readonly Dictionary<string, string> proteccionesEntrada = new Dictionary<string, string>();
+		private readonly HashSet<string> emergenciasSolicitadas = new HashSet<string>();
+		private readonly string instanciaPuente = Guid.NewGuid().ToString("N");
+		private readonly DateTime arranquePuente = DateTime.UtcNow;
+		private readonly DateTime inicioCotizaciones = Core.Globals.Now;
+		private readonly Dictionary<Connection, DateTime> conexionesDesde = new Dictionary<Connection, DateTime>();
 		private readonly HashSet<Account> escuchando = new HashSet<Account>();
 		// posición DMN abierta por cuenta|instrumento y libro de operaciones cerradas
-		private class Abierta { public string Nombre; public double Entrada, Pnl, Comision; public int Qty, Restan; public bool Largo; public DateTime Desde; }
+		private class Abierta { public string Nombre; public double Entrada, Pnl, Comision, SalidaValor; public int Qty, Restan, SalidaQty; public bool Largo; public DateTime Desde; }
 		private readonly Dictionary<string, Abierta> abiertas = new Dictionary<string, Abierta>();
 		private readonly List<object> cerradas = new List<object>();
+
+		private class LibroPersistido
+		{
+			public Dictionary<string, Abierta> Abiertas;
+			public List<object> Cerradas;
+			public Dictionary<string, string> Ejecuciones;
+			public Dictionary<string, string> Protecciones;
+		}
+
+		private void BloquearLibro()
+		{
+			libroSano = false;
+			try { File.WriteAllText(Path.Combine(Dir, "libro-bloqueado.txt"), DateTime.UtcNow.ToString("O")); } catch { }
+		}
+
+		private void BloquearRiesgo(string motivo)
+		{
+			if (riesgoBloqueado && motivoRiesgo == motivo) return;
+			riesgoBloqueado = true;
+			motivoRiesgo = motivo;
+			try { File.WriteAllText(Path.Combine(Dir, "riesgo-bloqueado.txt"), DateTime.UtcNow.ToString("O") + "\n" + motivo); }
+			catch { BloquearLibro(); }
+		}
+
+		private void CargarLibro()
+		{
+			string bloqueo = Path.Combine(Dir, "riesgo-bloqueado.txt");
+			if (File.Exists(bloqueo)) { riesgoBloqueado = true; motivoRiesgo = File.ReadAllText(bloqueo); }
+			if (File.Exists(Path.Combine(Dir, "libro-bloqueado.txt"))) libroSano = false;
+			string ruta = Path.Combine(Dir, "libro.json");
+			if (!File.Exists(ruta)) return;
+			var estado = json.Deserialize<LibroPersistido>(File.ReadAllText(ruta));
+			if (estado == null || estado.Abiertas == null || estado.Cerradas == null || estado.Ejecuciones == null) throw new Exception("libro incompleto; conciliar antes de iniciar");
+			foreach (var par in estado.Abiertas) abiertas.Add(par.Key, par.Value);
+			cerradas.AddRange(estado.Cerradas);
+			foreach (var par in estado.Ejecuciones) ejecucionesVistas.Add(par.Key, par.Value);
+			if (estado.Protecciones != null) foreach (var par in estado.Protecciones) proteccionesEntrada.Add(par.Key, par.Value);
+		}
+
+		private void GuardarLibro()
+		{
+			try
+			{
+				string ruta = Path.Combine(Dir, "libro.json"), temporal = ruta + ".tmp";
+				var estado = new LibroPersistido { Abiertas = abiertas, Cerradas = cerradas, Ejecuciones = ejecucionesVistas, Protecciones = proteccionesEntrada };
+				using (var flujo = new FileStream(temporal, FileMode.Create, FileAccess.Write, FileShare.None))
+				using (var escritor = new StreamWriter(flujo)) { escritor.Write(json.Serialize(estado)); escritor.Flush(); flujo.Flush(true); }
+				if (File.Exists(ruta)) File.Replace(temporal, ruta, null); else File.Move(temporal, ruta);
+			}
+			catch { BloquearLibro(); throw; }
+		}
 
 		private static string Dir { get { return Path.Combine(NinjaTrader.Core.Globals.UserDataDir, "dmn"); } }
 
@@ -60,6 +124,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 			try
 			{
 				Directory.CreateDirectory(Dir);
+				CargarLibro();
 				string ft = Path.Combine(Dir, "token.txt");
 				if (!File.Exists(ft))
 					File.WriteAllText(ft, Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N"));
@@ -70,6 +135,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 				http = new HttpListener();
 				http.Prefixes.Add(Prefijo);
 				http.Start();
+				Connection.ConnectionStatusUpdate += AlCambiarConexion;
 				hilo = new Thread(Bucle) { IsBackground = true, Name = "DmnPuente" };
 				hilo.Start();
 				Log("puente escuchando en " + Prefijo);
@@ -79,6 +145,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 
 		private void Parar()
 		{
+			Connection.ConnectionStatusUpdate -= AlCambiarConexion;
 			try { if (http != null) http.Close(); } catch { }
 			lock (escuchando)
 				foreach (Account a in escuchando)
@@ -125,12 +192,14 @@ namespace NinjaTrader.NinjaScript.AddOns
 							b = json.Deserialize<Dictionary<string, object>>(sr.ReadToEnd());
 					if (ruta == "/estado") r = Estado();
 					else if (ruta == "/barras") r = Barras(c.Request.QueryString["inst"], Ent(c.Request.QueryString["min"], 5), Ent(c.Request.QueryString["dias"], 5));
+					else if (ruta == "/orden/estado" && metodo == "GET") r = EstadoOrden(c.Request.QueryString["cuenta"], c.Request.QueryString["nombre"]);
 					else if (ruta == "/orden" && metodo == "POST") r = Orden(b);
 					else if (ruta == "/cerrar" && metodo == "POST") r = Cerrar(b);
 					else if (ruta == "/cerradas") { lock (cerradas) r = new { cerradas = cerradas.ToList() }; }
 					else { codigo = 404; r = new { error = "ruta" }; }
 				}
 			}
+			catch (CierreSinDatos ex) { codigo = 409; r = new { error = ex.Message, codigo = "CIERRE_PENDIENTE_DATOS" }; }
 			catch (Exception ex) { codigo = 400; r = new { error = ex.Message }; }
 			try
 			{
@@ -152,12 +221,14 @@ namespace NinjaTrader.NinjaScript.AddOns
 			lock (Account.All)
 				foreach (Account a in Account.All)
 				{
+					// Retomar eventos de las cuentas permitidas despues de reinicio/reconexion.
+					try { CuentaPermitida(a.Name); } catch { }
 					cuentas.Add(new
 					{
 						nombre = a.Name,
 						conexion = a.Connection != null ? a.Connection.Options.Name : null,
 						conectada = a.Connection != null && a.Connection.Status == ConnectionStatus.Connected,
-						simulada = a.Provider == Provider.Simulator || a.Name.StartsWith("Sim") || a.Name == "Playback101" || a.Name == "Backtest",
+						simulada = a.Provider == Provider.Simulator,
 						saldo = a.Get(AccountItem.CashValue, Currency.UsDollar),
 						poder_compra = a.Get(AccountItem.BuyingPower, Currency.UsDollar),
 						realizado = a.Get(AccountItem.RealizedProfitLoss, Currency.UsDollar),
@@ -169,7 +240,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 							qty = p.Quantity,
 							precio = p.AveragePrice
 						}).ToList(),
-						ordenes = a.Orders.Where(o => o.OrderState == OrderState.Working || o.OrderState == OrderState.Accepted || o.OrderState == OrderState.Submitted).Select(o => new
+						ordenes = a.Orders.Where(o => o.OrderState == OrderState.Working || o.OrderState == OrderState.Accepted || o.OrderState == OrderState.Submitted || o.OrderState == OrderState.PartFilled || o.OrderState == OrderState.CancelPending).Select(o => new
 						{
 							nombre = o.Name,
 							inst = o.Instrument.FullName,
@@ -186,7 +257,67 @@ namespace NinjaTrader.NinjaScript.AddOns
 			lock (Connection.Connections)
 				foreach (Connection x in Connection.Connections)
 					conexiones.Add(new { nombre = x.Options.Name, estado = x.Status.ToString(), precios = x.PriceStatus.ToString() });
-			return new { ok = true, hora = DateTime.UtcNow, conexiones, cuentas, permitidas = Config().ContainsKey("cuentas_orden") ? Config()["cuentas_orden"] : null };
+			return new { ok = true, contrato = "dmn-puente/2", revision = "2026-10-24-rechazos-4", capacidades = new[] { "dmn-orden-estado/1" }, instancia = instanciaPuente, arranque_utc = arranquePuente, libro_sano = libroSano, riesgo_bloqueado = riesgoBloqueado, motivo_riesgo = motivoRiesgo, hora = DateTime.UtcNow, conexiones, cuentas, permitidas = Config().ContainsKey("cuentas_orden") ? Config()["cuentas_orden"] : null };
+		}
+
+		private object EstadoOrden(string cuenta, string nombre)
+		{
+			Account a = CuentaPermitida(cuenta);
+			if (string.IsNullOrEmpty(nombre) || !nombre.StartsWith("DMN-E-") || nombre.Length > 64) throw new Exception("identificador de entrada invalido");
+			if (!libroSano) return new { cuenta, nombre, estado = "desconocida" };
+			lock (cerradas)
+				foreach (object x in cerradas)
+				{
+					var c = json.Deserialize<Dictionary<string, object>>(json.Serialize(x));
+					if (Txt(c, "cuenta") == cuenta && Txt(c, "nombre") == nombre)
+						return new { cuenta, nombre, inst = Txt(c, "inst"), estado = "cerrada", cantidad = 0, cierre = c };
+				}
+			Order entrada;
+			lock (a.Orders) entrada = a.Orders.LastOrDefault(o => o.Name == nombre);
+			Abierta propia = null;
+			string instrumento = null;
+			lock (abiertas)
+				foreach (var x in abiertas)
+					if (x.Key.StartsWith(cuenta + "|") && x.Value.Nombre == nombre)
+					{
+						var v = x.Value;
+						propia = new Abierta { Nombre = v.Nombre, Qty = v.Qty, Restan = v.Restan, Largo = v.Largo };
+						instrumento = x.Key.Substring(cuenta.Length + 1);
+						break;
+					}
+			if (propia != null && propia.Restan > 0)
+			{
+				int cantidadBroker = 0;
+				bool ladoBroker = false;
+				lock (a.Positions)
+				{
+					var p = a.Positions.FirstOrDefault(x => x.Instrument.FullName == instrumento && x.MarketPosition != MarketPosition.Flat);
+					if (p != null) { cantidadBroker = p.Quantity; ladoBroker = p.MarketPosition == MarketPosition.Long; }
+				}
+				if (cantidadBroker != propia.Restan || ladoBroker != propia.Largo)
+					return new { cuenta, nombre, inst = instrumento, estado = "desconocida" };
+				int stops = 0, objetivos = 0;
+				OrderAction salida = propia.Largo ? OrderAction.Sell : OrderAction.BuyToCover;
+				lock (a.Orders)
+					foreach (var o in a.Orders.Where(o => o.Instrument.FullName == instrumento && o.OrderAction == salida &&
+						(o.OrderState == OrderState.Working || o.OrderState == OrderState.Accepted || o.OrderState == OrderState.PartFilled)))
+					{
+						if (o.Name.StartsWith("DMN-SL-") && o.OrderType == OrderType.StopMarket) stops += Math.Max(0, o.Quantity - o.Filled);
+						if (o.Name.StartsWith("DMN-TP-") && o.OrderType == OrderType.Limit) objetivos += Math.Max(0, o.Quantity - o.Filled);
+					}
+				bool protegida = stops == propia.Restan && objetivos == propia.Restan;
+				return new { cuenta, nombre, inst = instrumento, estado = protegida ? "abierta_protegida" : "abierta_sin_proteccion",
+					cantidad = propia.Restan, lado = propia.Largo ? "buy" : "sell" };
+			}
+			if (entrada != null)
+			{
+				bool plana;
+				lock (a.Positions) plana = !a.Positions.Any(x => x.Instrument.FullName == entrada.Instrument.FullName && x.MarketPosition != MarketPosition.Flat);
+				bool terminalSinFill = (entrada.OrderState == OrderState.Cancelled || entrada.OrderState == OrderState.Rejected) && entrada.Filled == 0 && plana && (Core.Globals.Now - entrada.Time).TotalSeconds >= 2;
+				return new { cuenta, nombre, inst = entrada.Instrument.FullName, cantidad = entrada.Filled,
+					estado = terminalSinFill ? "sin_ejecucion" : "pendiente" };
+			}
+			return new { cuenta, nombre, estado = "desconocida" };
 		}
 
 		private object Barras(string inst, int minutos, int dias)
@@ -246,18 +377,40 @@ namespace NinjaTrader.NinjaScript.AddOns
 
 		private object Orden(Dictionary<string, object> b)
 		{
+			lock (ordenLock) return OrdenUnica(b);
+		}
+
+		private static string Huella(string valor)
+		{
+			using (var sha = SHA256.Create()) return BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(valor))).Replace("-", "");
+		}
+
+		private object OrdenUnica(Dictionary<string, object> b)
+		{
+			if (!libroSano || riesgoBloqueado) throw new Exception("riesgo o libro pendiente de conciliacion; nuevas entradas bloqueadas");
 			Account a = CuentaPermitida(Txt(b, "cuenta"));
 			Instrument ins = Instrument.GetInstrument(Txt(b, "inst"));
 			if (ins == null) throw new Exception("instrumento desconocido");
-			int qty = Ent(Txt(b, "qty"), 1), maxq = Ent(Config().ContainsKey("max_contratos") ? Config()["max_contratos"].ToString() : "1", 1);
+			int qty = EnteroOrden(b, "qty"), maxq = Ent(Config().ContainsKey("max_contratos") ? Config()["max_contratos"].ToString() : "1", 1);
 			if (qty < 1 || qty > maxq) throw new Exception("cantidad fuera del límite (" + maxq + ")");
-			int sl = Ent(Txt(b, "sl_ticks"), 0), tp = Ent(Txt(b, "tp_ticks"), 0);
+			int sl = EnteroOrden(b, "sl_ticks"), tp = EnteroOrden(b, "tp_ticks");
 			if (sl < 1 || tp < 1) throw new Exception("toda entrada lleva stop y objetivo (sl_ticks y tp_ticks)");
 			if (a.Positions.Any(p => p.Instrument.FullName == ins.FullName && p.MarketPosition != MarketPosition.Flat))
 				throw new Exception("ya hay posición en " + ins.FullName);
-			bool compra = Txt(b, "lado") == "buy";
-			string nombre = "DMN-E-" + (Txt(b, "id") ?? DateTime.UtcNow.Ticks.ToString());
-			lock (brackets) brackets[nombre] = new[] { sl, tp };
+			string lado = Txt(b, "lado"), id = Txt(b, "id");
+			if (lado != "buy" && lado != "sell") throw new Exception("lado invalido: buy o sell");
+			if (string.IsNullOrWhiteSpace(id) || id.Length > 200) throw new Exception("id estable obligatorio");
+			bool compra = lado == "buy";
+			string nombre = "DMN-E-" + Huella(a.Name + "|" + ins.FullName + "|" + id).Substring(0, 32);
+			string intenciones = Path.Combine(Dir, "intenciones");
+			Directory.CreateDirectory(intenciones);
+			string archivo = Path.Combine(intenciones, nombre + ".txt");
+			if (File.Exists(archivo)) throw new Exception("solicitud ya registrada; conciliar " + nombre + " antes de reintentar");
+			lock (a.Orders)
+				if (a.Orders.Any(x => x.Instrument.FullName == ins.FullName && x.OrderState != OrderState.Filled && x.OrderState != OrderState.Cancelled && x.OrderState != OrderState.Rejected))
+					throw new Exception("hay ordenes pendientes en " + ins.FullName);
+			using (var f = new FileStream(archivo, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+			using (var w = new StreamWriter(f)) { w.WriteLine(sl); w.WriteLine(tp); w.Flush(); f.Flush(true); }
 			Order o = a.CreateOrder(ins, compra ? OrderAction.Buy : OrderAction.SellShort, OrderType.Market, OrderEntry.Automated, TimeInForce.Day,
 				qty, 0, 0, string.Empty, nombre, Core.Globals.MaxDate, null);
 			a.Submit(new[] { o });
@@ -265,35 +418,114 @@ namespace NinjaTrader.NinjaScript.AddOns
 			return new { ok = true, nombre, estado = o.OrderState.ToString() };
 		}
 
-		// al llenarse una entrada DMN pone su stop y su objetivo (OCO): nunca hay posición sin stop
+		private static int EnteroOrden(Dictionary<string, object> b, string campo)
+		{
+			int valor;
+			if (!int.TryParse(Txt(b, campo), out valor) || valor < 1) throw new Exception(campo + " debe ser entero positivo");
+			return valor;
+		}
+
+		private void SolicitarCierreEmergencia(Account cuenta, Instrument instrumento, string entrada)
+		{
+			Abierta propia;
+			lock (abiertas)
+			{
+				if (!abiertas.TryGetValue(cuenta.Name + "|" + instrumento.FullName, out propia) || propia.Nombre != entrada || propia.Restan <= 0)
+				{ Log("cierre no enviado: falta confirmar posicion propia"); return; }
+			}
+			lock (cuenta.Positions)
+			{
+				var p = cuenta.Positions.FirstOrDefault(x => x.Instrument.FullName == instrumento.FullName && x.MarketPosition != MarketPosition.Flat);
+				if (p == null || p.Quantity != propia.Restan || (p.MarketPosition == MarketPosition.Long) != propia.Largo)
+				{ Log("cierre no enviado: posicion distinta del libro; conciliacion necesaria"); return; }
+			}
+			try { ValidarDatosCierre(cuenta, instrumento); }
+			catch (Exception ex) { Log("CIERRE PENDIENTE: " + ex.Message); return; }
+			lock (cuenta.Orders)
+				if (cuenta.Orders.Any(o => o.Instrument.FullName == instrumento.FullName && o.Name == "Close" && o.OrderState != OrderState.Filled && o.OrderState != OrderState.Cancelled && o.OrderState != OrderState.Rejected)) return;
+			lock (ordenLock)
+			{
+				string clave = cuenta.Name + "|" + instrumento.FullName + "|" + entrada;
+				if (!emergenciasSolicitadas.Add(clave)) return;
+			}
+			try { cuenta.Flatten(new[] { instrumento }); }
+			catch (Exception ex) { Log("CIERRE NO CONFIRMADO: " + ex.Message); }
+		}
+
 		private void AlActualizarOrden(object sender, OrderEventArgs e)
 		{
-			if (e.OrderState != OrderState.Filled || e.Order == null || !e.Order.Name.StartsWith("DMN-E-")) return;
-			int[] st;
-			lock (brackets)
+			if (e == null || e.Order == null || string.IsNullOrEmpty(e.Order.Name) || e.OrderState != OrderState.Rejected) return;
+			string nombre = e.Order.Name;
+			if (nombre == "Close")
 			{
-				if (!brackets.TryGetValue(e.Order.Name, out st)) return;
-				brackets.Remove(e.Order.Name);
+				bool viva;
+				lock (e.Order.Account.Positions) viva = e.Order.Account.Positions.Any(p => p.Instrument.FullName == e.Order.Instrument.FullName && p.MarketPosition != MarketPosition.Flat);
+				if (viva) { BloquearRiesgo("cierre_rechazado: verificar posicion antes de reanudar"); Log("CIERRE RECHAZADO: no se considera plana la cuenta"); }
+				return;
 			}
-			try
+			bool stop = nombre.StartsWith("DMN-SL-");
+			if (!stop && !nombre.StartsWith("DMN-TP-")) return;
+			string entrada;
+			lock (ordenLock)
+				if (!proteccionesEntrada.TryGetValue(e.Order.Account.Name + "|" + nombre, out entrada))
+				{ BloquearRiesgo("proteccion_rechazada_sin_ambito: requiere conciliacion"); return; }
+			bool vigente;
+			lock (abiertas)
 			{
-				Account a = e.Order.Account;
-				Instrument ins = e.Order.Instrument;
-				double t = ins.MasterInstrument.TickSize, p = e.AverageFillPrice;
-				bool largo = e.Order.OrderAction == OrderAction.Buy;
-				string oco = "DMN-OCO-" + e.Order.Name.Substring(6);
-				OrderAction salida = largo ? OrderAction.Sell : OrderAction.BuyToCover;
-				double stop = ins.MasterInstrument.RoundToTickSize(largo ? p - st[0] * t : p + st[0] * t);
-				double obj = ins.MasterInstrument.RoundToTickSize(largo ? p + st[1] * t : p - st[1] * t);
-				Order s = a.CreateOrder(ins, salida, OrderType.StopMarket, OrderEntry.Automated, TimeInForce.Gtc, e.Filled, 0, stop, oco, "DMN-SL-" + e.Order.Name.Substring(6), Core.Globals.MaxDate, null);
-				Order g = a.CreateOrder(ins, salida, OrderType.Limit, OrderEntry.Automated, TimeInForce.Gtc, e.Filled, obj, 0, oco, "DMN-TP-" + e.Order.Name.Substring(6), Core.Globals.MaxDate, null);
-				a.Submit(new[] { s, g });
-				Log("bracket de " + e.Order.Name + ": stop " + stop + " / objetivo " + obj);
+				Abierta propia;
+				vigente = abiertas.TryGetValue(e.Order.Account.Name + "|" + e.Order.Instrument.FullName, out propia) && propia.Nombre == entrada && propia.Restan > 0;
 			}
-			catch (Exception ex)
+			if (!vigente)
 			{
-				Log("¡no pude poner el stop de " + e.Order.Name + "! cierro la posición: " + ex.Message);
-				try { e.Order.Account.Flatten(new[] { e.Order.Instrument }); } catch { }
+				bool cerrada;
+				lock (cerradas) cerrada = cerradas.Any(x => { var c = json.Deserialize<Dictionary<string,object>>(json.Serialize(x)); return Txt(c,"cuenta") == e.Order.Account.Name && Txt(c,"nombre") == entrada; });
+				if (!cerrada) BloquearRiesgo("rechazo_sin_posicion_conciliada");
+				return;
+			}
+			BloquearRiesgo(stop ? "stop_rechazado: cierre de emergencia pendiente de confirmar" : "objetivo_rechazado: verificar stop y conciliar");
+			if (stop) SolicitarCierreEmergencia(e.Order.Account, e.Order.Instrument, entrada);
+		}
+
+		// Cada ejecucion parcial recibe proteccion para su propia cantidad.
+		private void Proteger(Execution x)
+		{
+			lock (ordenLock)
+			{
+				string archivo = Path.Combine(Dir, "intenciones", x.Order.Name + ".txt");
+				string marca = Path.Combine(Dir, "intenciones", "exec-" + Huella(x.Account.Name + "|" + x.ExecutionId) + ".txt");
+				if (File.Exists(marca))
+				{
+					BloquearLibro();
+					Log("proteccion con resultado desconocido: conciliar antes de nuevas entradas " + x.ExecutionId);
+					return;
+				}
+				try
+				{
+					var st = File.ReadAllLines(archivo);
+					int sl = int.Parse(st[0]), tp = int.Parse(st[1]);
+					Account a = x.Account; Instrument ins = x.Instrument;
+					double t = ins.MasterInstrument.TickSize, p = x.Price;
+					bool largo = x.Order.OrderAction == OrderAction.Buy;
+					string sufijo = Huella(a.Name + "|" + x.ExecutionId).Substring(0, 24);
+					string oco = "DMN-OCO-" + sufijo;
+					OrderAction salida = largo ? OrderAction.Sell : OrderAction.BuyToCover;
+					double stop = ins.MasterInstrument.RoundToTickSize(largo ? p - sl * t : p + sl * t);
+					double obj = ins.MasterInstrument.RoundToTickSize(largo ? p + tp * t : p - tp * t);
+					// La intencion de proteccion tambien precede al envio; una ambiguedad exige conciliacion.
+					File.WriteAllText(marca, "proteccion solicitada");
+					Order s = a.CreateOrder(ins, salida, OrderType.StopMarket, OrderEntry.Automated, TimeInForce.Gtc, x.Quantity, 0, stop, oco, "DMN-SL-" + sufijo, Core.Globals.MaxDate, null);
+					Order g = a.CreateOrder(ins, salida, OrderType.Limit, OrderEntry.Automated, TimeInForce.Gtc, x.Quantity, obj, 0, oco, "DMN-TP-" + sufijo, Core.Globals.MaxDate, null);
+					proteccionesEntrada[a.Name + "|" + s.Name] = x.Order.Name;
+					proteccionesEntrada[a.Name + "|" + g.Name] = x.Order.Name;
+					GuardarLibro();
+					a.Submit(new[] { s, g });
+				}
+				catch (Exception ex)
+				{
+					BloquearRiesgo("proteccion_no_confirmada: requiere conciliacion");
+					Log("PROTECCION NO CONFIRMADA: " + ex.Message);
+					SolicitarCierreEmergencia(x.Account, x.Instrument, x.Order.Name);
+				}
 			}
 		}
 
@@ -303,11 +535,21 @@ namespace NinjaTrader.NinjaScript.AddOns
 			try
 			{
 				Execution x = e.Execution;
-				if (x == null || x.Order == null) return;
+				if (x == null || x.Order == null || string.IsNullOrEmpty(x.Order.Name)) return;
+				if (string.IsNullOrEmpty(x.ExecutionId) || x.Quantity <= 0 || double.IsNaN(x.Price) || double.IsInfinity(x.Price)) { BloquearLibro(); return; }
 				string clave = x.Account.Name + "|" + x.Instrument.FullName;
 				double pv = x.Instrument.MasterInstrument.PointValue;
 				lock (abiertas)
 				{
+					string id = x.Account.Name + "|" + x.ExecutionId;
+					string huella = Huella(x.Instrument.FullName + "|" + x.Order.Name + "|" + x.Quantity + "|" + x.Price.ToString("R", CultureInfo.InvariantCulture) + "|" + x.Commission.ToString("R", CultureInfo.InvariantCulture));
+					string anterior;
+					if (ejecucionesVistas.TryGetValue(id, out anterior))
+					{
+						if (anterior != huella) { BloquearLibro(); Log("ejecucion corregida por el broker; conciliar " + x.ExecutionId); }
+						return;
+					}
+					ejecucionesVistas.Add(id, huella);
 					Abierta a;
 					abiertas.TryGetValue(clave, out a);
 					bool compra = x.Order.OrderAction == OrderAction.Buy || x.Order.OrderAction == OrderAction.BuyToCover;
@@ -319,36 +561,94 @@ namespace NinjaTrader.NinjaScript.AddOns
 						a.Qty += x.Quantity;
 						a.Restan += x.Quantity;
 						a.Comision += x.Commission;
+						GuardarLibro();
+						Proteger(x);
 						return;
 					}
-					if (a == null || compra == a.Largo) return;
+					if (a == null || compra == a.Largo) { GuardarLibro(); return; }
 					int q = Math.Min(x.Quantity, a.Restan);
 					a.Pnl += (x.Price - a.Entrada) * q * pv * (a.Largo ? 1 : -1);
-					a.Comision += x.Commission;
-					a.Restan -= q;
-					if (a.Restan > 0) return;
+						a.Comision += x.Commission * q / x.Quantity;
+						a.SalidaValor += x.Price * q;
+						a.SalidaQty += q;
+						a.Restan -= q;
+					if (a.Restan > 0) { GuardarLibro(); return; }
 					abiertas.Remove(clave);
 					lock (cerradas)
 					{
 						cerradas.Add(new { nombre = a.Nombre, cuenta = x.Account.Name, inst = x.Instrument.FullName, largo = a.Largo, qty = a.Qty,
-							entrada = a.Entrada, salida = x.Price, por = x.Order.Name, pnl = Math.Round(a.Pnl - a.Comision, 2), comision = a.Comision,
+							entrada = a.Entrada, salida = a.SalidaValor / a.SalidaQty, por = x.Order.Name, pnl = Math.Round(a.Pnl - a.Comision, 2), comision = a.Comision,
 							desde = a.Desde, hasta = x.Time });
-						if (cerradas.Count > 500) cerradas.RemoveAt(0);
+						GuardarLibro();
 					}
 					Log("cerrada " + a.Nombre + ": " + Math.Round(a.Pnl - a.Comision, 2) + " $");
 				}
 			}
-			catch (Exception ex) { Log("libro: " + ex.Message); }
+			catch (Exception ex) { BloquearLibro(); Log("libro no conciliado: " + ex.Message); }
+		}
+
+		private class CierreSinDatos : Exception
+		{
+			public CierreSinDatos() : base("CIERRE_PENDIENTE_DATOS: sin cotizaciones recientes y validas; se conservan las protecciones") { }
+		}
+
+		private void AlCambiarConexion(object sender, ConnectionStatusEventArgs e)
+		{
+			if (e.Connection == null) return;
+			if (e.PriceStatus != e.PreviousPriceStatus || e.Status != e.PreviousStatus)
+				lock (conexionesDesde) conexionesDesde[e.Connection] = Core.Globals.Now;
+		}
+
+		private static bool DatosCierreValidos(bool conectado, double bid, double ask, DateTime ultimo, DateTime desde, DateTime ahora)
+		{
+			return conectado && !double.IsNaN(bid) && !double.IsInfinity(bid) && !double.IsNaN(ask) && !double.IsInfinity(ask)
+				&& bid > 0 && ask > 0 && bid <= ask && ultimo >= desde
+				&& (ahora - ultimo).TotalSeconds >= -5 && (ahora - ultimo).TotalSeconds <= 30;
+		}
+
+		private void ValidarDatosCierre(Account a, Instrument ins)
+		{
+			if (a.Connection == null) throw new CierreSinDatos();
+			DateTime desde;
+			lock (conexionesDesde)
+				if (!conexionesDesde.TryGetValue(a.Connection, out desde)) desde = inicioCotizaciones;
+			double bid = 0, ask = 0;
+			DateTime ultimo = DateTime.MinValue;
+			lock (ins.SyncMarketData)
+			{
+				var md = ins.MarketData;
+				if (md != null)
+				{
+					if (md.Bid != null) { bid = md.Bid.Price; if (md.Bid.Time > ultimo) ultimo = md.Bid.Time; }
+					if (md.Ask != null) { ask = md.Ask.Price; if (md.Ask.Time > ultimo) ultimo = md.Ask.Time; }
+					if (md.Last != null && md.Last.Time > ultimo) ultimo = md.Last.Time;
+				}
+			}
+			if (!DatosCierreValidos(a.Connection != null && a.Connection.Status == ConnectionStatus.Connected && a.Connection.PriceStatus == ConnectionStatus.Connected,
+				bid, ask, ultimo, desde, Core.Globals.Now)) throw new CierreSinDatos();
 		}
 
 		private object Cerrar(Dictionary<string, object> b)
 		{
-			Account a = CuentaPermitida(Txt(b, "cuenta"));
-			Instrument ins = Instrument.GetInstrument(Txt(b, "inst"));
-			if (ins == null) throw new Exception("instrumento desconocido");
-			a.Flatten(new[] { ins });
-			Log("cerrada " + ins.FullName + " en " + a.Name);
-			return new { ok = true };
+			lock (ordenLock)
+			{
+				Account a = CuentaPermitida(Txt(b, "cuenta"));
+				Instrument ins = Instrument.GetInstrument(Txt(b, "inst"));
+				if (ins == null) throw new Exception("instrumento desconocido");
+				lock (a.Orders)
+				{
+					var pendiente = a.Orders.FirstOrDefault(o => o.Instrument.FullName == ins.FullName && o.Name == "Close"
+						&& o.OrderState != OrderState.Filled && o.OrderState != OrderState.Cancelled && o.OrderState != OrderState.Rejected);
+					if (pendiente != null) return new { ok = true, estado = "pendiente", nombre = pendiente.Name };
+				}
+				bool abierta;
+				lock (a.Positions) abierta = a.Positions.Any(p => p.Instrument.FullName == ins.FullName && p.MarketPosition != MarketPosition.Flat);
+				// Flatten cancela protecciones: no llamarlo si el precio no puede verificarse.
+				if (abierta) ValidarDatosCierre(a, ins);
+				a.Flatten(new[] { ins });
+				Log("cierre solicitado de " + ins.FullName + " en " + a.Name + "; confirmar ejecucion");
+				return new { ok = true, estado = "solicitado" };
+			}
 		}
 	}
 }

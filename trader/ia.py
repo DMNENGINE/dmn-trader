@@ -65,22 +65,36 @@ def entrenar(filas=None, limite=4000, extra=None):
     """filas: [(rasgos_dict, genoma_dict, direccion, r)] de más antigua a más reciente. Devuelve el modelo (y lo guarda).
     extra: operaciones simuladas en semanas de velas reales: solo se usan para ENTRENAR; la validación sigue siendo
     con las operaciones reales más recientes del enjambre (lo que de verdad importa)."""
+    temporal = filas is None
+    periodos = []
     if filas is None:
         filas = []
-        for t in db.q("SELECT rasgos, genoma, direccion, r FROM ag_trades WHERE r IS NOT NULL AND COALESCE(causa,'')<>'sistema' ORDER BY trade_id DESC LIMIT ?", (limite,))[::-1]:
+        for t in db.q("SELECT a.rasgos, a.genoma, a.direccion, a.r, t.abierto, t.cerrado FROM ag_trades a JOIN trades t ON t.id=a.trade_id WHERE a.r IS NOT NULL AND t.abierto IS NOT NULL AND t.cerrado>=t.abierto AND COALESCE(a.causa,'')<>'sistema' ORDER BY t.abierto DESC, t.id DESC LIMIT ?", (limite,))[::-1]:
             try:
                 filas.append((json.loads(t['rasgos']), json.loads(t['genoma']), 1 if t['direccion'] == 'largo' else -1, t['r']))
+                periodos.append((t['abierto'], t['cerrado']))
             except Exception:
                 pass
     if len(filas) < MIN_TRADES:
         m = {'ok': False, 'n': len(filas), 'motivo': f'pocas operaciones para aprender ({len(filas)}/{MIN_TRADES})', 'ts': int(time.time())}
         return _guardar(m)
-    extra = [tuple(x) for x in (extra or [])]
+    # Extras sin fechas de maduracion no pueden demostrar ausencia de solapamiento.
+    extra = []
     filas = extra + filas
     X = [rasgos(r, g, d) for r, g, d, _ in filas]
     y = [1 if r > 0 else 0 for *_, r in filas]
     R = [r for *_, r in filas]
     corte = len(extra) + int((len(X) - len(extra)) * 0.75)  # valida con lo más reciente del enjambre real, que el modelo no vio
+    validacion = corte
+    if temporal:
+        frontera = periodos[validacion][0]
+        indices = [i for i in range(corte) if periodos[i][1] < frontera]
+        X = [X[i] for i in indices] + X[validacion:]
+        y = [y[i] for i in indices] + y[validacion:]
+        R = [R[i] for i in indices] + R[validacion:]
+        corte = len(indices)
+    if corte < 10 or not y[corte:]:
+        return _guardar({'ok': False, 'n': len(X), 'motivo': 'pocas muestras tras purga temporal', 'ts': int(time.time())})
     mu, sd = _norm(X[:corte])
     Z = [[(a - m) / s for a, m, s in zip(x, mu, sd)] for x in X]
     w = _entrenar(Z[:corte], y[:corte])
@@ -90,10 +104,9 @@ def entrenar(filas=None, limite=4000, extra=None):
     test = list(zip(ps, R[corte:]))
     buenos = [r for p, r in test if p >= 0.5]
     r_todos, r_filtro = statistics.fmean(R[corte:]), (statistics.fmean(buenos) if buenos else None)
-    ok = ll < llb * 0.995 and r_filtro is not None and r_filtro > r_todos and len(buenos) >= 15
-    mu, sd = _norm(X)  # modelo final con todo
-    w = _entrenar([[(a - m) / s for a, m, s in zip(x, mu, sd)] for x in X], y)
-    m = {'ok': ok, 'n': len(X), 'n_sim': len(extra), 'nf': len(X[0]), 'w': w, 'mu': mu, 'sd': sd, 'ts': int(time.time()), 'logloss': round(ll, 4), 'logloss_base': round(llb, 4),
+    ok = temporal and ll < llb * 0.995 and r_filtro is not None and r_filtro > r_todos and len(buenos) >= 15
+    # Conservar exactamente el modelo medido sobre validacion fuera de muestra.
+    m = {'validacion': 'temporal_purgada' if temporal else 'sin_fechas_no_promovible', 'modelo_congelado': True, 'n_entreno': corte, 'n_validacion': len(y)-corte, 'ok': ok, 'n': len(X), 'n_sim': len(extra), 'nf': len(X[0]), 'w': w, 'mu': mu, 'sd': sd, 'ts': int(time.time()), 'logloss': round(ll, 4), 'logloss_base': round(llb, 4),
          'r_todos': round(r_todos, 3), 'r_filtrado': round(r_filtro, 3) if r_filtro is not None else None, 'aceptadas_pct': round(len(buenos) / len(test) * 100),
          'motivo': 'predice mejor que el azar en operaciones nuevas' if ok else 'aún no predice mejor que el azar: no filtra'}
     return _guardar(m)

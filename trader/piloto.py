@@ -5,8 +5,10 @@ vigila el propio GMGN. Solo una orden suya a la vez; la anula si no entra a tiem
 Frenos duros: pérdida máxima del total (se apaga), pausa tras 2 stops seguidos, tope de operaciones al día, reserva de SOL
 para comisiones, enfriamiento por token tras un stop. Corre donde está gmgn-cli con la key (el PC); la configuración la
 pone el panel de la central y llega aquí con la respuesta de la sincronía de real.py."""
-import threading, time
-from . import conciencia, db, llm, onchain, real
+import threading, time, math
+from decimal import Decimal, InvalidOperation
+from . import conciencia, db, llm, onchain, real, contabilidad_gmgn as CG, supervision_gmgn as SG
+from .presupuesto_gmgn import EntradaNoEnviada, presupuesto, PRIORIDAD, PROPINA
 
 CFG, EST = 'piloto_cfg', 'piloto_estado'
 CADA = 300            # escaneo
@@ -15,22 +17,42 @@ CADA_IA = 300         # revisión de la posición por el modelo
 CADA_VELAS = 300
 DEFECTO = {'activo': False, 'tarea': 'memes_sol', 'por_op_sol': 0.01, 'perdida_max_sol': 0.008, 'reserva_sol': 0.005,
            'max_ops_dia': 6, 'umbral': 6, 'atr_max': 8.0, 'espera_min': 45, 'pausa_stops_h': 3, 'enfriar_token_h': 6,
-           'gestion': True, 'ia': True, 'smart_salida_usd': 300.0, 'ia_conf_min': 0.7, 'fuente': 'fabrica'}
+           'gestion': True, 'ia': True, 'smart_salida_usd': 300.0, 'ia_conf_min': 0.7, 'fuente': 'fabrica',
+           'conciliado': 0}
+# conciliado: marca de tiempo del botón «Ya lo revisé» del panel (desbloquea entradas tras revisar GMGN a mano)
 # fuente 'fabrica': solo opera las estrategias que la fábrica ha PROMOVIDO (ganan en vivo); 'retroceso': el escáner antiguo
 _hilo = {'t': None}
 _ult = {'scan': 0, 'smart': 0}
 
 
 def cfg():
-    return {**DEFECTO, **(db.ajuste(CFG) or {})}
+    c = {**DEFECTO, **(db.ajuste(CFG) or {})}
+    invalida = any(not isinstance(c[k], bool) for k in ('activo', 'gestion', 'ia'))
+    invalida = invalida or any(isinstance(c[k], bool) or not isinstance(c[k], (int, float)) or not math.isfinite(c[k]) or c[k] < 0 for k, v in DEFECTO.items() if isinstance(v, (int, float)) and not isinstance(v, bool))
+    if invalida or c['perdida_max_sol'] <= 0 or c['max_ops_dia'] <= 0:
+        return {**DEFECTO, 'activo': False, 'error_cfg': 'configuracion persistida invalida; piloto bloqueado'}
+    return c
 
 
 def poner_cfg(nuevo):
     """Desde el panel / APOLO. Al activar se fija el saldo de partida para medir la pérdida máxima."""
     c = cfg()
+    if not isinstance(nuevo, dict):
+        raise ValueError('configuracion debe ser un objeto')
     for k, v in (nuevo or {}).items():
         if k in DEFECTO:
-            c[k] = type(DEFECTO[k])(v) if not isinstance(DEFECTO[k], bool) else bool(v)
+            defecto = DEFECTO[k]
+            if isinstance(defecto, bool):
+                if not isinstance(v, bool):
+                    raise ValueError(k + ' debe ser booleano')
+            elif isinstance(defecto, (int, float)):
+                if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0 or (isinstance(defecto, int) and not isinstance(v, int)):
+                    raise ValueError(k + ' debe ser numerico, finito y no negativo')
+            elif not isinstance(v, str):
+                raise ValueError(k + ' debe ser texto')
+            c[k] = v
+    if c['perdida_max_sol'] <= 0 or c['max_ops_dia'] <= 0:
+        raise ValueError('perdida maxima y operaciones diarias deben ser positivas')
     c['por_op_sol'] = max(0.005, min(c['por_op_sol'], 0.1))  # tope duro: nunca más de 0,1 SOL por operación desde aquí
     c['cambiado'] = int(time.time())
     db.poner_ajuste(CFG, c)
@@ -57,7 +79,18 @@ def estado():
         fut = piloto_fut.estado() if _hilo['t'] else None
     except Exception:
         fut = None
-    return {**(db.ajuste(EST) or {}), 'cfg': cfg(), 'lab': lab, 'fabrica': fab, 'conciencia': con, 'futuros': fut}
+    actual = db.ajuste(EST) or {}
+    operaciones = [dict(o) for o in actual.get('ops') or []]
+    for o in operaciones:
+        if not o.get('pnl_confirmado'):
+            o['pnl_sin_verificar_sol'] = o.get('pnl_sol')
+            o['pnl_sol'] = None
+    for i in range(max(0,len(operaciones)-20),len(operaciones)):
+        operaciones[i] = {**operaciones[i], 'contabilidad': CG.resumen(operaciones[i])}
+    from . import observatorio_gmgn as O
+    informe = O.informe()
+    return {**actual, 'observatorio': informe, 'observatorio_servicio': db.ajuste('gmgn_observatorio_servicio'), 'ops': operaciones, 'cfg': cfg(), 'lab': lab, 'fabrica': fab, 'conciencia': con, 'futuros': fut,
+            'supervision': SG.estado(actual, cfg(), fab), 'contabilidad_orden': CG.resumen(actual['orden']) if actual.get('orden') else None}
 
 
 def _est():
@@ -73,7 +106,10 @@ def _saldo():
         real._ultimo['info'] = onchain._api('/v1/user/info')
     w = real._wallet()
     d = onchain._api('/v1/user/wallet_token_balance', chain='sol', wallet_address=w, token_address='So11111111111111111111111111111111111111111')
-    return float(d['balances'][0]['balance']), w
+    valor = float(d['balances'][0]['balance'])
+    if not w or not math.isfinite(valor) or valor < 0:
+        raise ValueError('saldo SOL no verificable')
+    return valor, w
 
 
 # ---------------- elegir moneda ----------------
@@ -135,31 +171,141 @@ def candidatos(evitar=()):
 
 # ---------------- órdenes ----------------
 
-def _crear(w, c, precio, compra=None, tp=None, sl=None):
+def _crear(w, c, precio, compra=None, tp=None, sl=None, config=None):
+    config = cfg() if config is None else config
+    def vigente():
+        if cfg() != config:
+            raise EntradaNoEnviada('configuracion modificada antes del envio')
+    vigente()
+    if isinstance(precio, bool) or not isinstance(precio, (int, float)) or not math.isfinite(precio) or precio <= 0:
+        raise EntradaNoEnviada('precio no verificable')
     sl = sl or max(8.0, min(2.5 * c['atr'], 18.0))
     tp = tp or 2 * sl
     compra = compra or precio * (1 - c['atr'] / 200)  # medio ATR por debajo: no perseguir
-    lam = str(int(cfg()['por_op_sol'] * 1e9))
-    bp = '{"slippage":10,"priority_fee":"0.00001","tip_fee":"0.00001"}'
+    for valor in (compra, tp, sl):
+        if isinstance(valor, bool) or not isinstance(valor, (int, float)) or not math.isfinite(valor) or valor <= 0:
+            raise EntradaNoEnviada('parametros de orden no verificables')
+    if Decimal('%.10g' % compra) >= Decimal('%.10g' % precio):
+        raise EntradaNoEnviada('buy_low requiere precio inferior al actual; entrada inmediata no implementada')
+    lam = str(presupuesto(config)['importe_lamports'])
+    bp = '{"slippage":10,"priority_fee":"%s","tip_fee":"%s"}' % (PRIORIDAD, PROPINA)
     co = ('[{"order_type":"buy_low","side":"buy","check_price":"%.10g"},'
           '{"order_type":"profit_stop","side":"sell","price_scale":"%g","sell_ratio":"100"},'
           '{"order_type":"loss_stop","side":"sell","price_scale":"%g","sell_ratio":"100"}]') % (compra, round(tp, 1), round(sl, 1))
     r = real._cli('order', 'strategy', 'create', '--chain', 'sol', '--from', w, '--base-token', c['token'], '--quote-token', real.SOL,
                   '--order-type', 'smart_trade', '--sub-order-type', 'mix_trade', '--open-price', '%.10g' % precio,
-                  '--amount-in', lam, '--quote-investment', lam, '--slippage', '10', '--priority-fee', '0.00001',
-                  '--tip-fee', '0.00001', '--buy-param', bp, '--sell-param', bp, '--condition-orders', co)
+                  '--amount-in', lam, '--quote-investment', lam, '--slippage', '10', '--priority-fee', PRIORIDAD,
+                  '--tip-fee', PROPINA, '--buy-param', bp, '--sell-param', bp, '--condition-orders', co, preflight=vigente)
     return r['order_id'], compra, tp, sl
 
 
-def _buscar(oid):
-    for tipo in ('open', 'history'):
+def _crear_seguro(e, w, candidato, precio, **kw):
+    config = _autorizar_entrada(e, w)
+    if e.get('intencion_entrada'):
+        raise RuntimeError('entrada pendiente de conciliacion; no se reenvia')
+    e['intencion_entrada'] = {'ts': int(time.time()), 'wallet': w, 'token': candidato['token'], 'estado': 'enviando'}
+    db.poner_ajuste(EST, e)
+    from . import ejecutor
+    try:
+        resultado = _crear(w, candidato, precio, config=config, **kw)
+    except (ejecutor.Bloqueado, EntradaNoEnviada):
+        e.pop('intencion_entrada', None)
+        db.poner_ajuste(EST, e)
+        raise
+    oid, compra, tp, sl = resultado
+    # Guardar el identificador antes de devolver el control al bucle.
+    e['orden'] = {**candidato, 'id': oid, 'creada': int(time.time()), 'wallet': w, 'compra': compra, 'tp': tp, 'sl': sl,
+                  'sol': presupuesto(config)['importe_lamports'] / 1e9, 'saldo_antes': e.get('saldo', 0), 'pts': candidato.get('pts', 0)}
+    e.pop('intencion_entrada', None)
+    CG.operacion(e['orden'])
+    db.poner_ajuste(EST, e)
+    return resultado
+
+
+def _autorizar_entrada(e, wallet):
+    from . import observatorio_gmgn as O
+    try:
+        return _autorizar_entrada_base(e, wallet)
+    except Exception as ex:
         try:
-            for o in (real._cli('order', 'strategy', 'list', '--chain', 'sol', '--group-tag', 'STMix', '--type', tipo, '--limit', '20') or {}).get('list') or []:
-                if o.get('order_id') == oid:
-                    return tipo, o
+            message = str(ex).lower()
+            categories = [('desactivado', 'piloto_apagado'), ('incidencia', 'incidencia_pendiente'), ('wallet', 'wallet_no_conciliada'), ('base de riesgo', 'base_de_riesgo_no_verificable'), ('presupuesto', 'presupuesto_insuficiente'), ('previa', 'operacion_previa_pendiente'), ('configuracion', 'configuracion_modificada')]
+            reason = next((value for key, value in categories if key in message), 'prevalidacion_no_superada')
+            O.decision('entrada_bloqueada', motivo=reason, datos={'error_tipo': type(ex).__name__})
         except Exception:
             pass
-    return None, None
+        raise
+
+
+def _autorizar_entrada_base(e, wallet):
+    """Revalidar despues de escaner/IA: apagar el piloto debe impedir el envio tardio."""
+    c = cfg()
+    if c.get('activo') is not True:
+        raise ValueError('piloto desactivado antes del envio')
+    SG.admitir(wallet)
+    saldo, actual = _saldo()
+    if actual != wallet or (e.get('riesgo_wallet') and e['riesgo_wallet'] != wallet):
+        raise ValueError('wallet distinta de la sesion de riesgo')
+    base = e.get('saldo_inicio')
+    if base is None or isinstance(base, bool) or not isinstance(base, (int, float)) or not math.isfinite(base):
+        raise ValueError('base de riesgo no verificable')
+    plan = presupuesto(c)
+    saldo_lamports = Decimal(str(saldo)) * 1000000000
+    if base - saldo >= c['perdida_max_sol'] or saldo_lamports < plan['necesario_lamports']:
+        raise ValueError('entrada fuera del presupuesto de riesgo')
+    if e.get('orden') or e.get('intencion_entrada'):
+        raise ValueError('operacion previa sin conciliar')
+    if cfg() != c:
+        raise EntradaNoEnviada('configuracion modificada durante consulta de saldo')
+    e['riesgo_wallet'] = wallet
+    return c
+
+
+def _buscar(oid, wallet=None, token=None, grupo='STMix'):
+    """Ausencia no confirma cancelacion; pagina sin mezclar wallets ni tokens."""
+    errores = False
+    for tipo in ('open', 'history'):
+        cursor, vistos = None, set()
+        for _ in range(10):
+            args = ['order', 'strategy', 'list', '--chain', 'sol', '--group-tag', grupo, '--type', tipo, '--limit', '100']
+            if wallet:
+                args += ['--from', wallet]
+            if token:
+                args += ['--base-token', token]
+            if cursor:
+                args += ['--page-token', cursor]
+            try:
+                pagina = real._cli(*args)
+                if not isinstance(pagina, dict) or not isinstance(pagina.get('list'), list):
+                    raise ValueError('respuesta de ordenes incompleta')
+                for orden in pagina['list']:
+                    if orden.get('order_id') != oid:
+                        continue
+                    if wallet and orden.get('wallet_address') != wallet:
+                        raise ValueError('wallet de la orden no coincide')
+                    if token and orden.get('base_token') != token:
+                        raise ValueError('token de la orden no coincide')
+                    return tipo, orden
+                cursor = pagina.get('next_page_token')
+                if not cursor or cursor in vistos:
+                    break
+                vistos.add(cursor)
+            except Exception:
+                errores = True
+                break
+    return ('desconocida' if errores else 'no_encontrada'), None
+
+
+def _comprada(orden):
+    if orden.get('open_sign_hash'):
+        return True
+    try:
+        cantidad = float((orden.get('order_statistic') or {}).get('buy_amount') or 0)
+        if math.isfinite(cantidad) and cantidad > 0:
+            return True
+    except (ValueError, TypeError, OverflowError):
+        pass
+    return any(k.get('order_type') == 'buy_low' and k.get('status') == 'success' for k in orden.get('condition_orders') or [])
 
 
 def _cancelar(w, oid):
@@ -174,7 +320,7 @@ def _resultado(o):
         return 'sl'
     if st.get('buy_low') == 'failed':
         return 'fallo_compra'
-    if st.get('buy_low') != 'success':
+    if not _comprada(o):
         return 'no_entro'
     return 'cerrada'
 
@@ -186,35 +332,96 @@ def _precio(tok):
 
 
 def _tokens(w, tok):
-    try:
-        d = onchain._api('/v1/user/wallet_token_balance', chain='sol', wallet_address=w, token_address=tok)
-        return float(d['balances'][0]['balance'])
-    except Exception:
-        return 0.0
+    import math
+    d = onchain._api('/v1/user/wallet_token_balance', chain='sol', wallet_address=w, token_address=tok)
+    valor = float(d['balances'][0]['balance'])
+    if not math.isfinite(valor) or valor < 0:
+        raise ValueError('saldo de tokens desconocido')
+    return valor
 
 
 def _vender(o):
-    """Venta a mercado del 100 % (tras anular la orden de GMGN para que su TP/SL no choque)."""
-    real._cli('swap', '--chain', 'sol', '--from', o['wallet'], '--input-token', o['token'], '--output-token', real.SOL,
-              '--percent', '100', '--slippage', '15', '--priority-fee', '0.00001', '--tip-fee', '0.00001', timeout=60)
+    """Vende la cantidad propia en unidades atomicas, sin liquidar todo el token de la wallet."""
+    cantidad = str(o.get('cantidad_salida_atomica') or '')
+    if not cantidad.isdigit() or int(cantidad) <= 0:
+        raise EntradaNoEnviada('cantidad propia no conciliada: no enviar venta')
+    return real._cli('swap', '--chain', 'sol', '--from', o['wallet'], '--input-token', o['token'], '--output-token', real.SOL,
+              '--amount', cantidad, '--slippage', '15', '--priority-fee', PRIORIDAD, '--tip-fee', PROPINA, timeout=60)
+
+
+def _cantidad_propia(remota):
+    st = remota.get('order_statistic') or {}
+    try:
+        compra = Decimal(str(st['buy_amount']))
+        venta = Decimal(str(st['success_sell_amount']))
+        if not compra.is_finite() or not venta.is_finite() or compra < 0 or venta < 0 or venta > compra:
+            raise ValueError('cantidades de la orden incoherentes')
+        if compra != compra.to_integral_value() or venta != venta.to_integral_value() or compra > Decimal(2**256-1):
+            raise ValueError('cantidad atomica no entera')
+        return int(compra) - int(venta)
+    except (KeyError, InvalidOperation, TypeError):
+        raise ValueError('cantidad propia de la orden no verificable')
 
 
 def _salir(e, o, motivo):
-    if not o.get('salida'):
-        try:
-            _cancelar(o['wallet'], o['id'])
-        except Exception as ex:
-            _log(e, f"⚠️ Quería salir de {o['simbolo']} ({motivo}) pero no pude anular la orden de GMGN: {str(ex)[:80]}")
-            return
-        o['salida'] = motivo
-        _log(e, f"🚪 Saliendo de {o['simbolo']}: {motivo}")
+    from . import ejecutor
     try:
-        if _tokens(o['wallet'], o['token']) > 0:
-            _vender(o)
-        o['vendido'] = int(time.time())
+        # Si no se puede leer el saldo se mantienen las protecciones del broker.
+        saldo = _tokens(o['wallet'], o['token'])
+        if not o.get('salida'):
+            _, previa = _buscar(o['id'], o['wallet'], o['token'], **({'grupo':o['grupo_proteccion']} if o.get('grupo_proteccion') else {}))
+            if not previa:
+                raise ValueError('orden no conciliada antes de retirar protecciones')
+            _cantidad_propia(previa)
+            o['salida_solicitada'] = o.get('salida_solicitada') or motivo
+            o['cancelacion_estado'] = 'solicitada'
+            db.poner_ajuste(EST, e)
+            _cancelar(o['wallet'], o['id'])
+            tipo, remota = _buscar(o['id'], o['wallet'], o['token'], **({'grupo':o['grupo_proteccion']} if o.get('grupo_proteccion') else {}))
+            if not remota or remota.get('status') != 'closed' or remota.get('strategy_status') != 'stopped':
+                o['cancelacion_estado'] = 'pendiente_confirmacion'
+                return
+            o['cancelacion_estado'] = 'confirmada'
+            o['salida'] = motivo
+            o['cantidad_salida_atomica'] = str(_cantidad_propia(remota))
+            db.poner_ajuste(EST, e)
+        # Consultar de nuevo: el TP/SL pudo ejecutarse mientras se cancelaba.
+        saldo = _tokens(o['wallet'], o['token'])
+        if saldo == 0 or o.get('cantidad_salida_atomica') == '0':
+            o['vendido'] = int(time.time())
+            o['venta_estado'] = 'saldo_cero_confirmado'
+        elif o.get('venta_intento'):
+            from . import salida_gmgn
+            salida_gmgn.conciliar(o)
+        else:
+            if o.get('venta_envios', 0) >= 3:
+                o['venta_estado'] = 'limite_salidas_requiere_revision'
+                db.poner_ajuste(EST, e)
+                return
+            o['venta_intento'] = int(time.time())
+            o['venta_envios'] = o.get('venta_envios', 0) + 1
+            o['venta_estado'] = 'enviando'
+            db.poner_ajuste(EST, e)
+            try:
+                respuesta = _vender(o)
+            except (EntradaNoEnviada, ejecutor.Bloqueado):
+                o.pop('venta_intento', None)
+                o['venta_envios'] -= 1
+                raise
+            if isinstance(respuesta, dict) and respuesta.get('order_id'):
+                o['venta_orden_id'] = respuesta['order_id']
+            o['venta_estado'] = 'pendiente_conciliacion'
+        db.poner_ajuste(EST, e)
+    except (EntradaNoEnviada, ejecutor.Bloqueado) as ex:
+        o['venta_estado'] = 'no_enviada'
+        _log(e, f"salida no enviada de {o['simbolo']}: {type(ex).__name__}")
+        db.poner_ajuste(EST, e)
     except Exception as ex:
+        o['venta_estado'] = 'pendiente_conciliacion'
+        SG.registrar(o['wallet'], CG.identificador(o), 'salida', 'Salida no conciliada; no repetir la venta.')
         o['reintentos'] = o.get('reintentos', 0) + 1
-        _log(e, f"⚠️ Venta de {o['simbolo']} falló (reintento {o['reintentos']}): {str(ex)[:80]}")
+        _log(e, f"salida pendiente de {o['simbolo']}: {type(ex).__name__}; no se duplica el envio")
+        db.poner_ajuste(EST, e)
 
 
 def _contexto(tok, simbolo):
@@ -263,9 +470,9 @@ def _ia_entrada(c, b):
 def _gestionar(e, c, o):
     """Posición abierta: máximo, stop que sube, salidas anticipadas y revisión del modelo."""
     ahora = time.time()
-    if o.get('salida'):
-        if not o.get('vendido') and o.get('reintentos', 0) < 20:
-            _salir(e, o, o['salida'])
+    if o.get('salida') or o.get('salida_solicitada'):
+        if not o.get('vendido'):
+            _salir(e, o, o.get('salida') or o['salida_solicitada'])
         return
     pr = _precio(o['token'])
     ent = o.get('precio_entrada') or o['compra']
@@ -281,6 +488,7 @@ def _gestionar(e, c, o):
         stop = ent * 1.02
     if o['max'] >= ent * (1 + o['tp'] * 0.75 / 100):
         stop = max(stop or 0, o['max'] * (1 - 1.5 * o['atr'] / 100))
+    stop = max(stop or 0, o.get('stop_dyn') or 0) or None
     if stop and stop != o.get('stop_dyn'):
         o['stop_dyn'] = stop
         _log(e, f"🔒 {o['simbolo']} llegó a {(o['max'] / ent - 1) * 100:+.1f} %: stop subido a {stop:.6g} $ ({(stop / ent - 1) * 100:+.1f} %)")
@@ -317,22 +525,33 @@ def _gestionar(e, c, o):
 
 
 def _seguir(e, c):
+    if e['orden'].get('modo') == 'mercado':
+        from . import mercado_gmgn
+        return mercado_gmgn.seguir(e, c)
+    return _seguir_estrategia(e, c)
+
+
+def _seguir_estrategia(e, c, conciliada=None):
     """Orden abierta del piloto: ¿entró?, ¿cerró?, ¿caducó sin entrar?"""
     o = e['orden']
-    tipo, x = _buscar(o['id'])
+    tipo, x = conciliada if conciliada is not None else _buscar(o['id'], o['wallet'], o['token'], **({'grupo':o['grupo_proteccion']} if o.get('grupo_proteccion') else {}))
     if not x:
+        o['estado'] = 'pendiente_conciliacion'
         return
-    compro = any(k['order_type'] == 'buy_low' and k.get('status') == 'success' for k in x.get('condition_orders') or [])
+    compro = _comprada(x)
+    if compro and x.get('open_sign_hash'):
+        cantidad = (x.get('order_statistic') or {}).get('buy_amount')
+        CG.anotar(o, x['open_sign_hash'], 'entrada', esperado=cantidad if isinstance(cantidad,str) and cantidad.isdigit() else None)
     if compro and not o.get('entro'):
         o['entro'] = int(time.time())
         o['precio_entrada'] = real._f(x.get('open_price'))
         _log(e, f"✅ Compró {o['simbolo']} a {o['precio_entrada']:.6g} $ — TP +{o['tp']:.0f} % / SL −{o['sl']:.0f} %")
-    if (compro and tipo == 'open') or (o.get('salida') and not o.get('vendido')):
+    if (compro and tipo == 'open') or ((o.get('salida') or o.get('salida_solicitada')) and not o.get('vendido')):
         try:
             _gestionar(e, c, o)
         except Exception as ex:
             e['error'], e['error_ts'] = f'gestión: {str(ex)[:150]}', int(time.time())
-        if o.get('salida') and not o.get('vendido'):
+        if (o.get('salida') or o.get('salida_solicitada')) and not o.get('vendido'):
             return
     if tipo == 'open' and not compro and time.time() - o['creada'] > c['espera_min'] * 60:
         try:
@@ -342,31 +561,42 @@ def _seguir(e, c):
             _log(e, f"⚠️ No pude anular {o['id'][:8]}: {str(ex)[:80]}")
         return
     if tipo == 'history':
+        if x.get('status') != 'closed':
+            o['estado'] = 'pendiente_conciliacion'
+            return
+        # Una estrategia archivada no demuestra que no queden tokens.
+        if compro and _cantidad_propia(x) > 0 and _tokens(o['wallet'], o['token']) > 0 and not o.get('salida'):
+            o['estado'] = 'pendiente_conciliacion'
+            return
         res = _resultado(x)
         if o.get('salida'):
-            if (_tokens(o['wallet'], o['token']) > 0 and o.get('reintentos', 0) < 20
-                    and (not o.get('vendido') or time.time() - o['vendido'] > 90)):
-                o['vendido'] = None  # anulada pero aún con monedas: se reintenta la venta
+            if o.get('cantidad_salida_atomica') != '0' and _tokens(o['wallet'], o['token']) > 0:
+                o['vendido'] = None  # seguir conciliando sin duplicar el swap
                 return _salir(e, o, o['salida'])
             res = 'salida'
         saldo, _ = _saldo()
-        pnl = saldo - o['saldo_antes'] if res in ('tp', 'sl', 'cerrada', 'salida') else 0.0
-        op = {**o, 'cerrada': int(time.time()), 'resultado': res, 'pnl_sol': round(pnl, 6)}
+        variacion = saldo - o['saldo_antes']
+        pnl = None
+        op = {**o, 'cerrada': int(time.time()), 'resultado': res, 'pnl_sol': None, 'pnl_confirmado': False, 'variacion_saldo_sol': round(variacion, 9)}
+        CG.operacion(op)
+        if x.get('close_sign_hash'):
+            CG.anotar(op, x['close_sign_hash'], 'salida')
+        SG.resolver_posicion(op['wallet'], CG.identificador(op))
         e['ops'] = (e.get('ops') or [])[-199:] + [op]
-        if res in ('tp', 'sl', 'cerrada', 'salida'):
+        if op.get('pnl_confirmado'):
             try:
                 conciencia.operacion_real(op)
             except Exception:
                 pass
         e['orden'] = None
         # el saldo incluye ≈0,002 SOL de alquiler de la cuenta del token (recuperable al cerrarla): para contar stops manda el precio
-        if res == 'sl' or (res in ('salida', 'cerrada') and (o['pnl_pct'] if o.get('pnl_pct') is not None else pnl) < 0):
+        if res == 'sl' or (res in ('salida', 'cerrada') and (o.get('pnl_pct') is not None and o['pnl_pct'] < 0)):
             e['stops_seguidos'] = e.get('stops_seguidos', 0) + 1
             e.setdefault('enfriar', {})[o['token']] = int(time.time()) + c['enfriar_token_h'] * 3600
         elif res == 'tp':
             e['stops_seguidos'] = 0
         icono = {'tp': '🎯', 'sl': '🛑', 'fallo_compra': '⚠️', 'no_entro': '⌛', 'cerrada': '📤', 'salida': '🚪'}[res]
-        _log(e, f"{icono} {o['simbolo']}: {res}{' (' + o['salida'] + ')' if o.get('salida') else ''} · {pnl:+.4f} SOL")
+        _log(e, f"{icono} {o['simbolo']}: {res}{' (' + o['salida'] + ')' if o.get('salida') else ''} · resultado neto pendiente de conciliar")
         if e.get('stops_seguidos', 0) >= 2:
             e['pausa_hasta'] = int(time.time()) + c['pausa_stops_h'] * 3600
             e['stops_seguidos'] = 0
@@ -382,11 +612,17 @@ def paso():
             onchain.actualizar_smart()
         except Exception:
             pass
+    if c.get('conciliado', 0) > e.get('conciliado_hecho', 0):
+        _conciliado_a_mano(e, c['conciliado'])
     if e.get('orden'):
         _seguir(e, c)
+    if e.get('intencion_entrada'):
+        e['error'] = 'entrada GMGN sin confirmacion: conciliar en el broker antes de continuar'
+        db.poner_ajuste(EST, e)
+        return e
     if c['activo'] and not e.get('orden'):
         saldo, w = _saldo()
-        if not e.get('saldo_inicio') or e.get('inicio_cfg') != c.get('cambiado'):
+        if e.get('saldo_inicio') is None:
             e['saldo_inicio'], e['inicio_cfg'] = saldo, c.get('cambiado')
             _log(e, f"▶️ Piloto en marcha: {c['por_op_sol']} SOL por operación, pérdida máx. {c['perdida_max_sol']} SOL (saldo {saldo:.4f})")
         e['saldo'] = saldo
@@ -428,20 +664,19 @@ def paso():
                     if motivo != 'sin IA':
                         _log(e, f"🧠 IA aprueba {x['simbolo']}: {motivo}")
                     break
+                from . import observatorio_gmgn as O
+                O.decision('entrada_vetada', x.get('est_id', ''), x['token'], 'veto_ia')
                 _log(e, f"🧠 IA veta {x['simbolo']}: {motivo}")
                 e.setdefault('enfriar', {})[x['token']] = ahora + 3600
             if b and b.get('estrategia'):
-                # estrategia de la fábrica: entra ya (compra límite un 1 % por ENCIMA = se ejecuta al momento) con su TP/SL/tiempo
-                oid, compra, tp, sl = _crear(w, b, b['precio'], compra=b['precio'] * 1.01, tp=b['tp'], sl=b['sl'])
-                e['orden'] = {'id': oid, 'token': b['token'], 'simbolo': b['simbolo'], 'creada': ahora, 'wallet': w, 'compra': compra,
-                              'tp': tp, 'sl': sl, 'pts': 0, 'atr': b['atr'], 'sol': c['por_op_sol'], 'saldo_antes': saldo,
-                              'estrategia': b['estrategia'], 'est_id': b['est_id'], 'hold': b['hold']}
+                # Compra a mercado con protecciones adjuntas y conciliacion independiente.
+                from . import mercado_gmgn
+                oid, compra, tp, sl = mercado_gmgn.abrir(e, w, b, b['precio'])
+                e['orden'].update(estrategia=b['estrategia'], est_id=b['est_id'], hold=b['hold'])
                 _log(e, f"📝 {b['simbolo']} por «{b['estrategia']}» (en vivo {b['vivo']['medio']:+.1f} %/op en {b['vivo']['n']}): compra con {c['por_op_sol']} SOL, "
                         f"TP +{tp:.0f} % / SL −{sl:.0f} % / máx. {b['hold'] * 5} min")
             elif b:
-                oid, compra, tp, sl = _crear(w, b, b['precio'])
-                e['orden'] = {'id': oid, 'token': b['token'], 'simbolo': b['simbolo'], 'creada': ahora, 'wallet': w, 'compra': compra,
-                              'tp': tp, 'sl': sl, 'pts': b['pts'], 'atr': b['atr'], 'sol': c['por_op_sol'], 'saldo_antes': saldo}
+                oid, compra, tp, sl = _crear_seguro(e, w, b, b['precio'])
                 _log(e, f"📝 {b['simbolo']} ({b['pts']} pts): compra límite a {compra:.6g} $ con {c['por_op_sol']} SOL, TP +{tp:.0f} % / SL −{sl:.0f} %")
             elif not e.get('ultimo_sin') or ahora - e['ultimo_sin'] > 3600:
                 e['ultimo_sin'] = ahora
@@ -464,7 +699,49 @@ def _bucle():
             e = _est()
             e['error'], e['error_ts'] = str(ex)[:200], int(time.time())
             db.poner_ajuste(EST, e)
+        try:
+            CG.procesar()
+            _confirmar_ops()
+        except Exception as ex:
+            e = _est()
+            _log(e, 'Contabilidad pendiente de revisar: ' + type(ex).__name__)
+            db.poner_ajuste(EST, e)
         time.sleep(CADA_ORDEN)
+
+
+def _conciliado_a_mano(e, ts):
+    """El usuario revisó GMGN: se olvida la entrada sin confirmar y se resuelven las incidencias. La orden seguida (si hay) sigue."""
+    intencion = e.pop('intencion_entrada', None)
+    n = SG.resolver_todas()
+    if e.get('orden'):
+        e['orden'].pop('incidencia', None)
+    e['conciliado_hecho'], e['error'] = ts, None
+    _log(e, f"✅ Revisado a mano en GMGN: {n} incidencia(s) resuelta(s)" + (f", entrada sin confirmar de {intencion.get('token', '?')[:8]} olvidada" if intencion else ''))
+    db.poner_ajuste(EST, e)
+
+
+def _confirmar_ops():
+    """Fija el PnL de las operaciones cerradas cuando sus recibos quedan verificados y se lo pasa a la conciencia."""
+    e = _est()
+    nuevas = []
+    for op in e.get('ops') or []:
+        if op.get('pnl_confirmado') or 'pnl_confirmado' not in op:  # las antiguas (sin libro) se quedan como estaban
+            continue
+        pnl = CG.confirmar(op)
+        if pnl is None:
+            continue
+        op['pnl_sol'], op['pnl_confirmado'] = round(pnl, 9), True
+        nuevas.append(op)
+    if not nuevas:
+        return
+    for op in nuevas:
+        _log(e, f"🧾 {op.get('simbolo')}: neto confirmado por recibos {op['pnl_sol']:+.6f} SOL")
+    db.poner_ajuste(EST, e)
+    for op in nuevas:
+        try:
+            conciencia.operacion_real(op)
+        except Exception:
+            pass
 
 
 def arrancar():
@@ -475,6 +752,8 @@ def arrancar():
         laboratorio_ia.arrancar()
         from . import fabrica
         fabrica.arrancar()
+        from . import observatorio_gmgn
+        observatorio_gmgn.arrancar()
         from . import piloto_fut
         piloto_fut.arrancar()  # futuros por NinjaTrader (Sim101; la real solo si está en puente.json y en su cfg)
     return bool(_hilo['t'])

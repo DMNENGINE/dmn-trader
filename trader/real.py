@@ -16,7 +16,31 @@ def disponible():
     return bool(shutil.which('gmgn-cli')) and onchain.disponible()
 
 
-def _cli(*args, timeout=25):
+def _cli(*args, timeout=25, preflight=None):
+    from . import ejecutor
+    lectura = args[:3] == ('order', 'strategy', 'list') or args[:2] in (('portfolio', 'holdings'), ('order', 'quote'), ('order', 'get'))
+    if lectura:
+        return _cli_directo(*args, timeout=timeout)
+    def opcion(k):
+        if args.count(k) != 1 or args.index(k) + 1 >= len(args):
+            raise ValueError('ambito GMGN no verificable')
+        return args[args.index(k) + 1]
+    if opcion('--chain') != 'sol':
+        raise ValueError('cadena GMGN no admitida por este piloto')
+    def enviar():
+        if preflight is not None:
+            try:
+                preflight()
+            except Exception as ex:
+                from .presupuesto_gmgn import EntradaNoEnviada
+                if isinstance(ex,EntradaNoEnviada):
+                    raise
+                raise EntradaNoEnviada('no se confirma validacion previa: '+type(ex).__name__) from None
+        return _cli_directo(*args, timeout=timeout)
+    return ejecutor.ejecutar('gmgn-sol', opcion('--from'), enviar)
+
+
+def _cli_directo(*args, timeout=25):
     exe = shutil.which('gmgn-cli')
     r = subprocess.run([exe, *args, '--raw'], capture_output=True, text=True, encoding='utf-8', timeout=timeout,
                        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
@@ -222,8 +246,15 @@ def guardar(snap):
 def _cfg_mas_nueva(otra):
     """Configuración del piloto: gana la que se cambió más tarde (panel en la central o freno del nodo)."""
     from . import piloto
-    if isinstance(otra, dict) and otra.get('cambiado', 0) > piloto.cfg().get('cambiado', 0):
-        db.poner_ajuste(piloto.CFG, otra)
+    from .sincronia import fecha
+    if not isinstance(otra, dict):
+        return
+    ts = fecha(otra)
+    with db.transaccion():
+        if ts > fecha(piloto.cfg()):
+            validada = piloto.poner_cfg(otra)
+            validada['cambiado'] = ts
+            db.poner_ajuste(piloto.CFG, validada)
 
 
 def recibir(snap):

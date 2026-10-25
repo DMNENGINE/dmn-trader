@@ -2,7 +2,7 @@
 Cada agente: opera con su genoma → autopsia de cada pérdida con su arreglo → si quiebra, prueba soluciones en datos reales recientes.
 El enjambre: comparte lo que aprende (símbolos/horas que pierden para todos), evoluciona cada 2 h (el 20 % peor se reemplaza por hijos
 del 10 % mejor) y, si hay varios equipos (Pi = central, PC = nodo), intercambia los mejores genomas cada 30 min (modelo de islas)."""
-import bisect, copy, json, math, os, random, socket, statistics, sys, threading, time, traceback
+import bisect, copy, json, math, os, random, socket, statistics, sys, threading, time, traceback, uuid
 from . import analista, flujo, ia, onchain, sentimiento, datos, db, indicadores as ind, motor
 
 ESQUEMA = """
@@ -375,7 +375,13 @@ def estado():
 
 
 def guardar(e):
-    db.poner_ajuste('enjambre', e)
+    with db.LOCK:
+        actual = estado() or {}
+        if actual.get('sesion_id') and e.get('sesion_id') != actual.get('sesion_id'):
+            return
+        if actual.get('sesion_id') and not actual.get('activo'):
+            e = dict(e, activo=False)
+        db.poner_ajuste('enjambre', e)
 
 
 def _llm(a):
@@ -452,11 +458,25 @@ def poner_mercados(mercados):
     return {'ok': True, 'mercados': validos}
 
 
-def iniciar(n=50, capital=1.0, meta=100.0, mercados=('cripto', 'acciones'), hasta=None):
+def iniciar(n=50, capital=1.0, meta=100.0, mercados=('cripto', 'acciones'), hasta=None, duracion_min=None, perdida_max_pct=None, hasta_solicitado=None):
+    from . import guardia
+    if (duracion_min is None) != (perdida_max_pct is None):
+        raise ValueError('duracion y perdida maxima deben indicarse juntas')
+    if duracion_min is not None:
+        guardia.validar(duracion_min, perdida_max_pct)
+    if isinstance(n, bool) or not isinstance(n, int) or not 1 <= n <= 2000 or isinstance(capital, bool) or isinstance(meta, bool) or not math.isfinite(float(capital)) or float(capital) <= 0 or not math.isfinite(float(meta)) or float(meta) <= 0:
+        raise ValueError('numero de agentes, capital o meta invalidos')
+    if not mercados or any(m not in ('cripto', 'acciones', 'futuros') for m in mercados):
+        raise ValueError('mercados invalidos')
     preparar()
+    _cache_mapa.update(t=0, v=None)
     e = estado() or {}
     n = max(1, min(int(n), 2000))
+    if _hilo and _hilo.is_alive() and not e.get('activo'):
+        raise ValueError('el hilo anterior aun esta terminando; espera antes de iniciar')
     if e.get('activo') and _hilo and _hilo.is_alive():  # ya en marcha: solo cambia el tamaño, sin reiniciar a nadie
+        if duracion_min is not None or guardia.estado().get('estado') == 'activo':
+            raise ValueError('deten el enjambre antes de cambiar un plan supervisado')
         e.update(n=n, hasta=hasta or e.get('hasta'))
         guardar(e)
         vivos, rnd = [a for a in agentes() if not _llm(a)], random.Random()
@@ -466,11 +486,20 @@ def iniciar(n=50, capital=1.0, meta=100.0, mercados=('cripto', 'acciones'), hast
             crear_agente(e, genoma_inicial(i, rnd))
         log(f'↔ enjambre: {len(vivos)} → {n} agentes')
         return resumen()
+    # No cambiar sesiones ni capital hasta comprobar TODAS las cuentas anteriores.
+    anteriores = agentes()
+    if any(motor.posiciones(a['cuenta_id'], False) for a in anteriores):
+        guardia.detener('preparando cierre de la sesion anterior')
+        pendientes = [a for a in anteriores if not _preparar_cierre(a, 'cierre previo al nuevo inicio')]
+        if pendientes:
+            raise motor.ErrorOrden(f'CIERRES_PENDIENTES: {len(pendientes)} cuentas conservan posiciones; sus cierres quedan pendientes del mercado o de un precio valido. No se ha reiniciado capital.')
     e.update({'activo': True, 'n': n, 'capital': float(capital), 'meta': float(meta), 'mercados': list(mercados), 'hasta': hasta,
               'sesion_inicio': int(time.time()), 'ultima_evolucion': time.time(), 'ultimos_patrones': time.time(),
               'generacion': e.get('generacion', 0), 'bandido': e.get('bandido') or {k: [1, 1] for k in ESTRATEGIAS},
               'bloqueos': e.get('bloqueos') or {'simbolos': [], 'horas': []}})
-    guardar(e)
+    e['sesion_id'] = uuid.uuid4().hex
+    e['hasta_solicitado'] = hasta_solicitado
+    db.poner_ajuste('enjambre', e)
     rnd = random.Random()
     vivos = [a for a in agentes() if not _llm(a)]
     for a in vivos[n:]:
@@ -480,11 +509,33 @@ def iniciar(n=50, capital=1.0, meta=100.0, mercados=('cripto', 'acciones'), hast
     for i in range(len(vivos), n):
         crear_agente(e, genoma_inicial(i, rnd))
     log(f'▶ enjambre de {n} agentes en el nodo {NODO}: {capital} $ → meta {meta} $')
+    if duracion_min is not None:
+        guardia.configurar(e, duracion_min, perdida_max_pct)
+        guardia.arrancar()
+    else:
+        db.poner_ajuste(guardia.CLAVE, {})
     arrancar_hilo()
     return resumen()
 
 
+def _preparar_cierre(a, motivo):
+    cid = a['cuenta_id']
+    db.ex("UPDATE ordenes SET estado='cancelada', motivo=? WHERE cuenta_id=? AND reduce=0 AND estado IN ('pendiente','espera')", (motivo, cid))
+    for p in motor.posiciones(cid, False):
+        try:
+            motor.cerrar(cid, p['simbolo'], 100, motivo)
+        except Exception as err:
+            log(f"cierre pendiente en cuenta {cid}: {type(err).__name__}")
+    if motor.posiciones(cid, False):
+        _poner(a['id'], estado='cerrando', ultimo='Cierre pendiente del mercado o de un precio valido; capital conservado')
+        return False
+    db.ex("UPDATE ordenes SET estado='cancelada', motivo=? WHERE cuenta_id=? AND estado IN ('pendiente','espera')", (motivo, cid))
+    return True
+
+
 def _retirar(a, motivo):
+    if not _preparar_cierre(a, motivo):
+        return False
     for p in motor.posiciones(a['cuenta_id'], False):
         try:
             motor.cerrar(a['cuenta_id'], p['simbolo'], 100, motivo)
@@ -497,19 +548,48 @@ def _retirar(a, motivo):
     _poner(a['id'], activo=0, estado='retirado', ultimo=motivo)
 
 
+def drenar_cierres():
+    """Continua salidas de agentes detenidos/retirados, incluso con el enjambre apagado.
+    archivada=1 oculta estas cuentas del panel: no significa que sus posiciones hayan cerrado.
+    """
+    e = estado() or {}
+    filas = db.q("""SELECT a.* FROM ag_agentes a JOIN cuentas c ON c.id=a.cuenta_id
+        WHERE c.tipo='agente' AND EXISTS(SELECT 1 FROM posiciones p WHERE p.cuenta_id=a.cuenta_id)
+        AND (?=0 OR a.activo=0) ORDER BY a.id""", (1 if e.get('activo') else 0,))
+    resultado = {'revisadas': len(filas), 'cerradas': 0, 'pendientes': 0, 'errores': 0}
+    for a in filas:
+        try:
+            _preparar_cierre(a, 'cierre pendiente de agente detenido')
+            motor.procesar(a['cuenta_id'])
+            if motor.posiciones(a['cuenta_id'], False):
+                resultado['pendientes'] += 1
+                continue
+            it = _intento_actual(a['id'])
+            if it:
+                final = motor.resumen(a['cuenta_id'])['equity']
+                db.ex('UPDATE ag_intentos SET fin=?, final=?, resultado=? WHERE id=?', (int(time.time()), final, 'parado', it['id']))
+            _poner(a['id'], estado='parado' if a['activo'] else 'retirado')
+            resultado['cerradas'] += 1
+        except Exception as ex:
+            resultado['errores'] += 1
+            log(f"cierre sigue pendiente en cuenta {a['cuenta_id']}: {type(ex).__name__}")
+    if filas:
+        _cache_mapa.update(t=0, v=None)
+    return resultado
+
+
 def parar(motivo='parado por el usuario'):
+    from . import guardia
+    guardia.detener(motivo)
+    _cache_mapa.update(t=0, v=None)
     e = estado()
     if not e:
         return None
     e['activo'] = False
     guardar(e)
     for a in agentes():
-        for p in motor.posiciones(a['cuenta_id'], False):
-            try:
-                motor.cerrar(a['cuenta_id'], p['simbolo'], 100, 'enjambre parado')
-            except Exception:
-                pass
-        db.ex("UPDATE ordenes SET estado='cancelada', motivo='enjambre parado' WHERE cuenta_id=? AND estado IN ('pendiente','espera')", (a['cuenta_id'],))
+        if not _preparar_cierre(a, 'enjambre parado'):
+            continue
         it = _intento_actual(a['id'])
         if it:
             db.ex('UPDATE ag_intentos SET fin=?, final=?, resultado=? WHERE id=?', (int(time.time()), motor.resumen(a['cuenta_id'])['equity'], 'parado', it['id']))
@@ -787,6 +867,9 @@ def _migrar_v2(e):
 
 
 def paso_enjambre(e):
+    from . import guardia
+    if guardia.evaluar() or not (estado() or {}).get('activo'):
+        return
     if not e.get('mejoras_v2'):
         _migrar_v2(e)
         e = estado()
@@ -803,6 +886,8 @@ def paso_enjambre(e):
     marcos = {_g(a).get('marco', '1m') for a in vivos} or {'5m'}
     ctx = contexto(e, marcos)
     for a in vivos:
+        if not (estado() or {}).get('activo'):
+            return
         try:
             paso_agente(e, a, ctx)
         except Exception:
@@ -852,12 +937,8 @@ def _intento_actual(aid):
 
 def _nuevo_intento(e, a, g, motivo):
     cid = a['cuenta_id']
-    for p in motor.posiciones(cid, False):
-        try:
-            motor.cerrar(cid, p['simbolo'], 100, 'nuevo intento')
-        except Exception:
-            pass
-    db.ex("UPDATE ordenes SET estado='cancelada', motivo='nuevo intento' WHERE cuenta_id=? AND estado IN ('pendiente','espera')", (cid,))
+    if not _preparar_cierre(a, 'nuevo intento'):
+        raise motor.ErrorOrden('CIERRES_PENDIENTES: cierre pendiente del mercado o de un precio valido; capital conservado')
     viejo = _intento_actual(a['id'])
     if viejo:
         db.ex('UPDATE ag_intentos SET fin=?, final=?, resultado=COALESCE(resultado,?) WHERE id=?',
@@ -1531,7 +1612,7 @@ def _vigilar_ordenes():
                 if o.get('accion') == 'parar':
                     parar('parado desde el panel de la central')
                 elif o.get('accion') == 'iniciar':
-                    iniciar(o.get('n', 50), o.get('capital', 1), o.get('meta', 100), o.get('mercados') or ('cripto', 'acciones'), o.get('hasta'))
+                    iniciar(o.get('n', 50), o.get('capital', 1), o.get('meta', 100), o.get('mercados') or ('cripto', 'acciones'), o.get('hasta'), o.get('duracion_min'), o.get('perdida_max_pct'))
                 log(f"📡 orden de la central: {o.get('accion')}{' ' + str(o.get('n')) + ' agentes' if o.get('accion') == 'iniciar' else ''}")
                 ultimo_latido = 0
             if not (estado() or {}).get('activo') and time.time() - ultimo_latido > 60:
@@ -1569,8 +1650,10 @@ def kpis():
     e = estado() or {}
     t = db.uno('SELECT COUNT(*) n, SUM(r>0) g, AVG(r) m FROM ag_trades WHERE r IS NOT NULL AND abierto>=?', (e.get('sesion_inicio', 0),))
     its = db.uno("SELECT SUM(resultado='quiebra') q, SUM(resultado='meta') m, MAX(max_equity) mx FROM ag_intentos WHERE inicio>=?", (e.get('sesion_inicio', 0),))
-    return {'nodo': NODO, 'activo': bool(e.get('activo')) and bool(_hilo and _hilo.is_alive()), 'agentes': len(agentes()), 'n': e.get('n'),
-            'capital': e.get('capital'), 'meta': e.get('meta'), 'mercados': e.get('mercados'), 'hasta': e.get('hasta'), 'generacion': e.get('generacion', 0),
+    pendientes = db.uno('SELECT COUNT(*) n FROM posiciones p JOIN ag_agentes a ON a.cuenta_id=p.cuenta_id')['n']
+    return {'nodo': NODO, 'parada_confirmada': not e.get('activo') and pendientes == 0, 'posiciones_pendientes': pendientes,
+            'capacidades': ['dmn-guardia/1'], 'activo': bool(e.get('activo')) and bool(_hilo and _hilo.is_alive()), 'agentes': len(agentes()), 'n': e.get('n'),
+            'capital': e.get('capital'), 'meta': e.get('meta'), 'mercados': e.get('mercados'), 'hasta': e.get('hasta'), 'hasta_solicitado': e.get('hasta_solicitado'), 'generacion': e.get('generacion', 0),
             'trades': t['n'], 'ganados': t['g'] or 0, 'r_medio': round(t['m'], 3) if t['m'] is not None else None,
             'quiebras': its['q'] or 0, 'metas': its['m'] or 0, 'max_equity': round(its['mx'] or 0, 4), 'tick_s': ULTIMO_TICK['dur'],
             'bloqueos': e.get('bloqueos'), 'bandido': e.get('bandido'), 'sesion_inicio': e.get('sesion_inicio')}
@@ -1594,7 +1677,8 @@ def mapa():
         nodos.append({'nodo': n['nodo'], 'local': False, 'visto': n['visto'], 'en_linea': time.time() - n['visto'] < 300, **d})
     tot = {'agentes': sum(len(x.get('agentes') or []) for x in nodos), 'trades': sum((x.get('kpis') or {}).get('trades') or 0 for x in nodos),
            'metas': sum((x.get('kpis') or {}).get('metas') or 0 for x in nodos), 'quiebras': sum((x.get('kpis') or {}).get('quiebras') or 0 for x in nodos)}
-    v = {'nodos': nodos, 'total': tot, 'lecciones': lecciones(25), 'log': LOG[-30:], 'precios': precios(), 'analista': noticias(15)}
+    from . import guardia
+    v = {'modo': 'simulado', 'guardia': guardia.estado(), 'capacidades': ['dmn-guardia/1'], 'nodos': nodos, 'total': tot, 'lecciones': lecciones(25), 'log': LOG[-30:], 'precios': precios(), 'analista': noticias(15)}
     _cache_mapa.update(t=time.time(), v=v)
     return v
 

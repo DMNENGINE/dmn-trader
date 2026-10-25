@@ -113,6 +113,7 @@ def ejecutar(velas, estrategia='cruce_medias', params=None, capital=10000, comis
     sen = fn(velas, **p)
     a = ind.atr([b['h'] for b in velas], [b['l'] for b in velas], [b['c'] for b in velas], 14)
     efectivo, pos, entrada, stop, obj, t_ent, riesgo_ini = float(capital), 0.0, 0.0, None, None, None, 0.0
+    com_entrada = 0.0
     trades, curva_eq, objetivo_sig = [], [], 0
     cpct, slip = comision_pct / 100, deslizamiento_pct / 100
 
@@ -120,7 +121,7 @@ def ejecutar(velas, estrategia='cruce_medias', params=None, capital=10000, comis
         nonlocal efectivo, pos, stop, obj
         px = precio * (1 - slip) if pos > 0 else precio * (1 + slip)
         com = abs(pos) * px * cpct + comision_fija
-        pnl = pos * (px - entrada) - com
+        pnl = pos * (px - entrada) - com - com_entrada
         efectivo += pos * px - com
         trades.append({'entrada_t': t_ent, 'salida_t': t, 'lado': 'largo' if pos > 0 else 'corto', 'cantidad': round(abs(pos), 6),
                        'entrada': round(entrada, 6), 'salida': round(px, 6), 'pnl': round(pnl, 2),
@@ -128,7 +129,7 @@ def ejecutar(velas, estrategia='cruce_medias', params=None, capital=10000, comis
         pos, stop, obj = 0.0, None, None
 
     def abrir(lado, precio, t, i):
-        nonlocal efectivo, pos, entrada, stop, obj, t_ent, riesgo_ini
+        nonlocal efectivo, pos, entrada, stop, obj, t_ent, riesgo_ini, com_entrada
         px = precio * (1 + slip) if lado > 0 else precio * (1 - slip)
         eq = efectivo
         dist = (a[i - 1] or 0) * stop_atr if stop_atr and i else 0
@@ -138,10 +139,11 @@ def ejecutar(velas, estrategia='cruce_medias', params=None, capital=10000, comis
             qty = eq * fraccion / 100 / px
         else:
             qty = eq / px
-        qty = min(qty, eq / (px * (1 + cpct)))  # nunca más de lo que hay (sin apalancamiento)
+        qty = min(qty, max(0, eq - comision_fija) / (px * (1 + cpct)))  # nunca más de lo que hay (sin apalancamiento)
         if qty <= 0:
             return
         com = qty * px * cpct + comision_fija
+        com_entrada = com
         efectivo -= lado * qty * px + com
         pos, entrada, t_ent = lado * qty, px, t
         stop = px - lado * dist if dist else None
@@ -186,6 +188,7 @@ def ejecutar(velas, estrategia='cruce_medias', params=None, capital=10000, comis
     }
     res['calmar'] = round(res['cagr_pct'] / dd, 2) if dd else None
     res['montecarlo'] = metricas.montecarlo([t['pnl'] for t in trades], capital)
+    res['bootstrap'] = metricas.bootstrap_bloques([t['pnl'] for t in trades], capital)
     if con_curva:
         paso = max(1, len(velas) // 600)
         res['curva'] = [{'t': velas[i]['t'], 'v': round(curva_eq[i], 2)} for i in range(0, len(velas), paso)]

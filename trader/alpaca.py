@@ -4,7 +4,7 @@ con un importe pequeño para medir lo que el simulador no ve (deslizamiento real
 Se activa solo si existe datos/alpaca.json con las claves de una cuenta PAPER: {"key": "...", "secret": "...", "nominal": 10}.
 Las claves las crea el usuario en alpaca.markets (Paper Trading → API Keys); nunca van al repositorio. Solo admite la URL
 paper: para dinero real hará falta un cambio de código consciente, no un ajuste."""
-import json, os, threading, time, urllib.error, urllib.parse, urllib.request
+import json, os, threading, time, hashlib, urllib.error, urllib.parse, urllib.request
 from . import db
 
 CONF = os.path.join(os.path.dirname(db.RUTA), 'alpaca.json')
@@ -58,6 +58,12 @@ def lider():
     return a
 
 
+def _cliente(trade_id, cierre=False):
+    # Namespace de la base: no colisiona entre nodos que usan la misma cuenta paper.
+    nodo = hashlib.sha256(os.path.abspath(db.RUTA).encode()).hexdigest()[:12]
+    return 'dmn-' + nodo + '-' + str(trade_id) + ('-sal' if cierre else '-ent')
+
+
 def espejo():
     """Un paso: abre en Alpaca lo nuevo del líder, cierra lo que el simulador ya cerró y apunta los precios reales de ejecución."""
     if not _lock.acquire(blocking=False):
@@ -66,26 +72,37 @@ def espejo():
         from . import motor
         db.ex(ESQUEMA)
         nominal = float(config().get('nominal', 10))
-        for x in db.q("SELECT * FROM alp_espejo WHERE estado IN ('enviada','cerrando')"):  # precios reales de ejecución
+        for x in db.q("SELECT * FROM alp_espejo WHERE estado IN ('enviada','cerrando','incierta','cierre_incierto','parcial')"):  # precios reales de ejecución
             try:
-                o = _api('GET', f"/v2/orders/{x['orden_cierre'] if x['estado'] == 'cerrando' else x['orden_id']}")
+                cierre = x['estado'] in ('cerrando', 'cierre_incierto')
+                oid = x['orden_cierre'] if cierre else x['orden_id']
+                cliente = _cliente(x['trade_id'], cierre)
+                o = _api('GET', '/v2/orders/' + oid) if oid else _api('GET', '/v2/orders:by_client_order_id?client_order_id=' + cliente)
             except Exception:
-                continue
-            if o.get('status') == 'filled':
-                if x['estado'] == 'enviada':
-                    db.ex("UPDATE alp_espejo SET precio_real=?, qty=?, estado='abierta' WHERE id=?", (float(o['filled_avg_price']), float(o['filled_qty']), x['id']))
-                else:
+                continue  # desconocido conserva intencion: nunca reenviar por timeout
+            cantidad = float(o.get('filled_qty') or 0)
+            terminal = o.get('status') in ('filled', 'canceled', 'expired', 'rejected')
+            if cierre:
+                if terminal and cantidad >= float(x['qty'] or 0):
                     db.ex("UPDATE alp_espejo SET salida_real=?, estado='cerrada' WHERE id=?", (float(o['filled_avg_price']), x['id']))
-            elif o.get('status') in ('canceled', 'expired', 'rejected'):
-                db.ex("UPDATE alp_espejo SET estado=?, error=? WHERE id=?", ('no llenada', o.get('status'), x['id']))
+                elif terminal:
+                    db.ex("UPDATE alp_espejo SET estado='cierre_incierto', error='cierre incompleto: requiere conciliacion' WHERE id=?", (x['id'],))
+            elif cantidad:
+                db.ex("UPDATE alp_espejo SET precio_real=?, qty=?, estado=?, orden_id=? WHERE id=?", (float(o['filled_avg_price']), cantidad, 'abierta' if terminal else 'parcial', o.get('id'), x['id']))
+            elif terminal:
+                db.ex("UPDATE alp_espejo SET estado='no llenada', error=? WHERE id=?", (o.get('status'), x['id']))
         for x in db.q("SELECT e.*, t.estado te, t.salida FROM alp_espejo e JOIN trades t ON t.id=e.trade_id WHERE e.estado='abierta'"):
             if x['te'] != 'cerrado':
                 continue
+            db.ex("UPDATE alp_espejo SET salida_sim=?, cerrado=?, estado='cierre_incierto' WHERE id=?", (x['salida'], int(time.time()), x['id']))
             try:
-                o = _api('DELETE', '/v2/positions/' + urllib.parse.quote(_simbolo(x['simbolo']).replace('/', ''), safe=''))
-                db.ex("UPDATE alp_espejo SET salida_sim=?, cerrado=?, orden_cierre=?, estado='cerrando' WHERE id=?", (x['salida'], int(time.time()), o.get('id'), x['id']))
-            except Exception as err:
-                db.ex('UPDATE alp_espejo SET error=? WHERE id=?', (str(err)[:200], x['id']))
+                cuerpo = {'symbol': _simbolo(x['simbolo']), 'side': 'sell' if x['lado'] == 'buy' else 'buy', 'qty': str(x['qty']), 'type': 'market', 'time_in_force': 'gtc' if x['simbolo'].endswith('-USD') else 'day', 'client_order_id': _cliente(x['trade_id'], True)}
+                o = _api('POST', '/v2/orders', cuerpo)
+                db.ex("UPDATE alp_espejo SET orden_cierre=?, estado='cerrando' WHERE id=?", (o.get('id'), x['id']))
+            except Exception:
+                pass
+        if db.uno("SELECT 1 FROM alp_espejo WHERE estado IN ('incierta','cierre_incierto','parcial') LIMIT 1"):
+            return
         a = lider()
         if not a:
             return
@@ -107,11 +124,13 @@ def espejo():
                 cuerpo['qty'] = str(n)
             else:
                 cuerpo['notional'] = str(round(nominal, 2))
+            cuerpo['client_order_id'] = _cliente(t['id'])
+            db.ex("INSERT INTO alp_espejo(trade_id,agente,simbolo,lado,precio_sim,abierto,estado) VALUES(?,?,?,?,?,?,'incierta')", fila)
             try:
                 o = _api('POST', '/v2/orders', cuerpo)
-                db.ex("INSERT INTO alp_espejo(trade_id,agente,simbolo,lado,precio_sim,abierto,estado,orden_id) VALUES(?,?,?,?,?,?,'enviada',?)", (*fila, o.get('id')))
+                db.ex("UPDATE alp_espejo SET estado='enviada', orden_id=? WHERE trade_id=?", (o.get('id'), t['id']))
             except Exception as err:
-                db.ex("INSERT INTO alp_espejo(trade_id,agente,simbolo,lado,precio_sim,abierto,estado,error) VALUES(?,?,?,?,?,?,'error',?)", (*fila, str(err)[:200]))
+                db.ex("UPDATE alp_espejo SET error='respuesta desconocida: conciliar por client_order_id' WHERE trade_id=?", (t['id'],))
     finally:
         _lock.release()
 

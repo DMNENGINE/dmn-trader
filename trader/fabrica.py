@@ -5,16 +5,17 @@
    a la foto: sin mirar el futuro) y la RUTA de las 2 h siguientes (máximo, mínimo y cierre de cada vela, en % del precio).
    Al arrancar con la tabla vacía rellena unos días hacia atrás solo con velas (origen 'hist': tiene sesgo de supervivencia).
 2. ESTRATEGIAS: reglas «rasgo > / < umbral» + salida (SL = k × ATR de 5 min, TP = rr × SL, tiempo máximo). Se simulan sobre
-   las rutas con los costes reales medidos (6 % ida y vuelta) y una sola posición por token a la vez.
+   las rutas con un supuesto de costes del 6 % ida y vuelta y una sola posición por token a la vez.
 3. GENERADOR: algoritmo evolutivo que inventa y cruza reglas. Aprende con el 70 % más viejo de las muestras y se valida con el
    30 % más reciente; las que superan la validación entran en el SALÓN y desde ese momento se miden en VIVO (muestras que no
    existían cuando se inventaron), que es la única prueba que cuenta antes de darles dinero real."""
-import json, math, random, threading, time
+import json, math, random, threading, time, hashlib, bisect
 import numpy as np
-from . import conciencia, db, onchain
+from . import conciencia, db, onchain, validacion_fabrica as VF, estres_fabrica as EF
 
 CADA, CADA_EVO, HORIZONTE, BARRA, COSTES = 600, 1800, 7200, 300, 6.0
 PASOS = HORIZONTE // BARRA  # 24 velas de 5 min
+VERSION_VALIDACION = 'gmgn-causal-20261024-2'
 ESQUEMA = """
 CREATE TABLE IF NOT EXISTS fab_muestras (id INTEGER PRIMARY KEY, ts INTEGER, token TEXT, simbolo TEXT, origen TEXT, precio REAL,
   f TEXT, ruta TEXT, lista INTEGER DEFAULT 0, UNIQUE(token, ts));
@@ -32,12 +33,21 @@ MANUALES = [
     {'nombre': 'Recién graduada con fuerza', 'conds': [['edad_h', '<', 3], ['liq_k', '>', 30], ['compras_ventas', '>', 1.2], ['top10', '<', 0.35]], 'sl_k': 3, 'rr': 2.5, 'hold': 18},
 ]
 # para dar dinero real a una estrategia tiene que ganar EN VIVO (datos que no existían al diseñarla o descubrirla)
-PROMO = {'vivo_n': 10, 'vivo_medio': 1.5, 'vivo_gana': 35}
+PROMO = {'vivo_n': 30, 'vivo_medio': 1.5, 'vivo_gana': 35, 'dias': 5, 'tokens': 3, 'concentracion_maxima': 0.5}
+# Variantes registradas antes de observar su cohorte futura; no se declaran ganadoras.
+MANUALES += [
+    {'nombre':'Tendencia con volumen y ATR limitado','conds':[['tend','>',0],['volr','>',1.2],['atr','<',6]],'sl_k':3,'rr':2,'hold':12},
+    {'nombre':'Ruptura con tendencia confirmada','conds':[['ret4h','>',-2],['ch1h','>',8],['volr','>',1.5],['tend','>',0],['atr','<',5]],'sl_k':3,'rr':2.5,'hold':12},
+    {'nombre':'Retroceso con flujo comprador','conds':[['ret4h','<',-6],['ret4h','>',-25],['sm_neto','>',300],['tend','>',0]],'sl_k':3,'rr':2,'hold':24},
+]
 _hilo, _ultimo = {'t': None}, {'evo': 0, 'msg': '', 'gen': 0}
 
 
 def preparar():
-    db.con().executescript(ESQUEMA)
+    with db.transaccion():
+        for statement in ESQUEMA.split(';'):
+            if statement.strip():db.ex(statement)
+        VF.preparar(MANUALES, version, VERSION_VALIDACION)
 
 # ---------------- muestras ----------------
 
@@ -68,13 +78,13 @@ def foto():
             a[1] += usd
             if usd > 0:
                 a[0].add(w)
-    ahora = int(time.time()) // 60 * 60
+    ahora = int(time.time())
     n = 0
     for tok, t in filas.items():
         if tok in laboratorio_ia.NO_MEME or not _num(t.get('price')):
             continue
         b, s = _num(t.get('buys'), 0), _num(t.get('sells'), 0)
-        f = {'ch5m': _num(t.get('price_change_percent5m')), 'ch1h': _num(t.get('price_change_percent1h')),
+        f = {'foto_version': VERSION_VALIDACION, 'ch5m': _num(t.get('price_change_percent5m')), 'ch1h': _num(t.get('price_change_percent1h')),
              'liq_k': _num(t.get('liquidity'), 0) / 1e3, 'mcap_k': _num(t.get('market_cap'), 0) / 1e3, 'holders': _num(t.get('holder_count')),
              'top10': _num(t.get('top_10_holder_rate')), 'rug': _num(t.get('rug_ratio')), 'bundler': _num(t.get('bundler_rate')),
              'snipers': _num(t.get('sniper_count')), 'smart_cnt': _num(t.get('smart_degen_count')), 'kol_cnt': _num(t.get('renowned_count')),
@@ -137,7 +147,12 @@ def completar(max_tokens=30):
                 if fl['ts'] < lim - 6 * 3600:
                     db.ex('UPDATE fab_muestras SET lista=-1 WHERE id=?', (fl['id'],))
                 continue
-            f = {**json.loads(fl['f']), **_rasgos_velas(v, i, fl['precio'])}
+            # Una foto entre aperturas no puede conocer el cierre de la vela en curso.
+            previo = bisect.bisect_right([x['t'] for x in v], fl['ts'] - BARRA)
+            original = json.loads(fl['f'])
+            f = {**original, **_rasgos_velas(v, previo, fl['precio']),
+                 'version_temporal': VERSION_VALIDACION if original.get('foto_version') == VERSION_VALIDACION else 'foto_legacy_recalculada',
+                 'rasgos_hasta': v[previo - 1]['t'] + BARRA if previo else None}
             ru = _ruta(v, i, fl['precio'])
             db.ex('UPDATE fab_muestras SET f=?, ruta=?, lista=1 WHERE id=?', (json.dumps(f), json.dumps(ru), fl['id']))
             hechos += 1
@@ -192,6 +207,10 @@ class Datos:
 
     def __init__(self):
         filas = db.q('SELECT ts, token, origen, f, ruta FROM fab_muestras WHERE lista=1 ORDER BY ts')
+        # Conservar las filas en SQLite; sus indicadores antiguos no acreditan evidencia causal.
+        self.cuarentena_temporal = sum(r['origen'] == 'vivo' and json.loads(r['f']).get('version_temporal') != VERSION_VALIDACION for r in filas)
+        filas = [r for r in filas if r['origen'] != 'vivo' or json.loads(r['f']).get('version_temporal') == VERSION_VALIDACION]
+        self.version_modelo = VF.VERSION
         self.n = len(filas)
         self.ts = np.array([r['ts'] for r in filas], dtype=np.int64)
         tok = {}
@@ -202,40 +221,55 @@ class Datos:
         self.H = np.full((self.n, PASOS), np.nan)
         self.L = np.full((self.n, PASOS), np.nan)
         self.C = np.full((self.n, PASOS), np.nan)
+        self.longitudes = np.zeros(self.n, dtype=int)
+        self.simulables = np.ones(self.n, dtype=bool)
         for k, r in enumerate(filas):
             f = json.loads(r['f'])
+            if r['origen'] == 'vivo':
+                hasta = f.get('rasgos_hasta')
+                self.simulables[k] = _seguridad_foto(f) and not isinstance(hasta, bool) and isinstance(hasta, (int, float)) and math.isfinite(hasta) and hasta <= r['ts']
             for j, nom in enumerate(RASGOS):
                 x = f.get(nom)
                 if x is not None:
                     self.F[k, j] = x
             ru = json.loads(r['ruta'] or '[]')[:PASOS]
+            self.longitudes[k] = len(ru)
             if ru:
                 a = np.array(ru, dtype=float)
                 self.H[k, :len(a)], self.L[k, :len(a)], self.C[k, :len(a)] = a[:, 0], a[:, 1], a[:, 2]
-        # lo que no llega a 24 velas se rellena con la última conocida (se cierra ahí)
+        # Relleno vectorial; longitudes impide certificar cierres sobre valores extrapolados.
         for M in (self.H, self.L, self.C):
             for j in range(1, PASOS):
                 hueco = np.isnan(M[:, j])
                 M[hueco, j] = M[hueco, j - 1]
-        self.corte = int(np.quantile(self.ts, 0.7)) if self.n else 0
+        policy = VF.politica()
+        self.corte = policy.get('entreno_hasta', int(np.quantile(self.ts, 0.7)) if self.n else 0)
+        self.seleccion_hasta = policy.get('seleccion_hasta', float('inf'))
+        self.reservado_desde = policy.get('reservado_desde', 0)
         self.col = {nom: j for j, nom in enumerate(RASGOS)}
 
 
-def simular(e, D, mascara=None, con_idx=False):
+def simular(e, D, mascara=None, con_idx=False, diagnostico=False):
     """Operaciones de la estrategia e: lista de (ts, resultado neto %) [, índice de la muestra]."""
     m = np.ones(D.n, dtype=bool) if mascara is None else mascara.copy()
+    if hasattr(D, 'simulables'):
+        m &= D.simulables
+    atr_todos = D.F[:, D.col['atr']]
+    m &= np.isfinite(atr_todos) & (atr_todos > 0)
     for nom, op, u in e['conds']:
         x = D.F[:, D.col[nom]]
         with np.errstate(invalid='ignore'):
             m &= (x > u) if op == '>' else (x < u)
     idx = np.nonzero(m)[0]
     if not len(idx):
-        return []
-    atr = np.nan_to_num(D.F[idx, D.col['atr']], nan=3.0)
+        return {'ops': [], 'incompletas': []} if diagnostico else []
+    atr = D.F[idx, D.col['atr']]
     lo, hi = getattr(D, 'sl_lim', (4, 30))
     sl = np.clip(e['sl_k'] * atr, lo, hi)
     tp = sl * e['rr']
     h = int(e['hold'])
+    if h < 1 or h > D.C.shape[1]:
+        raise ValueError('horizonte fuera de la ruta disponible')
     L, H, C = D.L[idx, :h], D.H[idx, :h], D.C[idx, :h]
     if e.get('lado', 1) == -1:  # corto: la ruta se ve al revés
         L, H, C = -H, -L, -C
@@ -247,33 +281,58 @@ def simular(e, D, mascara=None, con_idx=False):
     costes = getattr(D, 'costes', None)
     res = np.where(np.isnan(res), C[:, -1], res) - (COSTES if costes is None else costes[idx])
     salida = np.minimum(np.minimum(i_sl, i_tp), h - 1)
-    ops, libre = [], {}
+    longitudes = getattr(D, 'longitudes', np.full(D.n, D.C.shape[1]))[idx]
+    validas = np.isfinite(L) & np.isfinite(H) & np.isfinite(C) & (L <= C) & (C <= H)
+    prefijo = np.where(validas.all(1), h, (~validas).argmax(1))
+    conocidas = np.minimum(longitudes, prefijo)
+    ops, incompletas, libre = [], [], {}
     for k, n in enumerate(idx):  # una posición por token a la vez
         tk = D.tok[n]
         if D.ts[n] < libre.get(tk, 0):
             continue
+        if salida[k] >= conocidas[k] or not np.isfinite(res[k]):
+            libre[tk] = D.ts[n] + h * BARRA
+            incompletas.append((int(D.ts[n]), int(n)))
+            continue
         libre[tk] = D.ts[n] + (salida[k] + 1) * BARRA
         ops.append((int(D.ts[n]), float(res[k]), int(n)) if con_idx else (int(D.ts[n]), float(res[k])))
-    return ops
+    return {'ops': ops, 'incompletas': incompletas} if diagnostico else ops
 
 
-def stats(ops):
+def stats(ops, incompletas=0):
     if not ops:
-        return {'n': 0, 'medio': None, 'total': 0, 'gana_pct': None}
+        return {'n': 0, 'medio': None, 'total': 0, 'gana_pct': None, 'media_exacta': None, 'ganadoras': 0, 'incompletas': incompletas}
     r = [x for _, x in ops]
-    return {'n': len(r), 'medio': round(sum(r) / len(r), 2), 'total': round(sum(r), 1), 'gana_pct': round(100 * sum(x > 0 for x in r) / len(r))}
+    ganadoras = sum(x > 0 for x in r)
+    return {'n': len(r), 'medio': round(sum(r) / len(r), 2), 'total': round(sum(r), 1), 'gana_pct': round(100 * ganadoras / len(r)), 'media_exacta': sum(r) / len(r), 'ganadoras': ganadoras, 'incompletas': incompletas}
 
 
-def evaluar(e, D, desde=None):
-    ops = simular(e, D)
-    tr = [o for o in ops if o[0] < D.corte]
-    te = [o for o in ops if o[0] >= D.corte]
-    vi = [o for o in ops if desde and o[0] >= desde]
-    return {'entreno': stats(tr), 'prueba': stats(te), 'vivo': stats(vi), 'todo': stats(ops)}
+def evaluar(e, D, desde=None, solo_seleccion=False):
+    masks = {'entreno': D.ts + e['hold'] * BARRA < D.corte, 'prueba': (D.ts >= D.corte) & (D.ts + e['hold'] * BARRA < getattr(D, 'seleccion_hasta', float('inf'))),
+             'vivo': D.vivo & (D.ts >= max(desde, getattr(D, 'reservado_desde', 0))) if desde is not None else np.zeros(D.n, dtype=bool), 'todo': None}
+    if solo_seleccion:
+        masks['vivo'] = np.zeros(D.n, dtype=bool)
+        masks['todo'] = D.ts + e['hold'] * BARRA < getattr(D, 'seleccion_hasta', float('inf'))
+    out = {}
+    for key, mask in masks.items():
+        result = simular(e, D, mask, diagnostico=True)
+        out[key] = stats(result['ops'], len(result['incompletas']))
+    forward = masks['vivo']
+    operations = simular(e, D, forward, con_idx=True)
+    out['diversidad'] = VF.diversidad(operations, D)
+    out['estres'] = {}
+    if getattr(D, 'version_modelo', None) == VF.VERSION:
+        for profile in EF.ESCENARIOS:
+            values = EF.resultados(e, D, operations, profile, COSTES)
+            out['estres'][profile] = stats([(t, x) for t, x, _ in values], max(0, len(operations)-len(values)))
+    return out
 
 
 def _aptitud(e, D):
-    tr = [x for t, x in simular(e, D) if t < D.corte]
+    result = simular(e, D, D.ts + e['hold'] * BARRA < D.corte, diagnostico=True)
+    if result['incompletas']:
+        return -99
+    tr = [x for t, x in result['ops']]
     if len(tr) < 15:
         return -99
     m, s = sum(tr) / len(tr), float(np.std(tr)) or 1
@@ -283,13 +342,19 @@ def _aptitud(e, D):
 
 
 def _umbral(D, nom):
-    x = D.F[:, D.col[nom]]
-    x = x[~np.isnan(x)]
+    mascara = D.ts < D.corte if hasattr(D, 'ts') else np.arange(len(D.F)) < D.corte
+    if hasattr(D,'simulables'):mascara &= D.simulables
+    x = D.F[mascara, D.col[nom]]
+    x = x[np.isfinite(x)]
     return round(float(np.quantile(x, random.uniform(0.05, 0.95))), 4) if len(x) > 20 else None
 
 
 def _base(e):
     return {k: e[k] for k in ('conds', 'sl_k', 'rr', 'hold', 'lado') if k in e}
+
+
+def version(e):
+    return hashlib.sha256(json.dumps(_base(e), sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
 
 
 def _al_azar(D):
@@ -304,7 +369,7 @@ def _al_azar(D):
 
 
 def _mutar(e, D):
-    e = json.loads(json.dumps(e))
+    e = json.loads(json.dumps(_base(e)))
     r = random.random()
     if r < 0.4 and e['conds']:
         c = random.choice(e['conds'])
@@ -343,7 +408,12 @@ def describir(e):
 
 def evolucionar(poblacion=160, generaciones=20, D=None, manuales=None, salon_clave='fabrica_salon', ultimo=None, grabar=None):
     """Una ronda del generador. Por defecto, memecoins; la fábrica de futuros pasa sus datos, manuales, salón y estado."""
-    D = D or Datos()
+    if D is None:
+        VF.preparar(MANUALES, version, VERSION_VALIDACION)
+        D = Datos()
+    if getattr(D,'version_modelo',None)==VF.VERSION and not VF.es_valida(VF.politica()):
+        (ultimo if ultimo is not None else _ultimo)['msg']='Esperando datos suficientes para registrar cortes de validacion'
+        return None
     manuales = MANUALES if manuales is None else manuales
     ultimo = _ultimo if ultimo is None else ultimo
     if D.n < 300:
@@ -354,6 +424,8 @@ def evolucionar(poblacion=160, generaciones=20, D=None, manuales=None, salon_cla
     pob += [_al_azar(D) for _ in range(poblacion - len(pob))]
     for g in range(generaciones):
         punt = sorted(((_aptitud(e, D), i) for i, e in enumerate(pob)), reverse=True)
+        if getattr(D, 'version_modelo', None) == VF.VERSION:
+            VF.registrar_busqueda(len(pob))
         elite = [pob[i] for _, i in punt[:poblacion // 8]]
         hijos = list(elite)
         while len(hijos) < poblacion:
@@ -366,13 +438,18 @@ def evolucionar(poblacion=160, generaciones=20, D=None, manuales=None, salon_cla
     for e in salon + pob:
         if len({(c[0], c[1]) for c in e['conds']}) < len(e['conds']):
             continue
-        clave = tuple(t for t, _ in simular(e, D))  # mismas operaciones = misma estrategia aunque la regla se escriba distinto
+        seleccion = D.ts + e['hold'] * BARRA < getattr(D, 'seleccion_hasta', float('inf'))
+        clave = tuple((t, n, round(res, 8)) for t, res, n in simular(e, D, mascara=seleccion, con_idx=True))
         if clave in vistos:
             continue
         vistos.add(clave)
-        ev = evaluar(e, D, e.get('desde'))
-        if ev['entreno']['n'] >= 15 and (ev['entreno']['medio'] or 0) > 0 and ev['prueba']['n'] >= 8 and (ev['prueba']['medio'] or 0) > 0:
-            nuevo.append({**_base(e), 'desde': e.get('desde') or ahora, 'id': e.get('id') or f"{getattr(D, 'prefijo', 'G')}{ahora % 100000}-{len(nuevo)}"})
+        ev = evaluar(e, D, e.get('desde'), solo_seleccion=True)
+        if ev['entreno']['n'] >= 15 and (ev['entreno']['media_exacta'] or 0) > 0 and ev['prueba']['n'] >= 8 and (ev['prueba']['media_exacta'] or 0) > 0 and not ev['entreno']['incompletas'] and not ev['prueba']['incompletas']:
+            huella = version(e)
+            congelada = e.get('version') == huella and e.get('validacion') == getattr(D, 'version_modelo', None)
+            nuevo.append({**_base(e), 'version': huella, 'desde': e.get('desde') if congelada else ahora,
+                          'validacion': getattr(D, 'version_modelo', None),
+                          'id': e.get('id') if congelada else f"{getattr(D, 'prefijo', 'G')}-{ahora}-{huella[:12]}"})
     nuevo.sort(key=lambda e: -_aptitud(e, D))
     db.poner_ajuste(salon_clave, nuevo[:20])
     ultimo.update(evo=ahora, gen=ultimo['gen'] + 1, msg=f'{D.n} muestras · {len(nuevo)} estrategias pasan la validación')
@@ -389,7 +466,7 @@ def _grabar_ronda(D, pob, nuevo, probadas):
     ini = _inicio_vivo(D)
     mejores = sorted(pob, key=lambda e: -_aptitud(e, D))[:5]
     lista = ([{**e, 'nombre': f"Generada {e['id']}"} for e in nuevo[:10]]
-             + [{**m, 'id': f'M{i + 1}', 'desde': ini} for i, m in enumerate(MANUALES)]
+             + [{**m, 'id': f'M{i + 1}', 'desde': VF.inicio_manual(f'M{i + 1}', m, version)} for i, m in enumerate(MANUALES)]
              + [{**e, 'id': 'P' + str(abs(hash(describir(e))) % 10 ** 6), 'nombre': 'Candidata de la población'} for e in mejores])
     top, vistos = [], set()
     for e in lista:
@@ -416,21 +493,26 @@ def _inicio_vivo(D):
 
 def _candidatas(D):
     ini = _inicio_vivo(D)
-    return ([{**m, 'id': f'M{i + 1}', 'desde': ini} for i, m in enumerate(MANUALES)]
+    return ([{**m, 'id': f'M{i + 1}', 'desde': VF.inicio_manual(f'M{i + 1}', m, version)} for i, m in enumerate(MANUALES)]
             + [{**e, 'nombre': f"Generada {e['id']}"} for e in db.ajuste('fabrica_salon') or []])
 
 
 def promovidas():
     """Estrategias con ventaja demostrada en vivo, de mejor a peor (cacheado 5 min)."""
     def calc():
+        if not VF.es_valida(VF.politica()):return []
         D, out = Datos(), []
         for e in _candidatas(D):
-            if not e.get('desde'):
+            if not e.get('desde') or (not str(e['id']).startswith('M') and (e.get('version') != version(e) or e.get('validacion') != VF.VERSION)):
                 continue
             ev = evaluar(e, D, e['desde'])
             v = ev['vivo']
-            if (v['n'] >= PROMO['vivo_n'] and (v['medio'] or 0) >= PROMO['vivo_medio'] and (v['gana_pct'] or 0) >= PROMO['vivo_gana']
-                    and (ev['prueba']['medio'] or 0) > 0):
+            if (v['n'] >= PROMO['vivo_n'] and (v['media_exacta'] or 0) >= PROMO['vivo_medio'] and 100 * v['ganadoras'] / v['n'] >= PROMO['vivo_gana']
+                    and (ev['prueba']['media_exacta'] or 0) > 0 and not v['incompletas'] and not ev['prueba']['incompletas']
+                    and ev['diversidad']['dias'] >= PROMO['dias'] and ev['diversidad']['tokens'] >= PROMO['tokens']
+                    and ev['diversidad']['concentracion_maxima'] <= PROMO['concentracion_maxima']
+                    and set(ev['estres']) == set(EF.ESCENARIOS)
+                    and all(x['n'] >= PROMO['vivo_n'] and not x['incompletas'] and (x['media_exacta'] or 0) > 0 for x in ev['estres'].values())):
                 out.append({**e, 'vivo': v})
         return sorted(out, key=lambda e: -e['vivo']['medio'] * math.sqrt(e['vivo']['n']))
     return onchain._cacheado(('fab_promo',), 300, calc)
@@ -439,6 +521,13 @@ def promovidas():
 def _cumple(f, c):
     x = f.get(c[0])
     return x is not None and (x > c[2] if c[1] == '>' else x < c[2])
+
+
+def _seguridad_foto(f):
+    values = [f.get(k) for k in ('liq_k', 'top10', 'rug')]
+    if any(isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) for x in values):
+        return False
+    return values[0] >= 30 and 0 <= values[1] <= 0.45 and 0 <= values[2] <= 0.3
 
 
 def senales_ahora(estrategias, evitar=(), max_velas=15):
@@ -454,7 +543,7 @@ def senales_ahora(estrategias, evitar=(), max_velas=15):
             if fl['token'] in evitar or fl['token'] in usados:
                 continue
             f = json.loads(fl['f'])
-            if (f.get('liq_k') or 0) < 30 or (f.get('top10') or 1) > 0.45 or (f.get('rug') or 0) > 0.3:  # dinero real: mínimo de seguridad
+            if not _seguridad_foto(f):
                 continue
             if not all(_cumple(f, c) for c in e['conds'] if c[0] in f):
                 continue
@@ -486,10 +575,10 @@ def _resumen():
         D = Datos()
     except Exception as ex:
         return {'error': str(ex)[:120]}
-    man = [{'nombre': m['nombre'], 'regla': describir(m), **evaluar(m, D, _inicio_vivo(D))} for m in MANUALES]
+    man = [{'nombre': m['nombre'], 'regla': describir(m), **evaluar(m, D, VF.inicio_manual(f'M{i + 1}', m, version))} for i,m in enumerate(MANUALES)]
     salon = [{'id': e['id'], 'regla': describir(e), 'desde': e['desde'], **evaluar(e, D, e['desde'])} for e in (db.ajuste('fabrica_salon') or [])[:10]]
     cnt = {r['lista']: r['n'] for r in db.q('SELECT lista, COUNT(*) n FROM fab_muestras GROUP BY lista')}
-    return {'muestras': {'listas': cnt.get(1, 0), 'pendientes': cnt.get(0, 0), 'vivas': int(D.vivo.sum()), 'tokens': int(len(set(D.tok.tolist())))},
+    return {'validacion': VF.politica(), 'escenarios': EF.ESCENARIOS, 'muestras': {'listas': cnt.get(1, 0), 'pendientes': cnt.get(0, 0), 'vivas': int(D.vivo.sum()), 'cuarentena_temporal': D.cuarentena_temporal, 'tokens': int(len(set(D.tok.tolist())))},
             'corte': D.corte, 'manuales': man, 'promo': PROMO,
             'promovidas': [{'id': e['id'], 'nombre': e['nombre'], 'regla': describir(e), 'vivo': e['vivo']} for e in promovidas()], 'salon': salon, 'evo': _ultimo['evo'], 'rondas': _ultimo['gen'], 'msg': _ultimo['msg']}
 

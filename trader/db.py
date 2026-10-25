@@ -1,5 +1,7 @@
 """Base de datos SQLite del simulador (un archivo: datos/trader.db)."""
 import os, sqlite3, threading, json
+from contextlib import contextmanager
+import uuid
 
 RUTA = os.environ.get('DMN_TRADER_DB') or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'datos', 'trader.db')
 LOCK = threading.RLock()
@@ -72,3 +74,19 @@ def ajuste(clave, defecto=None):
 
 def poner_ajuste(clave, valor):
     ex('INSERT INTO ajustes(clave,valor) VALUES(?,?) ON CONFLICT(clave) DO UPDATE SET valor=excluded.valor', (clave, json.dumps(valor)))
+
+
+@contextmanager
+def transaccion():
+    """Atomicidad de varias escrituras; savepoints para operaciones anidadas."""
+    with LOCK:
+        c = con()
+        nombre = 'dmn_' + uuid.uuid4().hex
+        c.execute('SAVEPOINT ' + nombre)
+        try:
+            yield c
+            c.execute('RELEASE SAVEPOINT ' + nombre)
+        except BaseException:
+            c.execute('ROLLBACK TO SAVEPOINT ' + nombre)
+            c.execute('RELEASE SAVEPOINT ' + nombre)
+            raise
