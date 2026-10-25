@@ -2,7 +2,7 @@
   "formato": "apolo-firma/1",
   "autor": "DMNENGINE",
   "clavePublica": "fwdqHj9gcc4wD68fHBkRnGm0VwQyYFrJcYryj+8lSCI=",
-  "fecha": "2026-10-25T22:32:12.297Z",
+  "fecha": "2026-10-25T22:35:58.132Z",
   "archivos": {
     ".gitattributes": "c230339ad0282ad80de83b1765c45682618096ad2f0de6c125263131e34ebe00",
     ".gitignore": "e855002a95f08d987f1c8288ec210ac6607695b2f8b00f404c2e4fca8ff12c84",
@@ -15,7 +15,7 @@
     "apolo/SKILL.md": "95cd1c1124f4f2d5ac2a474a89ed95268468b0919aa86f05ebab25233c1263eb",
     "apolo/test/ui.test.js": "425d7173fffb1f8f349d499566b37876e838dc5eca87638dbdf548e727ac37b4",
     "apolo/trader.py": "5e64845c2f7a7387a78635851391da6423ab5cffb445a6e964a06181d4974c43",
-    "apolo/ui/trading.js": "8021f13ea7fe94f703b4550060864ac94a0dd751ab37c253aa6686fb1c0a0747",
+    "apolo/ui/trading.js": "15f9d030ba57d66b932ae7b71705a69468824fab855fc337aec541b053e89fb5",
     "apolo-plugin.json": "3eedc67d7c464df1fe5fb75b6b3f964694ff7861e2bb4b0769bd8fbe97ee35bc",
     "enjambre-pc.bat": "baa52d6e7f2af2b79c9329d6c951e19a66484a2ef0f6690fcf108c1e2dd302a2",
     "GUARDIA-APOLO.md": "bdbc3f46402586fe74f4322583a05f9b6144f43d1f4d549bff9c05f6b07789c4",
@@ -99,5 +99,5 @@
     "web/index.html": "6828d67a7bce8eeeddce8078e41a9368a72c4af531032f2b4ae0214609524cd4",
     "web/vendor/lightweight-charts.js": "0c146b9bfbc6e5f19da1a0de876dae43023c332d5157d82f7575f9b7653ee519"
   },
-  "firma": "9W9/s0DnnB7HiEuQ+USjwA8mmLOZ2ijfrC8RvPcL0h4ZgT5Hu81eAX3fSjy5ZHd3epF7hv9pj+6If33B7gJrAQ=="
+  "firma": "0EKxKK32FZU/WYfpAX1ax/jhPaUo2fifOI3ZKt7qqwD3glEkTkgB/m7gcHvtN+9GFNqTC1g/NtRlZDQwQSOnBA=="
 }
