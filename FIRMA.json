@@ -2,7 +2,7 @@
   "formato": "apolo-firma/1",
   "autor": "DMNENGINE",
   "clavePublica": "fwdqHj9gcc4wD68fHBkRnGm0VwQyYFrJcYryj+8lSCI=",
-  "fecha": "2026-10-25T18:18:12.579Z",
+  "fecha": "2026-10-25T22:15:27.416Z",
   "archivos": {
     ".gitattributes": "c230339ad0282ad80de83b1765c45682618096ad2f0de6c125263131e34ebe00",
     ".gitignore": "e855002a95f08d987f1c8288ec210ac6607695b2f8b00f404c2e4fca8ff12c84",
@@ -17,14 +17,13 @@
     "apolo/trader.py": "5e64845c2f7a7387a78635851391da6423ab5cffb445a6e964a06181d4974c43",
     "apolo/ui/trading.js": "8801352c3dde8515e11f815707f088cc31aca4c89defcdea001a3b31e098c006",
     "apolo-plugin.json": "3eedc67d7c464df1fe5fb75b6b3f964694ff7861e2bb4b0769bd8fbe97ee35bc",
-    "autoarranque.bat": "74c22e49a2986ac88309cf89da3088a83f2e938254cfba8bbb43966ea27ed660",
     "enjambre-pc.bat": "baa52d6e7f2af2b79c9329d6c951e19a66484a2ef0f6690fcf108c1e2dd302a2",
     "GUARDIA-APOLO.md": "bdbc3f46402586fe74f4322583a05f9b6144f43d1f4d549bff9c05f6b07789c4",
     "iniciar.bat": "6c71e4e5e90e9d75ef2e6a2829adea048029ebddaea8abdac65a517ca767144c",
     "LICENSE": "3b4669b8aaf5302ba0c6923aae1a909aee01ca05743f47e472f7e8d777d21752",
     "ninjatrader/DmnPuente.cs": "41d36ee50b9cc54d008c8d33c5e58cfd6417879677178132d8952a6f5abaefb4",
     "parar-enjambre-pc.bat": "c66f08bfd50706a80787b675d6b8cd9d963bc3c15e6c40e6727a235ad259df21",
-    "README.md": "4466e959d825d0c6576fa12b8574d405d2b0bac16c7f0eb3857017dd4a5f7897",
+    "README.md": "1bad75d0994365d69ad747db740b06de43069819c3a7a70d6c03b1cca5e98608",
     "servidor-pc.bat": "74c2a97000e8145f019c3916ea08cca513e1e677108c044bf8dec0bd079e208d",
     "tests/central_fixture.py": "0fc716b5bb4247930a6d884904bde6ed3f88ebbd03badcb2696fb42899854c23",
     "tests/prueba_agente.py": "93c307ae28808376c20492326379257f4735f42b16110bb199bfc709132b41dd",
@@ -57,7 +56,7 @@
     "tests/test_salida_gmgn.py": "79cc18db48fcb17935d7c4d9cf16a4c24c8d096f206a5cffa5a25adfafc13c09",
     "tests/test_sincronia.py": "39839c21e10e9a128a8e64b866bd75c79527b1d22591c24f6e5cb790b783da4f",
     "tests/test_validacion_reservada.py": "a4a72bc48ec55ee52869cc87d1f8c3bc0496cff1746ef3c99e0ff4821ad710a0",
-    "trader/agente.py": "a36258e73c0ed1cb7338e3ef5b82f47ca0e0f6ff029d728797fe2b9d7939aea8",
+    "trader/agente.py": "a34d0a1532ecfe8df6c30f5a18c0f4220a742824dda4b857387192601eb85c67",
     "trader/alpaca.py": "6120059ae72f149773500a21a7d8436da52d587bab1b7f8ed07efcbc4740bb35",
     "trader/analisis.py": "36add2a2bc8cc251627b20a42c46228428c3dfbf749efbafb62a19f9ed6e4603",
     "trader/analista.py": "125c0968145145ff622e7b5f0dafb9d0e81dd177a9cbdffb4c4ddfe38cd36d6d",
@@ -67,7 +66,7 @@
     "trader/datos.py": "aa60da0a2efa36c331cfd96b761bd594dee862b55ef458c2c1eb315860296864",
     "trader/db.py": "c148fda3eb27d7988a44bcb3f5e55c0447ac6edcb4af745ed3ea50988c725ef2",
     "trader/ejecutor.py": "d6fd96f588d05a442187044693bc34925051e1fc21188547fef881b8140a51c7",
-    "trader/escuadron.py": "6038bfde85976d27afdde39ce7c2dda715f00439d684bc457cc493aa3883dee3",
+    "trader/escuadron.py": "e15b6bf06ec046063d34aa7d109a787423048f059eed5ab437da73ddfc35540b",
     "trader/estres_fabrica.py": "a46d18a0d31898ed7e53abbe019dda7ed4214c29bd1b0aa26b80e42f28cf23f5",
     "trader/fabrica_fut.py": "e32e9aa87ce9b7be3eb306eacfc8d3786a2ad9d8ca100d4527886a035eac10fa",
     "trader/fabrica.py": "b9bb53f4ba83b0f8687f653f30976ba37ce9ff713e85c23a2b714c664c8d75da",
@@ -100,5 +99,5 @@
     "web/index.html": "6828d67a7bce8eeeddce8078e41a9368a72c4af531032f2b4ae0214609524cd4",
     "web/vendor/lightweight-charts.js": "0c146b9bfbc6e5f19da1a0de876dae43023c332d5157d82f7575f9b7653ee519"
   },
-  "firma": "VPh+bNIW6eB5T+sm66qxVc4SuVivhCjE6OH3+Hx4OYUR44DFLjVg0Em397ipoeffu71bqQhn8HZTYzQX0UGpCg=="
+  "firma": "4F7kux6LyqipplSuxNpiPqSqeYxD7mntxlprPhxZhzMCx6G2fsTgmrrhNVl1CydWCdo5REKl6KB80dp9mVnUDw=="
 }
