@@ -5,7 +5,7 @@ vigila el propio GMGN. Solo una orden suya a la vez; la anula si no entra a tiem
 Frenos duros: pérdida máxima del total (se apaga), pausa tras 2 stops seguidos, tope de operaciones al día, reserva de SOL
 para comisiones, enfriamiento por token tras un stop. Corre donde está gmgn-cli con la key (el PC); la configuración la
 pone el panel de la central y llega aquí con la respuesta de la sincronía de real.py."""
-import json, threading, time, math, urllib.request
+import json, threading, time, math, urllib.request, uuid
 from decimal import Decimal, InvalidOperation
 from . import conciencia, db, onchain, real, contabilidad_gmgn as CG, supervision_gmgn as SG
 from .presupuesto_gmgn import EntradaNoEnviada, presupuesto, PRIORIDAD, PROPINA
@@ -624,6 +624,17 @@ def paso():
             pass
     if c.get('conciliado', 0) > e.get('conciliado_hecho', 0):
         _conciliado_a_mano(e, c['conciliado'])
+    sal = _peticion('salir')
+    if sal:
+        o = e.get('orden')
+        if not o or not o.get('entro'):
+            _responder(sal, 'rechazada', 'no hay ninguna posición abierta del piloto')
+        else:
+            if not (o.get('salida') or o.get('salida_solicitada')):
+                _log(e, f"🧠 APOLO pide salir de {o['simbolo']}: {sal.get('motivo') or 'sin motivo'}")
+                _salir(e, o, f"APOLO: {sal.get('motivo') or 'salida pedida'}"[:160])
+            _responder(sal, 'enviada', o.get('venta_estado') or o.get('cancelacion_estado') or 'salida en curso')
+        db.poner_ajuste(EST, e)
     if e.get('orden'):
         _seguir(e, c)
     if e.get('intencion_entrada'):
@@ -648,6 +659,19 @@ def paso():
             motivo = 'en pausa tras 2 stops'
         elif n_hoy >= c['max_ops_dia']:
             motivo = 'tope de operaciones de hoy'
+        pet = _peticion('comprar')
+        if pet:  # APOLO eligió el token: mismas comprobaciones y límites que una entrada automática
+            if motivo:
+                _responder(pet, 'rechazada', motivo)
+            else:
+                try:
+                    _comprar_apolo(e, w, pet)
+                    _responder(pet, 'enviada', 'orden enviada a GMGN con TP/SL; se verifica en el siguiente paso')
+                except Exception as ex:
+                    _responder(pet, 'rechazada', f'{type(ex).__name__}: {str(ex)[:180]}')
+                    _log(e, f"🧠 Petición de APOLO rechazada ({pet.get('simbolo') or pet['token'][:6]}): {str(ex)[:120]}")
+            db.poner_ajuste(EST, e)
+            return e
         if motivo:
             if e.get('motivo') != motivo:
                 _log(e, f"⏹️ {motivo}")
@@ -720,6 +744,66 @@ def _bucle():
             _log(e, 'Contabilidad pendiente de revisar: ' + type(ex).__name__)
             db.poner_ajuste(EST, e)
         time.sleep(CADA_ORDEN)
+
+
+PET = 'piloto_peticion_apolo'
+_TOKEN_SOL = __import__('re').compile(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$')
+
+
+def pedir_apolo(b):
+    """APOLO (herramienta trader_real) pide comprar un token o salir de la posición. No envía nada: la ejecuta el bucle
+    del piloto con sus límites (tope por operación, reserva, pérdida máxima, ops/día, pausa, ruta, TP/SL verificados)."""
+    if not isinstance(b, dict) or b.get('accion') not in ('comprar', 'salir'):
+        raise ValueError('accion: comprar o salir')
+    c, e = cfg(), _est()
+    if not _hilo['t'] or not _hilo['t'].is_alive():
+        raise ValueError('el piloto no corre en este equipo (corre donde está gmgn-cli con la key)')
+    motivo = str(b.get('motivo') or '')[:300]
+    pet = {'id': uuid.uuid4().hex[:12], 'accion': b['accion'], 'motivo': motivo, 'ts': int(time.time()), 'estado': 'pendiente'}
+    if b['accion'] == 'comprar':
+        tok = b.get('token')
+        if not isinstance(tok, str) or not _TOKEN_SOL.match(tok):
+            raise ValueError('token: dirección de Solana del contrato (base58), no el nombre')
+        if not c.get('activo'):
+            raise ValueError('el piloto real está parado: actívalo en Dinero real → Memecoins')
+        if e.get('orden') or e.get('intencion_entrada'):
+            raise ValueError('ya hay una operación del piloto abierta o sin conciliar: una a la vez')
+        tp, sl = b.get('tp', 30), b.get('sl', 15)
+        for nombre, v, lo, hi in (('tp', tp, 5, 200), ('sl', sl, 5, 30)):
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or not lo <= v <= hi:
+                raise ValueError(f'{nombre} en % entre {lo} y {hi}')
+        pet.update(token=tok, simbolo=str(b.get('simbolo') or tok[:6])[:20], tp=float(tp), sl=float(sl))
+    db.poner_ajuste(PET, pet)
+    return pet
+
+
+def peticion_apolo():
+    return db.ajuste(PET)
+
+
+def _peticion(accion):
+    pet = db.ajuste(PET)
+    if not pet or pet.get('estado') != 'pendiente' or pet.get('accion') != accion:
+        return None
+    if time.time() - pet.get('ts', 0) > 600:
+        _responder(pet, 'caducada', 'nadie la ejecutó en 10 min')
+        return None
+    return pet
+
+
+def _responder(pet, estado, respuesta):
+    db.poner_ajuste(PET, {**pet, 'estado': estado, 'respuesta': str(respuesta)[:300], 'resuelta': int(time.time())})
+
+
+def _comprar_apolo(e, w, pet):
+    from . import mercado_gmgn
+    precio = _precio(pet['token'])
+    if not precio or not math.isfinite(precio) or precio <= 0:
+        raise EntradaNoEnviada('sin precio del token en GMGN')
+    b = {'token': pet['token'], 'simbolo': pet['simbolo'], 'precio': precio, 'tp': pet['tp'], 'sl': pet['sl'],
+         'atr': max(2.0, pet['sl'] / 2.5), 'pts': 0, 'est_id': 'apolo', 'estrategia': 'APOLO', 'motivo_apolo': pet.get('motivo')}
+    mercado_gmgn.abrir(e, w, b, precio)
+    _log(e, f"🧠 APOLO compra {pet['simbolo']}: {pet.get('motivo') or 'sin motivo'} · TP +{pet['tp']:.0f} % / SL −{pet['sl']:.0f} %")
 
 
 def _conciliado_a_mano(e, ts):

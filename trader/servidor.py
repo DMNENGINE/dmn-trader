@@ -420,6 +420,17 @@ def r_gmgn_informe(q, b):
     return O.informe(q.get('dia'))
 
 
+@ruta('POST', '/api/piloto/apolo')
+def r_piloto_apolo(q, b):
+    """APOLO pide comprar un token o salir de la posición; la ejecuta el piloto con todos sus límites."""
+    return piloto.pedir_apolo(b)
+
+
+@ruta('GET', '/api/piloto/apolo')
+def r_piloto_apolo_estado(q, b):
+    return piloto.peticion_apolo() or {}
+
+
 @ruta('POST', '/api/piloto/config')
 def r_piloto_cfg(q, b):
     return piloto.poner_cfg(b or {})

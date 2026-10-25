@@ -150,6 +150,39 @@ function validarOrden(orden, escritura) {
   }
   return o;
 }
+// ---------- dinero real: todo pasa por el piloto (límites, ruta, TP/SL verificados), nunca por gmgn-cli directo ----------
+async function motor(ruta, opciones = {}) {
+  if (!estado.url) throw new Error('el motor de DMN Trader no está en marcha (servidor-pc.bat)');
+  const r = await fetch(estado.url + '/api' + ruta, { ...opciones, headers: { 'content-type': 'application/json', ...(estado.externo ? {} : { 'x-token': token }) }, signal: AbortSignal.timeout(30000) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+  return j;
+}
+async function estadoReal() {
+  const [p, r] = await Promise.all([motor('/piloto'), motor('/real').catch(() => ({}))]);
+  const c = p.cfg || {}, o = p.orden, F = p.fabrica || {};
+  const lineas = [
+    `Wallet GMGN: ${r.sol != null ? r.sol.toFixed(4) + ' SOL' : '—'}${r.sol_usd ? ` (≈ ${(r.sol * r.sol_usd).toFixed(2)} $)` : ''}${r.wallet ? ` · ${r.wallet}` : ''}`,
+    `Piloto: ${c.activo ? 'ACTIVO' : 'PARADO'} · ${c.por_op_sol} SOL por operación (máx. 0,1) · se apaga si pierde ${c.perdida_max_sol} SOL · máx. ${c.max_ops_dia} ops/día · reserva ${c.reserva_sol} SOL`,
+    `Supervisión: ${(p.supervision || {}).estado || '—'} — ${(p.supervision || {}).motivo || ''}`,
+    o ? `Posición: ${o.simbolo} (${o.token}) ${o.entro ? `dentro, va ${o.pnl_pct ?? '?'} %` : 'pendiente de confirmar'} · TP +${o.tp} % / SL −${o.sl} %` : 'Posición: ninguna',
+    `Estrategias promovidas por el laboratorio: ${(F.promovidas || []).map(x => x.nombre).join(', ') || 'ninguna'}`,
+    `Última petición tuya: ${p.peticion_apolo ? JSON.stringify(p.peticion_apolo) : (await motor('/piloto/apolo').then(x => x.id ? JSON.stringify(x) : 'ninguna').catch(() => '—'))}`,
+    `Candidatos del último escaneo: ${((p.ultimo_scan || {}).top || []).map(x => `${x.simbolo} ${x.token}`).join(' · ') || '—'}`,
+    'Para operar usa trader_real_operar (el piloto aplica los límites). Nunca gmgn-cli swap por la terminal.',
+  ];
+  return lineas.join('\n');
+}
+async function operarReal(args) {
+  const pet = await motor('/piloto/apolo', { method: 'POST', body: JSON.stringify(args) });
+  for (let i = 0; i < 30; i++) {   // el bucle del piloto la recoge en ≤ 30 s
+    await new Promise(ok => setTimeout(ok, 3000));
+    const x = await motor('/piloto/apolo');
+    if (x.id === pet.id && x.estado !== 'pendiente') return `${x.estado.toUpperCase()}: ${x.respuesta}`;
+  }
+  return 'PENDIENTE: el piloto aún no la ha procesado; consulta trader_real_estado en un minuto.';
+}
+
 const ORDEN = { type: 'object', properties: { orden: { type: 'array', items: { type: 'string' }, description: 'p. ej. ["precio","BTC-USD"] o ["comprar","AAPL","10","sl=180","tp=210"]' } }, required: ['orden'] };
 
 module.exports = definirPlugin({
@@ -159,6 +192,17 @@ module.exports = definirPlugin({
       nombre: 'trader_guia', descripcion: 'Guía de DMN Trader y referencias',
       parametros: { type: 'object', properties: { tema: { type: 'string', enum: ['guia', 'estrategias', 'riesgo', 'glosario', 'plan-aprendizaje'] } } },
       ejecutar: async ({ tema = 'guia' }) => fs.readFileSync(tema === 'guia' ? path.join(__dirname, 'SKILL.md') : path.join(__dirname, 'references', `${tema.replace(/[^\w-]/g, '')}.md`), 'utf8'),
+    });
+    await apolo.registrarHerramienta({ nombre: 'trader_real_estado', descripcion: 'DMN Trader, DINERO REAL (lectura)', parametros: { type: 'object', properties: {} }, ejecutar: () => estadoReal() });
+    await apolo.registrarHerramienta({
+      nombre: 'trader_real_operar', descripcion: 'DMN Trader, DINERO REAL: pedir al piloto comprar un token o salir',
+      parametros: { type: 'object', properties: {
+        accion: { type: 'string', enum: ['comprar', 'salir'] },
+        token: { type: 'string', description: 'dirección del contrato en Solana (de trader_real_estado o de GMGN), nunca inventada' },
+        simbolo: { type: 'string' }, tp: { type: 'number', description: 'take-profit en % (5-200, por defecto 30)' },
+        sl: { type: 'number', description: 'stop-loss en % (5-30, por defecto 15)' }, motivo: { type: 'string', description: 'por qué, en una frase' } },
+        required: ['accion', 'motivo'] },
+      ejecutar: args => operarReal(args),
     });
     await apolo.registrarHerramienta({ nombre: 'trader_consultar', descripcion: 'DMN Trader (lectura)', parametros: ORDEN, ejecutar: ({ orden }) => ejecutarCliente(validarOrden(orden, false)) });
     await apolo.registrarHerramienta({ nombre: 'trader_operar', descripcion: 'DMN Trader (operar, simulado)', parametros: ORDEN, ejecutar: ({ orden }) => ejecutarCliente(validarOrden(orden, true)) });

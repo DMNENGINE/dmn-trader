@@ -6,16 +6,49 @@
   "licencia": "MIT",
   "entrada": "apolo/index.js",
   "apoloSdk": "^1.0.0",
-  "permisos": ["shell", "red:127.0.0.1"],
-  "secretos": ["dmn-trader:token", "dmn-trader:gmgn"],
+  "permisos": [
+    "shell",
+    "red:127.0.0.1"
+  ],
+  "secretos": [
+    "dmn-trader:token",
+    "dmn-trader:gmgn"
+  ],
   "aporta": {
     "herramientas": [
-      { "nombre": "trader_guia", "riesgo": "lectura", "descripcion": "Guía de DMN Trader (órdenes, disciplina, enjambre) y referencias: estrategias, riesgo, glosario, plan-aprendizaje. Léela antes de operar." },
-      { "nombre": "trader_consultar", "riesgo": "lectura", "descripcion": "DMN Trader en solo lectura (dinero simulado, precios reales): precio, analisis, buscar, estado, cuentas, ordenes, tamano, diario, stats, examen, equity, estrategias, backtest, optimizar, escaner, alertas, avisos, reglas (sin cambios), enjambre [informe|noticias|lecciones|agente <id>], updown [mercados]." },
-      { "nombre": "trader_operar", "riesgo": "escritura", "descripcion": "DMN Trader, órdenes que cambian algo (dinero simulado): comprar, vender, cerrar, stop, cancelar, usar, nueva, reiniciar, reglas clave=valor, anotar, vigilar, olvidar, alerta, practica, avanzar, updown iniciar|parar." }
+      {
+        "nombre": "trader_guia",
+        "riesgo": "lectura",
+        "descripcion": "Guía de DMN Trader (órdenes, disciplina, enjambre) y referencias: estrategias, riesgo, glosario, plan-aprendizaje. Léela antes de operar."
+      },
+      {
+        "nombre": "trader_real_estado",
+        "riesgo": "lectura",
+        "descripcion": "DINERO REAL (wallet GMGN de Solana): saldo, estado y límites del piloto, posición abierta, estrategias promovidas, candidatos del último escaneo con su dirección de contrato y el resultado de tu última petición. Léelo antes de operar con dinero real."
+      },
+      {
+        "nombre": "trader_real_operar",
+        "riesgo": "escritura",
+        "descripcion": "DINERO REAL: pide al piloto de DMN Trader comprar una memecoin de Solana (accion comprar + token = dirección del contrato + tp/sl en % + motivo) o salir de la posición abierta (accion salir + motivo). El piloto aplica sus límites (tope por operación, reserva, pérdida máxima, ops/día), comprueba la ruta y pone TP/SL verificados; puede rechazarla y te dice por qué. Es la ÚNICA vía para operar dinero real: nunca uses gmgn-cli swap por la terminal."
+      },
+      {
+        "nombre": "trader_consultar",
+        "riesgo": "lectura",
+        "descripcion": "DMN Trader en solo lectura (dinero simulado, precios reales): precio, analisis, buscar, estado, cuentas, ordenes, tamano, diario, stats, examen, equity, estrategias, backtest, optimizar, escaner, alertas, avisos, reglas (sin cambios), enjambre [informe|noticias|lecciones|agente <id>], updown [mercados]."
+      },
+      {
+        "nombre": "trader_operar",
+        "riesgo": "escritura",
+        "descripcion": "SOLO SIMULADO (cuenta de práctica, acciones/cripto de Yahoo/Coinbase; no sirve para memecoins de Solana ni dinero real): comprar, vender, cerrar, stop, cancelar, usar, nueva, reiniciar, reglas clave=valor, anotar, vigilar, olvidar, alerta, practica, avanzar, updown iniciar|parar."
+      }
     ],
     "vistas": [
-      { "nombre": "trading", "archivo": "apolo/ui/trading.js", "titulo": "Trading", "icono": "grafica" }
+      {
+        "nombre": "trading",
+        "archivo": "apolo/ui/trading.js",
+        "titulo": "Trading",
+        "icono": "grafica"
+      }
     ]
   }
 }
