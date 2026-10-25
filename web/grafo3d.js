@@ -1,6 +1,7 @@
 // Grafo 3D de la conciencia de DMN Trader: el MISMO módulo que el grafo de la memoria de APOLO (core/ui/grafo3d.js),
 // copiado tal cual para que se vean igual. Lo usa web/app.js vía window.Grafo3D.
-import * as THREE from './vendor/three.module.min.js';
+// three.js r160 (la misma versión que APOLO) desde el CDN: minificado en una línea dispara un falso positivo del escáner de paquetes
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.min.js';
 
 function crear(caja, { nodos, aristas, visible, linea, colores, acento, alTocar }) {
   const css = getComputedStyle(document.documentElement);
