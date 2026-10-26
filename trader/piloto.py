@@ -687,6 +687,11 @@ def paso():
             _ult['scan'] = ahora
             e['motivo'] = None
             evitar = {k for k, v in (e.get('enfriar') or {}).items() if v > ahora}
+            if c.get('fuente') == 'perfiles':
+                _entrada_perfiles(e, c, w, evitar)
+                e['ts'] = ahora
+                db.poner_ajuste(EST, e)
+                return e
             if c.get('fuente', 'fabrica') == 'fabrica':
                 from . import fabrica
                 prom = fabrica.promovidas()
@@ -878,6 +883,48 @@ def candidatas_perfil(perfil, n=8):
             break
     _CAND[perfil] = (time.time(), res)
     return res
+
+
+# fuente 'perfiles': el piloto rota los perfiles por su cuenta (el que menos operaciones lleva) y APOLO aprueba o veta
+TP_SL_PERFIL = {'conservador': (30, 15), 'moderado': (40, 20), 'agresivo': (60, 25)}
+
+
+def _siguiente_perfil(e):
+    n = {k: sum(1 for o in e.get('ops') or [] if o.get('est_id') == 'apolo-' + k) for k in PERFILES}
+    return min(PERFILES, key=lambda k: n[k])
+
+
+def _entrada_perfiles(e, c, w, evitar):
+    perfil = _siguiente_perfil(e)
+    cand = [x for x in candidatas_perfil(perfil) if x['token'] not in evitar]
+    ahora = int(time.time())
+    e['ultimo_scan'] = {'ts': ahora, 'top': cand[:6], 'perfil': perfil}
+    tp, sl = TP_SL_PERFIL[perfil]
+    for x in cand[:3]:
+        simbolo = str(x['simbolo'] or x['token'][:6])[:20]
+        motivo = 'sin IA'
+        if c['ia']:
+            prop = (f"Prueba de perfiles ({perfil}): COMPRAR {simbolo} a mercado con {c['por_op_sol']} SOL, TP +{tp} %, SL −{sl} %. "
+                    f"Liquidez {x['liquidez']} $, volumen 1 h {x['volumen_1h']} $, cambio 1 h {x['cambio_1h']} %, top 10 {x['top10']}, {x['edad_h']} h de vida.")
+            try:
+                r = _apolo('entrada', simbolo, prop, _contexto(x['token'], simbolo))
+            except Exception as ex:
+                _log(e, f"🧠 APOLO no contestó ({str(ex)[:60]}): no entro")
+                return
+            motivo = str(r.get('motivo') or '')[:160]
+            if str(r.get('decision', '')).lower().startswith('vet') and real._f(r.get('confianza')) >= 0.6:
+                _log(e, f"🧠 APOLO veta {simbolo} ({perfil}): {motivo}")
+                e.setdefault('enfriar', {})[x['token']] = ahora + 3600
+                continue
+        try:
+            _comprar_apolo(e, w, {'token': x['token'], 'simbolo': simbolo, 'tp': float(tp), 'sl': float(sl), 'perfil': perfil, 'motivo': motivo or 'prueba de perfiles'})
+            return
+        except EntradaNoEnviada as ex:
+            _log(e, f"🧠 {simbolo} ({perfil}) no entra: {str(ex)[:120]}")
+            e.setdefault('enfriar', {})[x['token']] = ahora + 3600
+    if not e.get('ultimo_sin') or ahora - e['ultimo_sin'] > 3600:
+        e['ultimo_sin'] = ahora
+        _log(e, f"🔎 Perfil {perfil}: {'ninguna candidata ahora' if not cand else 'ninguna aprobada ni válida'}")
 
 
 def _comprar_apolo(e, w, pet):

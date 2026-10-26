@@ -106,3 +106,19 @@ class PeticionApolo(unittest.TestCase):
             self.assertEqual([x['simbolo'] for x in P.candidatas_perfil('agresivo')],['VIEJO','NUEVO'])
             self.assertEqual([x['simbolo'] for x in P.candidatas_perfil('moderado')],['VIEJO'])
         with self.assertRaises(ValueError):P.candidatas_perfil('otro')
+    def test_rotacion_elige_el_perfil_con_menos_operaciones(self):
+        self.assertEqual(P._siguiente_perfil({'ops':[]}),'conservador')
+        self.assertEqual(P._siguiente_perfil({'ops':[{'est_id':'apolo-conservador'},{'est_id':'apolo-agresivo'}]}),'moderado')
+    def test_perfiles_compra_la_primera_aprobada_y_salta_los_vetos(self):
+        cand=[{'simbolo':'MALO','token':'A'*44,'liquidez':1,'volumen_1h':1,'cambio_1h':0,'top10':0.1,'edad_h':5},{'simbolo':'BUENO','token':'B'*44,'liquidez':1,'volumen_1h':1,'cambio_1h':0,'top10':0.1,'edad_h':5}]
+        e={'ops':[{'est_id':'apolo-conservador'}]}
+        respuestas=iter([{'decision':'veto','confianza':0.9,'motivo':'no'},{'decision':'entrar','confianza':0.8,'motivo':'pinta bien'}])
+        with patch.object(P,'candidatas_perfil',return_value=cand) as cp,patch.object(P,'_apolo',side_effect=lambda *a:next(respuestas)),patch.object(P,'_contexto',return_value={}),patch.object(P,'_comprar_apolo') as comprar:
+            P._entrada_perfiles(e,{**P.DEFECTO,'ia':True},'w',set())
+        cp.assert_called_once_with('moderado');pet=comprar.call_args.args[2]
+        self.assertEqual((pet['simbolo'],pet['perfil'],pet['tp'],pet['sl']),('BUENO','moderado',40.0,20.0));self.assertIn('A'*44,e['enfriar'])
+    def test_perfiles_sin_apolo_no_compra(self):
+        cand=[{'simbolo':'X','token':'A'*44,'liquidez':1,'volumen_1h':1,'cambio_1h':0,'top10':0.1,'edad_h':5}]
+        with patch.object(P,'candidatas_perfil',return_value=cand),patch.object(P,'_apolo',side_effect=OSError('cerrado')),patch.object(P,'_contexto',return_value={}),patch.object(P,'_comprar_apolo') as comprar:
+            P._entrada_perfiles({},{**P.DEFECTO,'ia':True},'w',set())
+        comprar.assert_not_called()
