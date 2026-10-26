@@ -13,6 +13,7 @@ from .presupuesto_gmgn import EntradaNoEnviada, presupuesto, PRIORIDAD, PROPINA
 CFG, EST = 'piloto_cfg', 'piloto_estado'
 CADA = 300            # escaneo
 CADA_ORDEN = 30       # seguimiento de la orden abierta
+IA_GRACIA = 15 * 60   # primera revisión de APOLO sobre una posición: a los 15 min
 CADA_IA = 300         # revisión de la posición por el modelo
 CADA_VELAS = 300
 DEFECTO = {'activo': False, 'tarea': 'memes_sol', 'por_op_sol': 0.01, 'perdida_max_sol': 0.008, 'reserva_sol': 0.005,
@@ -526,13 +527,17 @@ def _gestionar(e, c, o):
             pass
     if ahora - o['entro'] > 3600 and o['pnl_pct'] < 2 and (o.get('vol_rel') or 1) < 0.3:
         return _salir(e, o, f"sin volumen ni avance tras 1 h (vol {o.get('vol_rel')}×, {o['pnl_pct']:+.1f} %)")
-    # 3) revisión con el modelo cada 5 min
-    if c['ia'] and ahora - o.get('ia_ts', 0) >= CADA_IA:
+    # 3) revisión con el modelo cada 5 min, no antes de IA_GRACIA: recién comprada, el coste ya está pagado y salir
+    #    al minuto solo lo convierte en pérdida segura (STONK y SPCX se vendieron así a los 80 s por estar «laterales»)
+    if c['ia'] and ahora - o.get('entro', ahora) >= IA_GRACIA and ahora - o.get('ia_ts', 0) >= CADA_IA:
         o['ia_ts'] = ahora
         try:
             r = _apolo('posicion', o['simbolo'],
                        f"Posición LARGA: entrada {ent:.6g} $, ahora {o['pnl_pct']:+.1f} %, máximo {(o['max'] / ent - 1) * 100:+.1f} %, "
-                       f"TP +{o['tp']:.0f} %, SL −{o['sl']:.0f} %, abierta hace {int((ahora - o['entro']) / 60)} min. ¿Mantener hasta TP/SL o salir ya?",
+                       f"TP +{o['tp']:.0f} %, SL −{o['sl']:.0f} %, abierta hace {int((ahora - o['entro']) / 60)} min. ¿Mantener hasta TP/SL o salir ya? "
+                       "Los costes de entrada YA están pagados: no los cuentes. Precio lateral o volumen bajo NO son motivo de salida "
+                       "(para eso está el SL). Sal solo si hay deterioro claro: dev o bundlers vendiendo en masa, señales de rug, "
+                       "smart money saliendo o una caída en curso que vaya a atravesar el SL.",
                        _contexto(o['token'], o['simbolo']))
             o['ia'] = {'accion': r.get('accion'), 'confianza': r.get('confianza'), 'motivo': str(r.get('motivo') or '')[:160], 'ts': int(ahora)}
             if str(r.get('accion', '')).lower().startswith('sal') and real._f(r.get('confianza')) >= c['ia_conf_min']:
