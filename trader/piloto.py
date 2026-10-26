@@ -349,6 +349,11 @@ def _vender(o):
               '--amount', cantidad, '--slippage', '15', '--priority-fee', PRIORIDAD, '--tip-fee', PROPINA, timeout=60)
 
 
+def _cancelada(x):
+    """GMGN marcaba una estrategia cancelada como closed/stopped; ahora como canceled/canceled."""
+    return bool(x) and (x.get('status'), x.get('strategy_status')) in (('closed', 'stopped'), ('canceled', 'canceled'))
+
+
 def _cantidad_propia(remota):
     st = remota.get('order_statistic') or {}
     try:
@@ -376,9 +381,11 @@ def _salir(e, o, motivo):
             o['salida_solicitada'] = o.get('salida_solicitada') or motivo
             o['cancelacion_estado'] = 'solicitada'
             db.poner_ajuste(EST, e)
-            _cancelar(o['wallet'], o['id'])
-            tipo, remota = _buscar(o['id'], o['wallet'], o['token'], **({'grupo':o['grupo_proteccion']} if o.get('grupo_proteccion') else {}))
-            if not remota or remota.get('status') != 'closed' or remota.get('strategy_status') != 'stopped':
+            remota = previa
+            if not _cancelada(previa):  # ya cancelada en un paso anterior: no se repite la cancelación
+                _cancelar(o['wallet'], o['id'])
+                tipo, remota = _buscar(o['id'], o['wallet'], o['token'], **({'grupo':o['grupo_proteccion']} if o.get('grupo_proteccion') else {}))
+            if not _cancelada(remota):
                 o['cancelacion_estado'] = 'pendiente_confirmacion'
                 return
             o['cancelacion_estado'] = 'confirmada'
@@ -571,7 +578,7 @@ def _seguir_estrategia(e, c, conciliada=None):
             _log(e, f"⚠️ No pude anular {o['id'][:8]}: {str(ex)[:80]}")
         return
     if tipo == 'history':
-        if x.get('status') != 'closed':
+        if x.get('status') not in ('closed', 'canceled'):
             o['estado'] = 'pendiente_conciliacion'
             return
         # Una estrategia archivada no demuestra que no queden tokens.
@@ -747,6 +754,14 @@ def _bucle():
 
 
 PET = 'piloto_peticion_apolo'
+# Perfiles de las compras que pide APOLO. Ninguno toca los límites de dinero (importe por operación, reserva, pérdida
+# máxima, ops/día), la ruta de ida y vuelta ni el TP/SL verificado; solo cambian el filtro del token y los rangos de TP/SL.
+# conservador: el filtro de las entradas automáticas. moderado/agresivo: mínimos leídos de /v1/token/info.
+PERFILES = {
+    'conservador': {'tp': (5, 200), 'sl': (5, 30)},
+    'moderado': {'tp': (5, 300), 'sl': (5, 40), 'liquidez': 20_000, 'volumen': 100_000, 'top10': 0.6, 'edad_h': 1},
+    'agresivo': {'tp': (5, 500), 'sl': (5, 60), 'liquidez': 5_000},
+}
 _TOKEN_SOL = __import__('re').compile(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$')
 
 
@@ -768,11 +783,15 @@ def pedir_apolo(b):
             raise ValueError('el piloto real está parado: actívalo en Dinero real → Memecoins')
         if e.get('orden') or e.get('intencion_entrada'):
             raise ValueError('ya hay una operación del piloto abierta o sin conciliar: una a la vez')
+        perfil = b.get('perfil', 'conservador')
+        if perfil not in PERFILES:
+            raise ValueError('perfil: ' + ', '.join(PERFILES))
         tp, sl = b.get('tp', 30), b.get('sl', 15)
-        for nombre, v, lo, hi in (('tp', tp, 5, 200), ('sl', sl, 5, 30)):
+        for nombre, v in (('tp', tp), ('sl', sl)):
+            lo, hi = PERFILES[perfil][nombre]
             if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or not lo <= v <= hi:
-                raise ValueError(f'{nombre} en % entre {lo} y {hi}')
-        pet.update(token=tok, simbolo=str(b.get('simbolo') or tok[:6])[:20], tp=float(tp), sl=float(sl))
+                raise ValueError(f'{nombre} en % entre {lo} y {hi} (perfil {perfil})')
+        pet.update(token=tok, simbolo=str(b.get('simbolo') or tok[:6])[:20], tp=float(tp), sl=float(sl), perfil=perfil)
     db.poner_ajuste(PET, pet)
     return pet
 
@@ -808,18 +827,39 @@ def _filtro_apolo(tok):
     return ['no está entre los tokens con liquidez y volumen suficientes del ranking de GMGN']
 
 
+def _filtro_perfil(tok, perfil):
+    """Mínimos del perfil sobre /v1/token/info. Un dato que falta cuenta como fallo. [] = pasa."""
+    p = PERFILES[perfil]
+    d = onchain._api('/v1/token/info', chain='sol', address=tok) or {}
+    num = lambda v: real._f(v) if v is not None else None
+    liq, vol = num(d.get('liquidity')), num((d.get('price') or {}).get('volume_24h'))
+    top10, nacido = num((d.get('dev') or {}).get('top_10_holder_rate')), d.get('open_timestamp') or d.get('creation_timestamp')
+    mal = []
+    if liq is None or liq < p['liquidez']:
+        mal.append(f"liquidez por debajo de {p['liquidez']:,} $")
+    if 'volumen' in p and (vol is None or vol < p['volumen']):
+        mal.append(f"volumen 24 h por debajo de {p['volumen']:,} $")
+    if 'top10' in p and (top10 is None or top10 > p['top10']):
+        mal.append('top 10 concentrado')
+    if 'edad_h' in p and (not nacido or time.time() - nacido < p['edad_h'] * 3600):
+        mal.append('demasiado nuevo')
+    return mal
+
+
 def _comprar_apolo(e, w, pet):
     from . import mercado_gmgn
-    mal = _filtro_apolo(pet['token'])
+    perfil = pet.get('perfil', 'conservador')
+    mal = _filtro_apolo(pet['token']) if perfil == 'conservador' else _filtro_perfil(pet['token'], perfil)
     if mal:
-        raise EntradaNoEnviada('no pasa el filtro de seguridad del piloto: ' + ', '.join(mal))
+        raise EntradaNoEnviada(f'no pasa el filtro del perfil {perfil}: ' + ', '.join(mal))
     precio = _precio(pet['token'])
     if not precio or not math.isfinite(precio) or precio <= 0:
         raise EntradaNoEnviada('sin precio del token en GMGN')
     b = {'token': pet['token'], 'simbolo': pet['simbolo'], 'precio': precio, 'tp': pet['tp'], 'sl': pet['sl'],
-         'atr': max(2.0, pet['sl'] / 2.5), 'pts': 0, 'est_id': 'apolo', 'estrategia': 'APOLO', 'motivo_apolo': pet.get('motivo')}
+         'atr': max(2.0, pet['sl'] / 2.5), 'pts': 0, 'est_id': 'apolo-' + perfil, 'estrategia': 'APOLO · ' + perfil,
+         'perfil': perfil, 'motivo_apolo': pet.get('motivo')}
     mercado_gmgn.abrir(e, w, b, precio)
-    _log(e, f"🧠 APOLO compra {pet['simbolo']}: {pet.get('motivo') or 'sin motivo'} · TP +{pet['tp']:.0f} % / SL −{pet['sl']:.0f} %")
+    _log(e, f"🧠 APOLO compra {pet['simbolo']} (perfil {perfil}): {pet.get('motivo') or 'sin motivo'} · TP +{pet['tp']:.0f} % / SL −{pet['sl']:.0f} %")
 
 
 def _conciliado_a_mano(e, ts):

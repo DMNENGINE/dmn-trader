@@ -29,7 +29,7 @@
       {
         "nombre": "trader_real_operar",
         "riesgo": "escritura",
-        "descripcion": "DINERO REAL: pide al piloto de DMN Trader comprar una memecoin de Solana (accion comprar + token = dirección del contrato + tp/sl en % + motivo) o salir de la posición abierta (accion salir + motivo). El piloto aplica sus límites (tope por operación, reserva, pérdida máxima, ops/día), comprueba la ruta y pone TP/SL verificados; puede rechazarla y te dice por qué. Es la ÚNICA vía para operar dinero real: nunca uses gmgn-cli swap por la terminal."
+        "descripcion": "DINERO REAL: pide al piloto de DMN Trader comprar una memecoin de Solana (accion comprar + token = dirección del contrato + perfil conservador/moderado/agresivo + tp/sl en % + motivo) o salir de la posición abierta (accion salir + motivo). El piloto aplica sus límites (tope por operación, reserva, pérdida máxima, ops/día), comprueba la ruta y pone TP/SL verificados; puede rechazarla y te dice por qué. Es la ÚNICA vía para operar dinero real: nunca uses gmgn-cli swap por la terminal."
       },
       {
         "nombre": "trader_consultar",

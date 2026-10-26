@@ -12,6 +12,22 @@ def entero(value,positive=True):
     return n
 
 
+def leer_orden(x):
+    """`order get` normalizado. Formato actual: status + report{input/output_*}; el antiguo: campos arriba y confirmation.state.
+    Sin informe (pendiente o fallida) los tokens y cantidades quedan en None: desconocidos, no cero."""
+    if not isinstance(x,dict):return None
+    r=x['report'] if isinstance(x.get('report'),dict) else {}
+    return {'order_id':x.get('order_id'),'hash':x.get('hash'),'estado':x.get('status') or (x.get('confirmation') or {}).get('state'),
+            'input_token':r.get('input_token',x.get('input_token')),'output_token':r.get('output_token',x.get('output_token')),
+            'entrada':r.get('input_amount',x.get('filled_input_amount')),'salida':r.get('output_amount',x.get('filled_output_amount')),
+            'strategy_order_id':x.get('strategy_order_id')}
+
+
+def en_ambito(x,oid,entra,sale):
+    """La respuesta es de esta orden; los tokens, si vienen, son los esperados."""
+    return bool(x) and x['order_id']==oid and x['input_token'] in (None,entra) and x['output_token'] in (None,sale)
+
+
 def cotizar(wallet,input_token,output_token,amount,slippage):
     q=real._cli('order','quote','--chain','sol','--from',wallet,'--input-token',input_token,'--output-token',output_token,'--amount',str(amount),'--slippage',str(slippage))
     if not isinstance(q,dict) or q.get('input_token')!=input_token or q.get('output_token')!=output_token or entero(q.get('input_amount'))!=amount:
@@ -79,7 +95,8 @@ def bloquear(e,o,motivo):
 
 def proteccion_valida(x,o,hash_compra,cantidad,tipo):
     from . import piloto as P
-    if x.get('open_sign_hash')!=hash_compra or entero((x.get('order_statistic') or {}).get('buy_amount'))!=cantidad:
+    # GMGN puede dejar open_sign_hash vacío en estrategias adjuntas al swap: entonces manda la cantidad exacta comprada
+    if x.get('open_sign_hash') not in (hash_compra,'') or entero((x.get('order_statistic') or {}).get('buy_amount'))!=cantidad:
         return False
     if tipo=='history':return x.get('status')=='closed'
     if x.get('status')!='open' or x.get('strategy_status')!='running':return False
@@ -94,23 +111,39 @@ def proteccion_valida(x,o,hash_compra,cantidad,tipo):
     return True
 
 
+def buscar_por_cantidad(o,hash_compra,cantidad,grupo):
+    """Antes de comprar se exige saldo cero del token, así que solo una estrategia válida puede ser la nuestra; con dos, ninguna."""
+    for tipo in ('open','history'):
+        pagina=real._cli('order','strategy','list','--chain','sol','--group-tag',grupo,'--type',tipo,'--limit','100','--from',o['wallet'],'--base-token',o['token'])
+        if not isinstance(pagina,dict) or not isinstance(pagina.get('list'),list):raise ValueError('respuesta de ordenes incompleta')
+        validas=[x for x in pagina['list'] if x.get('wallet_address') in (None,o['wallet']) and x.get('base_token') in (None,o['token'])
+                 and isinstance(x.get('order_id'),str) and x['order_id'] and proteccion_valida(x,o,hash_compra,cantidad,tipo)]
+        if len(validas)==1:return tipo,validas[0]
+        if validas:return tipo,None
+    return None,None
+
+
 def seguir(e,c):
     from . import piloto as P
     o=e['orden']
     try:
         if o.get('entrada_confirmada') and o.get('grupo_proteccion'):
             tipo,strategy=P._buscar(o['id'],o['wallet'],o['token'],grupo=o['grupo_proteccion'])
+            if strategy and (o.get('salida') or o.get('salida_solicitada')):
+                # el piloto retira el TP/SL para vender: que siga la salida, no es una protección perdida
+                o['proteccion_verificada']=False
+                return P._seguir_estrategia(e,c,conciliada=(tipo,strategy))
             if not strategy or not proteccion_valida(strategy,o,o['hash_entrada'],entero(o['cantidad_comprada_atomica']),tipo):
                 return bloquear(e,o,'proteccion perdida o no verificable durante el seguimiento')
             o['proteccion_verificada']=tipo=='open'
             return P._seguir_estrategia(e,c,conciliada=(tipo,strategy))
-        x=real._cli('order','get','--chain','sol','--order-id',o['id_entrada'])
-        if not isinstance(x,dict) or x.get('order_id')!=o['id_entrada'] or x.get('input_token')!=real.SOL or x.get('output_token')!=o['token']:
+        x=leer_orden(real._cli('order','get','--chain','sol','--order-id',o['id_entrada']))
+        if not en_ambito(x,o['id_entrada'],real.SOL,o['token']):
             return bloquear(e,o,'respuesta de entrada fuera de ambito')
-        confirmation=(x.get('confirmation') or {}).get('state')
+        confirmation=x['estado']
         if confirmation in ('failed','expired'):
             # Una orden fallida puede gastar gas: no se inventa PnL cero.
-            if x.get('filled_output_amount') not in ('0','') or x.get('filled_input_amount') not in ('0','') or P._tokens(o['wallet'],o['token'])!=0:
+            if any(v not in (None,'0','') for v in (x['salida'],x['entrada'])) or P._tokens(o['wallet'],o['token'])!=0:
                 return bloquear(e,o,'entrada fallida con saldo o ejecucion no conciliados')
             op={**o,'cerrada':int(time.time()),'resultado':'fallo_compra','pnl_sol':None,'pnl_confirmado':False}
             CG.operacion(op)
@@ -118,17 +151,21 @@ def seguir(e,c):
             e['ops']=(e.get('ops') or [])[-199:]+[op];e['orden']=None;db.poner_ajuste(P.EST,e);return
         if confirmation!='confirmed':
             o['estado']='pendiente_confirmacion_entrada';db.poner_ajuste(P.EST,e);return
-        bought=entero(x.get('filled_output_amount'));spent=entero(x.get('filled_input_amount'))
-        if spent>entero(o['cantidad_lamports']) or not isinstance(x.get('hash'),str) or not x['hash']:
+        if x['input_token']!=real.SOL or x['output_token']!=o['token']:
+            return bloquear(e,o,'entrada confirmada sin informe de ejecucion')
+        bought=entero(x['salida']);spent=entero(x['entrada'])
+        if spent>entero(o['cantidad_lamports']) or not isinstance(x['hash'],str) or not x['hash']:
             return bloquear(e,o,'ejecucion de entrada no verificable')
         o['cantidad_comprada_atomica']=str(bought);o['hash_entrada']=x['hash'];o['entrada_confirmada']=True
         CG.anotar(o,x['hash'],'entrada')
-        sid=x.get('strategy_order_id') or o.get('estrategia_propuesta')
-        if not isinstance(sid,str) or not sid:return bloquear(e,o,'compra confirmada sin proteccion identificada; no repetir entrada')
+        sid=x['strategy_order_id'] or o.get('estrategia_propuesta')
         for group in ('STMix','LimitOrder'):
-            tipo,strategy=P._buscar(sid,o['wallet'],o['token'],grupo=group)
+            if isinstance(sid,str) and sid:
+                tipo,strategy=P._buscar(sid,o['wallet'],o['token'],grupo=group)
+            else:  # el swap no devolvió el id: la única estrategia de este token con la cantidad exacta comprada
+                tipo,strategy=buscar_por_cantidad(o,x['hash'],bought,group)
             if strategy and proteccion_valida(strategy,o,x['hash'],bought,tipo):
-                o.update(id=sid,grupo_proteccion=group,proteccion_verificada=tipo=='open',estado='protegida' if tipo=='open' else 'cierre_en_conciliacion')
+                o.update(id=strategy['order_id'],grupo_proteccion=group,proteccion_verificada=tipo=='open',estado='protegida' if tipo=='open' else 'cierre_en_conciliacion')
                 db.poner_ajuste(P.EST,e)
                 return P._seguir_estrategia(e,c,conciliada=(tipo,strategy))
         bloquear(e,o,'protecciones de entrada no verificadas; revisar antes de reanudar')

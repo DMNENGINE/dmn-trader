@@ -42,13 +42,13 @@ class PeticionApolo(unittest.TestCase):
         e={}
         with patch.object(P,'_filtro_apolo',return_value=[]),patch.object(P,'_precio',return_value=0.01),patch('trader.mercado_gmgn.abrir') as abrir:P._comprar_apolo(e,'w',pet)
         _,w,b,precio=abrir.call_args.args
-        self.assertEqual((w,b['token'],b['tp'],b['sl'],b['est_id'],precio),('w',TOK,40.0,10.0,'apolo',0.01))
+        self.assertEqual((w,b['token'],b['tp'],b['sl'],b['est_id'],precio),('w',TOK,40.0,10.0,'apolo-conservador',0.01))
     def test_token_que_no_pasa_el_filtro_no_se_compra(self):
         self.activo();pet=self.pedir()
         malo={'address':TOK,'liquidity':200000,'volume':900000,'rug_ratio':0.92,'top_10_holder_rate':0.79,'renounced_mint':1,'renounced_freeze_account':1,'open_timestamp':0}
         with patch.object(P.onchain,'_api',return_value={'rank':[malo]}),patch('trader.mercado_gmgn.abrir') as abrir:
             with self.assertRaises(P.EntradaNoEnviada) as ex:P._comprar_apolo({},'w',pet)
-        abrir.assert_not_called();self.assertIn('riesgo de rug',str(ex.exception));self.assertIn('top 10',str(ex.exception))
+        abrir.assert_not_called();self.assertIn('perfil conservador',str(ex.exception));self.assertIn('riesgo de rug',str(ex.exception));self.assertIn('top 10',str(ex.exception))
     def test_token_fuera_del_ranking_no_se_compra(self):
         self.activo();pet=self.pedir()
         with patch.object(P.onchain,'_api',return_value={'rank':[]}),patch('trader.mercado_gmgn.abrir') as abrir:
@@ -67,3 +67,33 @@ class PeticionApolo(unittest.TestCase):
         db.poner_ajuste(P.EST,{'orden':{'id':'o','simbolo':'X','entro':1,'token':TOK,'wallet':'w'}})
         with patch.object(P,'_salir') as salir,patch.object(P,'_seguir'),patch.object(P.onchain,'actualizar_smart'):P.paso()
         self.assertIn('APOLO: pinta mal',salir.call_args.args[2]);self.assertEqual(P.peticion_apolo()['estado'],'enviada')
+
+    # perfiles: cambian el filtro del token y los rangos de TP/SL, nunca los límites de dinero ni la ruta/TP/SL de abrir()
+    def info(self,**kw):
+        d={'liquidity':30000,'open_timestamp':1700000000,'price':{'volume_24h':500000},'dev':{'top_10_holder_rate':0.3}}
+        d.update(kw);return d
+    def comprar(self,perfil,info,**kw):
+        self.activo();pet=self.pedir(perfil=perfil,**kw)
+        with patch.object(P.onchain,'_api',return_value=info),patch.object(P,'_precio',return_value=0.01),patch('trader.mercado_gmgn.abrir') as abrir:
+            try:P._comprar_apolo({},'w',pet)
+            except P.EntradaNoEnviada as ex:return None,str(ex)
+        return abrir.call_args.args[2],None
+    def test_perfil_desconocido_se_rechaza(self):
+        self.activo()
+        with self.assertRaises(ValueError):self.pedir(perfil='kamikaze')
+    def test_rangos_de_tp_sl_por_perfil(self):
+        self.activo()
+        with self.assertRaises(ValueError):self.pedir(sl=45)
+        with self.assertRaises(ValueError):self.pedir(perfil='moderado',sl=45)
+        self.assertEqual(self.pedir(perfil='agresivo',sl=45,tp=300)['sl'],45.0)
+        with self.assertRaises(ValueError):self.pedir(perfil='agresivo',sl=70)
+    def test_agresivo_compra_fuera_del_ranking_con_liquidez_minima(self):
+        b,err=self.comprar('agresivo',self.info(liquidity=6000,dev={'top_10_holder_rate':0.9},open_timestamp=int(time.time())))
+        self.assertIsNone(err);self.assertEqual((b['est_id'],b['perfil']),('apolo-agresivo','agresivo'))
+    def test_agresivo_sin_liquidez_no_compra(self):
+        for info in (self.info(liquidity=4000),self.info(liquidity=None)):
+            b,err=self.comprar('agresivo',info);self.assertIsNone(b);self.assertIn('liquidez',err)
+    def test_moderado_exige_volumen_top10_y_edad(self):
+        b,err=self.comprar('moderado',self.info());self.assertIsNone(err);self.assertEqual(b['est_id'],'apolo-moderado')
+        for kw,txt in (({'price':{'volume_24h':5000}},'volumen'),({'dev':{'top_10_holder_rate':0.8}},'top 10'),({'open_timestamp':int(time.time())},'nuevo')):
+            b,err=self.comprar('moderado',self.info(**kw));self.assertIsNone(b);self.assertIn(txt,err)

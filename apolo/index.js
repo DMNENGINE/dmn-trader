@@ -199,8 +199,10 @@ module.exports = definirPlugin({
       parametros: { type: 'object', properties: {
         accion: { type: 'string', enum: ['comprar', 'salir'] },
         token: { type: 'string', description: 'dirección del contrato en Solana (de trader_real_estado o de GMGN), nunca inventada' },
-        simbolo: { type: 'string' }, tp: { type: 'number', description: 'take-profit en % (5-200, por defecto 30)' },
-        sl: { type: 'number', description: 'stop-loss en % (5-30, por defecto 15)' }, motivo: { type: 'string', description: 'por qué, en una frase' } },
+        simbolo: { type: 'string' },
+        perfil: { type: 'string', enum: ['conservador', 'moderado', 'agresivo'], description: 'filtro del token: conservador (ranking de volumen + seguridad completa, por defecto), moderado (liquidez ≥20k, volumen 24h ≥100k, top10 ≤60 %, ≥1 h), agresivo (solo liquidez ≥5k)' },
+        tp: { type: 'number', description: 'take-profit en % (por defecto 30; máx. 200/300/500 según perfil)' },
+        sl: { type: 'number', description: 'stop-loss en % (por defecto 15; máx. 30/40/60 según perfil)' }, motivo: { type: 'string', description: 'por qué, en una frase' } },
         required: ['accion', 'motivo'] },
       ejecutar: args => operarReal(args),
     });

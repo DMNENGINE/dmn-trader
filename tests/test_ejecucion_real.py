@@ -23,6 +23,22 @@ class EjecucionReal(unittest.TestCase):
         with patch.object(P,'_tokens',side_effect=[1,0]),patch.object(P,'_cancelar'),patch.object(P,'_buscar',return_value=('history',{'order_statistic':{'buy_amount':'100','success_sell_amount':'0'},'status':'closed','strategy_status':'stopped'})),patch.object(P,'_vender') as vender:
             P._salir(e,o,'salir')
         vender.assert_not_called();self.assertTrue(o['vendido'])
+    # formato actual de GMGN: una estrategia cancelada queda canceled/canceled
+    def cancelada(self):return {'order_statistic':{'buy_amount':'100','success_sell_amount':'0'},'status':'canceled','strategy_status':'canceled'}
+    def test_cancelacion_actual_se_confirma_y_vende(self):
+        o=self.orden();e={'orden':o}
+        with patch.object(P,'_tokens',return_value=1),patch.object(P,'_cancelar') as cancelar,patch.object(P,'_buscar',side_effect=[('open',{**self.cancelada(),'status':'open','strategy_status':'running'}),('history',self.cancelada())]),patch.object(P,'_vender',return_value={'order_id':'venta'}) as vender:
+            P._salir(e,o,'salir')
+        cancelar.assert_called_once();vender.assert_called_once();self.assertEqual((o['cancelacion_estado'],o['cantidad_salida_atomica']),('confirmada','100'))
+    def test_ya_cancelada_en_un_paso_anterior_no_se_cancela_otra_vez(self):
+        o=self.orden();o.update(salida_solicitada='salir',cancelacion_estado='pendiente_confirmacion');e={'orden':o}
+        with patch.object(P,'_tokens',return_value=1),patch.object(P,'_cancelar') as cancelar,patch.object(P,'_buscar',return_value=('history',self.cancelada())),patch.object(P,'_vender',return_value={'order_id':'venta'}) as vender:
+            P._salir(e,o,'salir')
+        cancelar.assert_not_called();vender.assert_called_once()
+    def test_vendida_con_estrategia_cancelada_cierra_la_operacion(self):
+        o=self.orden();o.update(salida='salir',vendido=1,cantidad_salida_atomica='0');e={'orden':o}
+        with patch.object(P,'_saldo',return_value=(.1,'wallet')),patch.object(P,'_tokens',return_value=0):P._seguir_estrategia(e,{**P.DEFECTO},conciliada=('history',self.cancelada()))
+        self.assertIsNone(e['orden']);self.assertEqual(e['ops'][-1]['resultado'],'salida')
     def test_paginacion_y_ambito_wallet_token(self):
         buena=dict(order_id='orden',wallet_address='wallet',base_token='token')
         with patch.object(P.real,'_cli',side_effect=[{'list':[],'next_page_token':'pagina-2'},{'list':[buena]}]) as cli:

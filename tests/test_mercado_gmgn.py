@@ -73,9 +73,54 @@ class Mercado(unittest.TestCase):
 
     def test_confirmada_sin_estrategia_no_finge_proteccion(self):
         e={'orden':self.orden()}
-        with patch.object(real,'_cli',return_value=self.respuesta()) as cli,patch.object(P,'_seguir_estrategia') as follow:M.seguir(e,self.config())
+        def cli(*a,**k):return self.respuesta() if a[:2]==('order','get') else {'list':[]}
+        with patch.object(real,'_cli',side_effect=cli) as llamada,patch.object(P,'_seguir_estrategia') as follow:M.seguir(e,self.config())
         self.assertIsNotNone(e['orden']);self.assertTrue(e['orden']['entrada_confirmada']);self.assertFalse(e['orden'].get('proteccion_verificada',False));follow.assert_not_called()
-        self.assertFalse(P.cfg()['activo']);self.assertEqual(cli.call_count,1)
+        self.assertFalse(P.cfg()['activo']);self.assertFalse([x for x in llamada.call_args_list if x.args[0]=='swap'])
+
+    # formato actual de GMGN (oct 2026): status + report, sin strategy_order_id y con open_sign_hash vacío
+    def actual(self,status='confirmed',informe=True):
+        x={'status':status,'hash':'hash-compra','order_id':'swap-id'}
+        if informe:x['report']={'input_token':real.SOL,'input_amount':'10000000','output_token':'token','output_amount':'1000'}
+        return x
+    def seguir_actual(self,x,lista):
+        e={'orden':self.orden()}
+        def cli(*a,**k):
+            if a[:2]==('order','get'):return x
+            return {'list':lista if a[a.index('--type')+1]=='open' and a[a.index('--group-tag')+1]=='STMix' else []}
+        with patch.object(real,'_cli',side_effect=cli) as llamada,patch.object(P,'_seguir_estrategia') as follow:M.seguir(e,self.config())
+        self.assertFalse([c for c in llamada.call_args_list if c.args[0]=='swap'])
+        return e,follow
+
+    def test_formato_actual_adopta_la_unica_proteccion_con_la_cantidad_comprada(self):
+        e,follow=self.seguir_actual(self.actual(),[{**self.proteccion(),'open_sign_hash':''}])
+        o=e['orden'];self.assertEqual((o['id'],o['id_entrada'],o['hash_entrada'],o['cantidad_comprada_atomica']),('strategy-id','swap-id','hash-compra','1000'))
+        self.assertTrue(o['proteccion_verificada']);follow.assert_called_once()
+
+    def test_formato_actual_con_dos_candidatas_no_adopta_ninguna(self):
+        otra={**self.proteccion(),'order_id':'otra','open_sign_hash':''}
+        e,follow=self.seguir_actual(self.actual(),[{**self.proteccion(),'open_sign_hash':''},otra])
+        self.assertFalse(e['orden'].get('proteccion_verificada',False));follow.assert_not_called();self.assertFalse(P.cfg()['activo'])
+
+    def test_formato_actual_otra_cantidad_no_se_adopta(self):
+        e,follow=self.seguir_actual(self.actual(),[{**self.proteccion(),'open_sign_hash':'','order_statistic':{'buy_amount':'999'}}])
+        self.assertFalse(e['orden'].get('proteccion_verificada',False));follow.assert_not_called()
+
+    def test_formato_actual_pendiente_sin_informe_espera(self):
+        e,follow=self.seguir_actual(self.actual('pending',False),[])
+        self.assertEqual(e['orden']['estado'],'pendiente_confirmacion_entrada');self.assertNotIn('incidencia',e['orden'])
+
+    def test_formato_actual_confirmada_sin_informe_no_se_da_por_buena(self):
+        e,follow=self.seguir_actual(self.actual('confirmed',False),[])
+        self.assertFalse(e['orden'].get('entrada_confirmada',False));self.assertIn('informe',e['orden']['incidencia'])
+
+    def test_formato_actual_fallida_sin_tokens_cierra_sin_pnl(self):
+        with patch.object(P,'_tokens',return_value=0):e,_=self.seguir_actual(self.actual('failed',False),[])
+        self.assertIsNone(e['orden']);self.assertEqual(e['ops'][0]['resultado'],'fallo_compra')
+
+    def test_formato_actual_otro_token_se_bloquea(self):
+        x=self.actual();x['report']['output_token']='otro'
+        e,_=self.seguir_actual(x,[]);self.assertIn('fuera de ambito',e['orden']['incidencia'])
 
     def test_confirmada_y_protegida_asocia_identificadores_correctos(self):
         e={'orden':self.orden()}
@@ -159,3 +204,9 @@ class Mercado(unittest.TestCase):
         protection=self.proteccion();protection['condition_orders'].pop()
         with patch.object(P,'_buscar',return_value=('open',protection)),patch.object(P,'_seguir_estrategia') as follow,patch.object(real,'_cli') as cli:M.seguir(e,self.config())
         self.assertFalse(o['proteccion_verificada']);follow.assert_not_called();cli.assert_not_called()
+
+    def test_salida_en_curso_con_tp_sl_retirado_no_es_proteccion_perdida(self):
+        o=self.orden();o.update(id='strategy-id',entrada_confirmada=True,grupo_proteccion='STMix',hash_entrada='hash-compra',cantidad_comprada_atomica='1000',salida_solicitada='APOLO lo ve mal');e={'orden':o}
+        x={**self.proteccion(),'status':'canceled','strategy_status':'canceled'}
+        with patch.object(P,'_buscar',return_value=('history',x)),patch.object(P,'_seguir_estrategia') as follow:M.seguir(e,self.config())
+        follow.assert_called_once();self.assertNotIn('incidencia',o);self.assertFalse(o['proteccion_verificada'])

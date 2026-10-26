@@ -14,6 +14,16 @@ class Salida(unittest.TestCase):
         with patch.object(real,'_cli',return_value=self.respuesta()):S.conciliar(o)
         self.assertEqual(o['cantidad_salida_atomica'],'0');self.assertEqual(o['venta_estado'],'confirmada');self.assertTrue(o['vendido'])
 
+    def test_formato_actual_de_gmgn_confirma_la_venta(self):
+        o=self.orden();x={'status':'confirmed','hash':'hash-venta','order_id':'sell-id','report':{'input_token':'token','input_amount':'100','output_token':real.SOL,'output_amount':'1000'}}
+        with patch.object(real,'_cli',return_value=x):S.conciliar(o)
+        self.assertEqual(o['venta_estado'],'confirmada');self.assertEqual(o['ventas_confirmadas'][0]['salida_lamports'],'1000')
+
+    def test_formato_actual_pendiente_sin_informe_sigue_pendiente(self):
+        o=self.orden()
+        with patch.object(real,'_cli',return_value={'status':'pending','order_id':'sell-id'}):S.conciliar(o)
+        self.assertEqual(o['venta_estado'],'pendiente_conciliacion');self.assertFalse(o.get('vendido'))
+
     def test_venta_parcial_solo_reenvia_residuo_confirmado(self):
         o=self.orden();e={'orden':o}
         with patch.object(P,'_tokens',return_value=1),patch.object(real,'_cli',return_value=self.respuesta('40')),patch.object(P,'_vender') as sell:P._salir(e,o,'test')
