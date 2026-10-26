@@ -157,6 +157,13 @@ for (const x of [1, 5, 9, 13]) TR_SITIOS.push({ sala: 'privadas', tx: x + 2, ty:
 // ---------- emociones de los agentes (las calcula el motor: trader/emociones.py) ----------
 const TR_EMO = { hambre: ['😤', 'con hambre', [255, 140, 60]], confianza: ['😎', 'confiado', [61, 255, 138]], miedo: ['😰', 'con miedo', [110, 150, 255]],
   euforia: ['🤯', 'eufórico', [255, 207, 77]], frustracion: ['😔', 'frustrado', [150, 140, 175]], orgullo: ['🏆', 'orgulloso', [255, 215, 90]], calma: ['🙂', 'tranquilo', null] };
+// ánimo del enjambre: el que manda el motor o, si la central aún no lo calcula, contado aquí con lo que siente cada agente
+function trAnimo(d, todos) {
+  if (d.animo) return d.animo;
+  const cuenta = {}; for (const a of todos) if (a.animo?.emocion) cuenta[a.animo.emocion] = (cuenta[a.animo.emocion] || 0) + 1;
+  const emo = Object.keys(cuenta).sort((a, b) => cuenta[b] - cuenta[a])[0];
+  return emo ? { emocion: emo, emoji: TR_EMO[emo][0], nombre: TR_EMO[emo][1], cuenta } : null;
+}
 const trMedallas = m => m ? '🥇'.repeat(Math.min(m.oro || 0, 3)) + '🥈'.repeat(Math.min(m.plata || 0, 3)) + '🥉'.repeat(Math.min(m.bronce || 0, 3)) : '';
 
 // ---------- personajes ----------
@@ -326,14 +333,14 @@ registrarVistaPlugin('dmn-trader', 'trading', {
     this.top = todos.filter(a => a.r_medio != null && a.trades >= 3).sort((a, b) => b.r_medio - a.r_medio).slice(0, 6);
     this.privados = new Set(todos.filter(a => a.estrategia !== 'llm' && a.r_medio != null && a.trades >= 3).sort((a, b) => b.r_medio - a.r_medio).slice(0, 4).map(a => a.nodo + ':' + a.id));
     this.actualizarPJ(d, ahora);
-    const loc = d.nodos.find(n => n.local) || d.nodos[0] || { kpis: {} }, k = loc.kpis || {};
+    const loc = d.nodos.find(n => n.local) || d.nodos[0] || { kpis: {} }, k = loc.kpis || {}, an = trAnimo(d, todos);
     $('#trKpis', this.v).innerHTML = [
       ['persona', 'AGENTES', d.total.agentes, d.nodos.map(n => `${n.nodo === 'pi' ? 'Pi' : n.nodo === 'pc' ? 'Pc' : n.nodo} ${(n.agentes || []).length}`).join(' · ')],
       ['rayo', 'OPERACIONES', d.total.trades, k.trades ? `${Math.round((k.ganados || 0) / k.trades * 100)} % ${tr('ganadas')} (${loc.nodo})` : '—'],
       ['grafica', 'R. MEDIO', k.r_medio != null ? (k.r_medio > 0 ? '+' : '') + k.r_medio.toFixed(2) : '—', `${tr('generación')} ${k.generacion || 0}`],
       ['estrella', 'METAS', d.total.metas, `${tr('mejor capital')} ${(k.max_equity || 0).toFixed(3)} $ / ${k.meta || 100} $`],
       ['escudo', 'QUIEBRAS', d.total.quiebras, k.activo ? `${tr('ciclo')} ${k.tick_s}s` : tr('parado')],
-      ['persona', 'ÁNIMO', d.animo ? `${d.animo.emoji} ${tr(d.animo.nombre)}` : '—', d.animo ? Object.entries(d.animo.cuenta || {}).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([e, n]) => `${(TR_EMO[e] || ['?'])[0]} ${n}`).join(' · ') : tr('aún sin emociones')],
+      ['persona', 'ÁNIMO', an ? `${an.emoji} ${tr(an.nombre)}` : '—', an ? Object.entries(an.cuenta || {}).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([e, n]) => `${(TR_EMO[e] || ['?'])[0]} ${n}`).join(' · ') : tr('aún sin emociones')],
     ].map(([i, t, n, s]) => `<div class="tr-kpi"><small>${ic(i)}${tr(t)}</small><b>${n}</b><span>${esc(s)}</span></div>`).join('');
     $('#trTop', this.v).innerHTML = this.top.length ? this.top.map(a => `<div class="tr-top" data-ag="${esc(a.nodo)}:${a.id}"><i style="background:${TR_ROPA[a.estrategia] || '#888'};box-shadow:0 0 0 2px ${a.nodo === 'pi' ? '#2fd1b0' : '#c77dff'}"></i>
       <div><b>${esc(a.nombre)}</b><span>${esc(a.estrategia)} · ${esc(a.marco)} · ${esc(a.nodo)}</span></div><em class="${a.r_medio > 0 ? 'ok' : 'mal'}">${a.r_medio > 0 ? '+' : ''}${a.r_medio.toFixed(2)}R</em><small>${esc(a.trades)}</small></div>`).join('')
