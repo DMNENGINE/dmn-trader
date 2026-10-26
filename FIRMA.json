@@ -2,7 +2,7 @@
   "formato": "apolo-firma/1",
   "autor": "DMNENGINE",
   "clavePublica": "fwdqHj9gcc4wD68fHBkRnGm0VwQyYFrJcYryj+8lSCI=",
-  "fecha": "2026-10-26T05:33:39.263Z",
+  "fecha": "2026-10-26T05:40:01.073Z",
   "archivos": {
     ".gitattributes": "c230339ad0282ad80de83b1765c45682618096ad2f0de6c125263131e34ebe00",
     ".gitignore": "e855002a95f08d987f1c8288ec210ac6607695b2f8b00f404c2e4fca8ff12c84",
@@ -51,7 +51,7 @@
     "tests/test_guardia.py": "1d11e2978fad2ca0c72a8f41620b0d9372d542b89024cbd16e41c103f723494e",
     "tests/test_mercado_gmgn.py": "bdd510cdd48cac8f21b4358e44fcaa7967c2b59190feea3b3b744d93b2422a61",
     "tests/test_observatorio_gmgn.py": "b240e856ad71ffc6a907641f3ea5cc590ae504dba7f53fe5df6c402bee3fb139",
-    "tests/test_peticion_apolo.py": "f81b9fc51ae40f8649a10e57daf35bda2a9c9278b633128b72459b14eea080d2",
+    "tests/test_peticion_apolo.py": "6e4c62671ebac0969cc4b359b39d9ce51d5b7f521881bea49263e2adeb0a5f68",
     "tests/test_piloto_apolo.py": "066af1aed083055ca4ae0e2b5b300e0a943633d1e6567f25dbafcfca0cb002cb",
     "tests/test_pnl_confirmado.py": "9c3ca4b0268fc4650dc8a99e24ea82cecf20c4837300cdd37a40d21f852b27d0",
     "tests/test_presupuesto_gmgn.py": "b386db574ecc1d8d1ceadc88a6d5428b4498d0d66d69a2bee5d2054d97cfd5c2",
@@ -86,7 +86,7 @@
     "trader/observatorio_gmgn.py": "708d73d7aa7299aecff220b82046e92ea9ad318824ee6cc24333c9fc5413657e",
     "trader/onchain.py": "6bc3f1da90d0b12862b277d2007e76dc56aaf755e980d7baadf416ea3c9982f2",
     "trader/piloto_fut.py": "75563e9ceb48f0941e40036b276a32da5890e22b6b698b4915c94ae7de28e926",
-    "trader/piloto.py": "718cc6edb0bc7885f0fd25bb99a5315aec28a10480bf711797713b4663978705",
+    "trader/piloto.py": "124993b19b4a70d5471d4c5f279e08f7e17e5c56c0bf0cc29f053f45c991b8bb",
     "trader/presupuesto_gmgn.py": "bc775b4a059865cd929d1b73e6b6607de89ad8cf5c10579a773efe61faef850b",
     "trader/reactivacion.py": "f110ad123724971bf9b8a440ad6ea5465c2c90449791c61a99cb8330c2644dee",
     "trader/real.py": "28dcea200137a2584d5f37fe23e02f712ff565d0302db5256c3ed72cad3c3fd0",
@@ -104,5 +104,5 @@
     "web/index.html": "188edd51b55f18b792a814d0f6e3fb0afb852569be0f7e5cc486b37921f41359",
     "web/vendor/lightweight-charts.js": "0c146b9bfbc6e5f19da1a0de876dae43023c332d5157d82f7575f9b7653ee519"
   },
-  "firma": "QgO+C8Zboy3hBBa6KCL7EY4Nalafppg8vJFreQLq0fxYwGTMZ+8GTdCrajxpG0/tzOUgzwsdECtHYiqqwBiGDQ=="
+  "firma": "o0tqhclK3uTL0ZBv2g6WJKiU4Yu3Uw3ovtG9Q72DJFAfQ0prBaYvZZlq/LnRf4HkPJBdZ/S4bx5vDi4eVs+8Cg=="
 }
