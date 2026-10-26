@@ -21,6 +21,7 @@ DEFECTO = {'activo': True, 'cuenta_sim': 'Sim101', 'cuenta_real': None, 'real_ac
            'cambiado': 0, 'cerrar_todo': 0, 'proteger': True}
 # breakeven al recorrer el 50 % del objetivo (+2 ticks de colchón); desde el 75 % el stop guarda la mitad de lo máximo ganado
 PROTECCION = {'activar': 0.5, 'colchon_ticks': 2, 'trailing_desde': 0.75, 'trailing_guarda': 0.5}
+FRESCURA_S = 180  # la última vela cerrada debe ser de hace menos de 3 min
 # se controla desde el panel (en la Pi o en el PC): la configuración más reciente gana (real.py la sincroniza con el nodo)
 _hilo = {'t': None}
 
@@ -481,9 +482,9 @@ def _proteger(e, o, cu):
     info = ff.FUT.get(o.get('inst'))
     if o.get('real') or not info:
         return False
-    if o.get('proteccion'):  # ya decidió cerrar: reintenta hasta que el puente la confirme cerrada
-        puente('/cerrar', {'cuenta': o['cuenta'], 'inst': o['nt']})
+    if (o.get('proteccion') or {}).get('enviado'):  # cierre aceptado: la conciliación lo dará por cerrado
         return True
+    o.pop('proteccion', None)  # un intento que NinjaTrader rechazó no cuenta: se vuelve a decidir con el precio de ahora
     if o.get('entrada') is None:
         p = next((x for x in cu.get('posiciones', []) if x.get('inst') == o.get('full', o['nt'])), None)
         precio = p and p.get('precio')
@@ -491,9 +492,11 @@ def _proteger(e, o, cu):
             return False
         o['entrada'] = precio
     o['protegida'] = True
-    velas = [v for v in _velas_1m(info) if v[0] >= o['ts']]
-    if not velas:
-        return False
+    # solo velas CERRADAS: la que se está formando trae precios sin validar cuando NinjaTrader se queda sin cotizaciones
+    ya = time.time()
+    velas = [v for v in _velas_1m(info) if v[0] >= o['ts'] and v[0] + 60 <= ya]
+    if not velas or velas[-1][0] + 60 < ya - FRESCURA_S:
+        return False  # sin precio reciente no se decide nada
     t = info['tick']
     favor = [((h - o['entrada']) if o['lado'] == 1 else (o['entrada'] - l)) / t for _, h, l, _ in velas]
     o['mfe_ticks'] = max(o.get('mfe_ticks') or 0, round(max(favor), 1))
@@ -509,12 +512,12 @@ def _proteger(e, o, cu):
     if stop is None or ahora > stop:
         return False
     o['proteccion'] = {'ts': int(time.time()), 'ticks': round(ahora, 1), 'mfe_ticks': o['mfe_ticks'], 'stop': stop}
+    puente('/cerrar', {'cuenta': o['cuenta'], 'inst': o['nt']})  # si NinjaTrader lo rechaza, SinPuente y no hay sombra
+    o['proteccion']['enviado'] = True
     e.setdefault('sombras', []).append({'orden': o['orden'], 'inst': o['inst'], 'nt': o['nt'], 'lado': o['lado'], 'entrada': o['entrada'],
                                         'sl_ticks': o['sl_ticks'], 'tp_ticks': o['tp_ticks'], 'desde': int(time.time()),
                                         'hasta': o['ts'] + o['hold'] * 300, 'qty': o.get('qty_ejecutada') or o.get('qty') or 1, 'pnl': None})
     _log(e, f"🛡️ Protección: cierro {o['nt']} en {ahora:+.0f} ticks (llegó a +{o['mfe_ticks']:g}); sigo su sombra sin protección")
-    db.poner_ajuste(EST, e)  # la sombra queda guardada antes de mandar el cierre
-    puente('/cerrar', {'cuenta': o['cuenta'], 'inst': o['nt']})
     return True
 
 
@@ -544,17 +547,24 @@ def resolver_sombra(s, velas, info, ahora=None):
 def _sombras(e):
     from . import fabrica_fut as ff
     quedan = []
+    abiertas = {o.get('orden'): o for o in (e.get('abiertas') or {}).values()}
     for s in e.get('sombras') or []:
+        viva = abiertas.get(s['orden'])
+        if viva is not None and not (viva.get('proteccion') or {}).get('enviado'):
+            continue  # el cierre protegido no llegó a hacerse: esa sombra no vale
+        if s['hasta'] <= s['desde']:
+            s['pnl'] = 'igual'  # ya iba a cerrarse por tiempo: con y sin protección acaban igual
         if s['pnl'] is None:
             try:
                 s['pnl'] = resolver_sombra(s, _velas_1m(ff.FUT[s['inst']]), ff.FUT[s['inst']])
             except SinPuente:
                 pass
-            if s['pnl'] is not None:
+            if isinstance(s['pnl'], (int, float)):
                 _log(e, f"👻 Sombra de {s['nt']}: sin protección habría hecho {s['pnl']:+.2f} $")
         op = next((x for x in reversed(e.get('ops') or []) if x.get('orden') == s['orden']), None)
         if s['pnl'] is not None and op is not None:
-            op['pnl_sin'] = s['pnl']
+            igual = s['pnl'] == 'igual' or not (op.get('proteccion') or {}).get('enviado')
+            op['pnl_sin'] = op['pnl'] if igual else s['pnl']
         else:
             quedan.append(s)
     e['sombras'] = quedan
@@ -564,8 +574,11 @@ def comparativa(e):
     """Operaciones Sim que pasaron por la protección: total CON (lo que hizo NinjaTrader) y SIN (la sombra o, si la
     protección no llegó a cerrar, lo mismo)."""
     ops = [o for o in e.get('ops') or [] if o.get('protegida') and isinstance(o.get('pnl'), (int, float))]
+    for o in ops:
+        if o.get('proteccion') and not o['proteccion'].get('enviado'):
+            o['pnl_sin'] = o['pnl']  # NinjaTrader nunca aceptó el cierre protegido: cerró por su stop/objetivo, igual que sin protección
     hechas = [o for o in ops if not o.get('proteccion') or 'pnl_sin' in o]
-    actuo = [o for o in hechas if o.get('proteccion')]
+    actuo = [o for o in hechas if (o.get('proteccion') or {}).get('enviado')]
     con = round(sum(o['pnl'] for o in hechas), 2)
     sin = round(sum(o.get('pnl_sin', o['pnl']) for o in hechas), 2)
     return {'ops': len(hechas), 'actuo': len(actuo), 'pendientes': len(ops) - len(hechas) + sum(1 for s in e.get('sombras') or [] if s['pnl'] is None),
