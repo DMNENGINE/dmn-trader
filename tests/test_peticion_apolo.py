@@ -122,3 +122,8 @@ class PeticionApolo(unittest.TestCase):
         with patch.object(P,'candidatas_perfil',return_value=cand),patch.object(P,'_apolo',side_effect=OSError('cerrado')),patch.object(P,'_contexto',return_value={}),patch.object(P,'_comprar_apolo') as comprar:
             P._entrada_perfiles({},{**P.DEFECTO,'ia':True},'w',set())
         comprar.assert_not_called()
+    def test_perfil_sin_candidatas_pasa_al_siguiente_en_el_mismo_escaneo(self):
+        cand={'conservador':[],'moderado':[],'agresivo':[{'simbolo':'X','token':'A'*44,'liquidez':1,'volumen_1h':1,'cambio_1h':0,'top10':0.1,'edad_h':5}]}
+        with patch.object(P,'candidatas_perfil',side_effect=lambda p:cand[p]),patch.object(P,'_apolo',return_value={'decision':'entrar','confianza':0.8,'motivo':'ok'}),patch.object(P,'_contexto',return_value={}),patch.object(P,'_comprar_apolo') as comprar:
+            P._entrada_perfiles({},{**P.DEFECTO,'ia':True},'w',set())
+        self.assertEqual(comprar.call_args.args[2]['perfil'],'agresivo')

@@ -889,13 +889,31 @@ def candidatas_perfil(perfil, n=8):
 TP_SL_PERFIL = {'conservador': (30, 15), 'moderado': (40, 20), 'agresivo': (60, 25)}
 
 
-def _siguiente_perfil(e):
+def _orden_perfiles(e):
     n = {k: sum(1 for o in e.get('ops') or [] if o.get('est_id') == 'apolo-' + k) for k in PERFILES}
-    return min(PERFILES, key=lambda k: n[k])
+    return sorted(PERFILES, key=lambda k: n[k])
+
+
+def _siguiente_perfil(e):
+    return _orden_perfiles(e)[0]
 
 
 def _entrada_perfiles(e, c, w, evitar):
-    perfil = _siguiente_perfil(e)
+    """Del perfil con menos operaciones al que más: si uno no da compra se prueba el siguiente en el mismo escaneo."""
+    vistos = []
+    for perfil in _orden_perfiles(e):
+        hecho = _probar_perfil(e, c, w, evitar, perfil)
+        if hecho is not None:  # compró, o APOLO no contesta y con dinero real no se entra sin él
+            return
+        vistos.append(f"{perfil} {len(e['ultimo_scan']['top'])}")
+    ahora = int(time.time())
+    if not e.get('ultimo_sin') or ahora - e['ultimo_sin'] > 3600:
+        e['ultimo_sin'] = ahora
+        _log(e, f"🔎 Perfiles sin compra (candidatas: {', '.join(vistos)})")
+
+
+def _probar_perfil(e, c, w, evitar, perfil):
+    """True compró · False APOLO no contesta · None nada aprobado ni válido en este perfil."""
     cand = [x for x in candidatas_perfil(perfil) if x['token'] not in evitar]
     ahora = int(time.time())
     e['ultimo_scan'] = {'ts': ahora, 'top': cand[:6], 'perfil': perfil}
@@ -910,7 +928,7 @@ def _entrada_perfiles(e, c, w, evitar):
                 r = _apolo('entrada', simbolo, prop, _contexto(x['token'], simbolo))
             except Exception as ex:
                 _log(e, f"🧠 APOLO no contestó ({str(ex)[:60]}): no entro")
-                return
+                return False
             motivo = str(r.get('motivo') or '')[:160]
             if str(r.get('decision', '')).lower().startswith('vet') and real._f(r.get('confianza')) >= 0.6:
                 _log(e, f"🧠 APOLO veta {simbolo} ({perfil}): {motivo}")
@@ -918,13 +936,12 @@ def _entrada_perfiles(e, c, w, evitar):
                 continue
         try:
             _comprar_apolo(e, w, {'token': x['token'], 'simbolo': simbolo, 'tp': float(tp), 'sl': float(sl), 'perfil': perfil, 'motivo': motivo or 'prueba de perfiles'})
-            return
+            return True
         except EntradaNoEnviada as ex:
             _log(e, f"🧠 {simbolo} ({perfil}) no entra: {str(ex)[:120]}")
             e.setdefault('enfriar', {})[x['token']] = ahora + 3600
-    if not e.get('ultimo_sin') or ahora - e['ultimo_sin'] > 3600:
-        e['ultimo_sin'] = ahora
-        _log(e, f"🔎 Perfil {perfil}: {'ninguna candidata ahora' if not cand else 'ninguna aprobada ni válida'}")
+            evitar = evitar | {x['token']}
+    return None
 
 
 def _comprar_apolo(e, w, pet):
