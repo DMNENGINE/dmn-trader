@@ -3,7 +3,7 @@ Cada agente: opera con su genoma → autopsia de cada pérdida con su arreglo �
 El enjambre: comparte lo que aprende (símbolos/horas que pierden para todos), evoluciona cada 2 h (el 20 % peor se reemplaza por hijos
 del 10 % mejor) y, si hay varios equipos (Pi = central, PC = nodo), intercambia los mejores genomas cada 30 min (modelo de islas)."""
 import bisect, copy, json, math, os, random, socket, statistics, sys, threading, time, traceback, uuid
-from . import analista, flujo, ia, onchain, sentimiento, datos, db, indicadores as ind, motor
+from . import analista, emociones, flujo, ia, onchain, sentimiento, datos, db, indicadores as ind, motor
 
 ESQUEMA = """
 CREATE TABLE IF NOT EXISTS ag_agentes (id INTEGER PRIMARY KEY, nombre TEXT, cuenta_id INTEGER, genoma TEXT, generacion INTEGER DEFAULT 0,
@@ -353,6 +353,7 @@ NODO = os.environ.get('DMN_TRADER_NODO') or ('pi' if sys.platform.startswith('li
 CENTRAL = os.environ.get('DMN_TRADER_CENTRAL', '').rstrip('/')
 CENTRAL_TOKEN = os.environ.get('DMN_TRADER_CENTRAL_TOKEN', '')
 TICK, EVOLUCION, PATRONES, SINCRONIA, MIGRACION = 20, 7200, 600, 60, 1800
+ANIMO_APOLO_CADA = 900
 
 
 def preparar():
@@ -364,6 +365,7 @@ def preparar():
             c.execute(f'ALTER TABLE {t} ADD COLUMN agente_id INTEGER')
     c.execute('CREATE INDEX IF NOT EXISTS ix_agt ON ag_trades(agente_id, trade_id)')
     c.execute('CREATE INDEX IF NOT EXISTS ix_tr_cta ON trades(cuenta_id, estado, cerrado)')
+    emociones.preparar()
     viejo = db.ajuste('agente')
     if viejo and viejo.get('cuenta_id'):  # el agente único de la v1 se retira (sus datos se quedan)
         db.ex('UPDATE cuentas SET archivada=1 WHERE id=?', (viejo['cuenta_id'],))
@@ -925,6 +927,11 @@ def paso_enjambre(e):
     if ahora_ - e.get('ultima_evolucion', 0) > EVOLUCION:
         e['ultima_evolucion'] = ahora_
         evolucionar(e)
+    if ahora_ - e.get('ultimo_animo_apolo', 0) > ANIMO_APOLO_CADA:  # APOLO siente cómo está su equipo
+        e['ultimo_animo_apolo'] = ahora_
+        guardar(e)
+        from . import conciencia
+        emociones.sentir_apolo(emociones.colectivo(agentes()), conciencia.APOLO, conciencia.TOKEN_APOLO)
     if ahora_ - e.get('ultimo_sent', 0) > SENT_CADA:
         e['ultimo_sent'] = ahora_
         guardar(e)
@@ -1087,6 +1094,8 @@ def paso_agente(e, a, ctx):
     _autopsias(a)
     a = db.uno('SELECT * FROM ag_agentes WHERE id=?', (a['id'],))
     g = _g(a)
+    animo = emociones.actualizar(a, e, it, eq, (a['descartes'] or 0) - (a['descartes_ref'] or 0))
+    mod = emociones.modular(animo)
     if eq >= e['meta']:
         db.ex('UPDATE ag_intentos SET fin=?, final=?, resultado=?, causa=? WHERE id=?', (int(time.time()), eq, 'meta', '¡meta alcanzada!', it['id']))
         _poner(a['id'], metas=(a['metas'] or 0) + 1)
@@ -1100,7 +1109,7 @@ def paso_agente(e, a, ctx):
     _gestionar(a, g)
     _entradas(a, g, it)
     pos = motor.posiciones(cid, False)
-    if not pos and (a['descartes'] or 0) - (a['descartes_ref'] or 0) > 150:
+    if not pos and (a['descartes'] or 0) - (a['descartes_ref'] or 0) > 150 * mod['paciencia']:  # con hambre busca otro sistema antes
         nuevo, inf = buscar_solucion(e, a, ctx)
         _poner(a['id'], genoma=json.dumps(nuevo), descartes_ref=a['descartes'], genoma_desde=int(time.time()))
         _leccion(a['id'], it['id'], None, 'inactivo', f"{a['nombre']}: mucho rato sin operaciones que paguen comisión + spread. {inf}", {})
@@ -1109,6 +1118,10 @@ def paso_agente(e, a, ctx):
         _poner(a['id'], estado='en posición', ultimo=' · '.join(f"{p['simbolo']} {'largo' if p['cantidad'] > 0 else 'corto'}" for p in pos))
     else:
         _poner(a['id'], estado='buscando')
+    if mod['pausa_hasta'] > time.time():  # frustrado: se para a pensar en vez de vengarse del mercado
+        if not pos:
+            _poner(a['id'], estado='en pausa', ultimo='😔 frustrado: me paro a pensar')
+        return
     pausa = _proteccion(a, g, it)
     if pausa:
         if not pos:
@@ -1154,13 +1167,13 @@ def paso_agente(e, a, ctx):
         r = motor.resumen(cid)
         fr = niveles_dca(g)
         libres = max(1, CUENTA_CFG['max_posiciones'] - len(pos) - len(esperando))
-        total = min(r['equity'] * g['riesgo_pct'] / 100 / (dist * sum(1 - f for f in fr) / len(fr)), r['poder_compra'] * 0.97 / libres / p)
+        total = min(r['equity'] * g['riesgo_pct'] * mod['riesgo'] / 100 / (dist * sum(1 - f for f in fr) / len(fr)), r['poder_compra'] * 0.97 / libres / p)
         qty = total / len(fr)  # primer tramo; el resto, escalonado hacia el stop
         if qty * p < 0.0001:
             continue
         sl, tp = p - d * dist, p + d * g['rr'] * dist
         rasgos = {'atr_pct': round(atr[-1] / p * 100, 4), 'tendencia': tend[-1], 'hora': hora, 'spread_pct': round(spread, 4),
-                  'coste_pct': round(coste, 4), 'precio': p, 'dist': dist, 'entrada': g['entrada'], 'tramos': len(fr),
+                  'coste_pct': round(coste, 4), 'animo_riesgo': mod['riesgo'], 'emocion': animo.get('emocion'), 'precio': p, 'dist': dist, 'entrada': g['entrada'], 'tramos': len(fr),
                   'adx': round(ad[-1], 1) if ad[-1] else None, **sentimiento.rasgos(sim, sent), **flujo.rasgos(sim), **onchain.rasgos(sim)}
         if g.get('noticias') and (rasgos.get('sent', 0) * d <= -0.4 or rasgos.get('evento')):  # el analista avisa: noticias en contra o evento macro
             db.ex('UPDATE ag_agentes SET descartes=descartes+1 WHERE id=?', (a['id'],))
@@ -1386,9 +1399,58 @@ def _patrones_globales(e):
             _leccion(None, None, None, 'compartida', f"Enjambre: a las {h}:00 UTC se pierde en {dias(fs)} días distintos ({len(rs)} trades, {statistics.fmean(rs):+.2f}R). Nadie opera a esa hora.", {'hora': h})
 
 
+def constancia(rs):
+    """Fracción de tramos de 5 operaciones seguidas que acaban en positivo (0..1): premia ganar seguido, no de un golpe de suerte."""
+    if len(rs) < 5:
+        return 0.5
+    tramos = [sum(rs[i:i + 5]) for i in range(len(rs) - 4)]
+    return sum(1 for x in tramos if x > 0) / len(tramos)
+
+
 def aptitud(a):
-    rs = [x['r'] for x in db.q("SELECT r FROM ag_trades WHERE agente_id=? AND abierto>=? AND r IS NOT NULL AND COALESCE(causa,'')<>'sistema'", (a['id'], a['genoma_desde'] or 0))]
-    return (puntuar(rs) if len(rs) >= 5 else None), len(rs)
+    rs = [x['r'] for x in db.q("SELECT r FROM ag_trades WHERE agente_id=? AND abierto>=? AND r IS NOT NULL AND COALESCE(causa,'')<>'sistema' ORDER BY trade_id", (a['id'], a['genoma_desde'] or 0))]
+    return (puntuar(rs) + BONUS_CONSTANCIA * (constancia(rs) - 0.5) if len(rs) >= 5 else None), len(rs)
+
+
+# premios del enjambre: constancia (en la aptitud), medallas al podio de cada generación (con más hijos e inmunidad una generación)
+# y ascenso: un sistema que gana con constancia en suficientes operaciones pasa a candidato a dinero real (revisión antes de usarlo)
+BONUS_CONSTANCIA = 0.15
+MEDALLAS = ('oro', 'plata', 'bronce')
+ASCENSO = {'aptitud': 0.3, 'trades': 30, 'gana_pct': 45}
+
+
+def _medallas(a):
+    try:
+        m = json.loads(a.get('medallas') or '{}')
+    except ValueError:
+        m = {}
+    return {k: int(m.get(k, 0)) for k in MEDALLAS}
+
+
+def _ascender(e, a, f, n):
+    """Ascenso: el sistema queda como candidato a dinero real (con su genoma y sus números) y el agente es inmune a la evolución."""
+    g = db.uno("SELECT SUM(r>0) g FROM ag_trades WHERE agente_id=? AND abierto>=? AND r IS NOT NULL AND COALESCE(causa,'')<>'sistema'", (a['id'], a['genoma_desde'] or 0))
+    gana = (g['g'] or 0) / n * 100 if n else 0
+    if a.get('ascendido') or f is None or f < ASCENSO['aptitud'] or n < ASCENSO['trades'] or gana < ASCENSO['gana_pct']:
+        return False
+    animo = emociones.leer(a)
+    animo['ascenso_ts'] = int(time.time())
+    _poner(a['id'], ascendido=1, animo=json.dumps(animo, ensure_ascii=False))
+    lista = db.ajuste('enjambre_ascendidos') or []
+    lista.append({'ts': int(time.time()), 'agente': a['nombre'], 'nodo': NODO, 'aptitud': round(f, 3), 'trades': n, 'gana_pct': round(gana),
+                  'genoma': _g(a), 'estado': 'candidato a dinero real (pendiente de revisión)'})
+    db.poner_ajuste('enjambre_ascendidos', lista[-50:])
+    txt = f"🎖️ {a['nombre']} asciende: {f:+.2f}R de aptitud en {n} operaciones ({gana:.0f} % ganadas). Su sistema ({_g(a)['estrategia']} {_g(a)['marco']}) pasa a candidato a dinero real."
+    _leccion(a['id'], None, None, 'ascenso', txt, {})
+    try:
+        motor.avisar(motor._fila(a['cuenta_id']), txt)
+    except Exception:
+        pass
+    return True
+
+
+def ascendidos():
+    return db.ajuste('enjambre_ascendidos') or []
 
 
 def _cruce(g1, g2, rnd):
@@ -1417,11 +1479,25 @@ def evolucionar(e):
         return
     medidos.sort(key=lambda x: x[0], reverse=True)
     top = medidos[:max(3, len(vivos) // 10)]
-    malos = [x for x in medidos[-max(1, len(vivos) // 5):] if x[0] < top[-1][0]]
-    e['generacion'] = e.get('generacion', 0) + 1
+    gen = e.get('generacion', 0) + 1
+    inmunes = {a['id'] for _, a in medidos if a.get('ascendido') or (a.get('inmune_gen') or 0) >= gen}
+    malos = [x for x in medidos[-max(1, len(vivos) // 5):] if x[0] < top[-1][0] and x[1]['id'] not in inmunes]
+    e['generacion'] = gen
+    podio = []
+    for (f, a), med in zip(medidos[:3], MEDALLAS):  # medalla, inmunidad la próxima generación y el doble de hijos
+        if f <= 0:
+            break
+        m = _medallas(a)
+        m[med] += 1
+        _poner(a['id'], medallas=json.dumps(m), inmune_gen=gen + 1)
+        podio.append(f"{'🥇🥈🥉'[len(podio)]} {a['nombre']} {f:+.2f}R")
+    for f, a in medidos:
+        n = aptitud(a)[1]
+        _ascender(e, a, f, n)
+    padres = [a for _, a in top] + [a for _, a in medidos[:3] if _ > 0]  # el podio cuenta doble al elegir padre
     nombres = []
     for f, a in malos:
-        p1, p2 = rnd.choice(top)[1], rnd.choice(top)[1]
+        p1, p2 = rnd.choice(padres), rnd.choice(padres)
         g = _cruce(_g(p1), _g(p2), rnd) if p1['id'] != p2['id'] and rnd.random() < 0.35 else _g(p1)
         g = _mutar(g, rnd)
         nuevo = _nombre(a['id'], rnd)
@@ -1431,7 +1507,8 @@ def evolucionar(e):
         _nuevo_intento(e, db.uno('SELECT * FROM ag_agentes WHERE id=?', (a['id'],)), g, f"evolución gen {e['generacion']}")
     guardar(e)
     mejores = ', '.join(f"{a['nombre']} {f:+.2f}R ({_g(a)['estrategia']} {_g(a)['marco']})" for f, a in top[:3])
-    _leccion(None, None, None, 'evolucion', f"Generación {e['generacion']}: los mejores son {mejores}. Reemplacé {len(nombres)}: " + '; '.join(nombres[:8]), {})
+    _leccion(None, None, None, 'evolucion', f"Generación {e['generacion']}: los mejores son {mejores}." + (f" Podio: {', '.join(podio)}." if podio else '') +
+             f" Reemplacé {len(nombres)}: " + '; '.join(nombres[:8]), {})
 
 
 def buscar_solucion(e, a, ctx):
@@ -1545,6 +1622,7 @@ def _vista_agentes(lim=None):
                     'generacion': a['generacion'], 'intentos': a['intentos'], 'metas': a['metas'], 'quiebras': quie.get(a['id'], 0),
                     'trades': st.get('n', 0), 'ganados': st.get('g') or 0, 'r_medio': round(st['m'], 3) if st.get('m') is not None else None,
                     'marco': g.get('marco'), 'estrategia': g['estrategia'], 'riesgo_pct': g['riesgo_pct'], 'tendencia': g['filtro_tendencia'],
+                    'animo': emociones.vista(a), 'medallas': _medallas(a), 'ascendido': bool(a.get('ascendido')),
                     'curva': [round(x, 4) for x in (cv[::paso] + ([cv[-1]] if cv and paso > 1 else []))][-31:] + ([round(eq, 4)] if eq is not None else [])})
     return out[:lim] if lim else out
 
@@ -1703,7 +1781,7 @@ def mapa():
     tot = {'agentes': sum(len(x.get('agentes') or []) for x in nodos), 'trades': sum((x.get('kpis') or {}).get('trades') or 0 for x in nodos),
            'metas': sum((x.get('kpis') or {}).get('metas') or 0 for x in nodos), 'quiebras': sum((x.get('kpis') or {}).get('quiebras') or 0 for x in nodos)}
     from . import guardia
-    v = {'modo': 'simulado', 'guardia': guardia.estado(), 'capacidades': ['dmn-guardia/1'], 'nodos': nodos, 'total': tot, 'lecciones': lecciones(25), 'log': LOG[-30:], 'precios': precios(), 'analista': noticias(15)}
+    v = {'modo': 'simulado', 'animo': emociones.colectivo(agentes()), 'ascendidos': ascendidos()[-10:], 'guardia': guardia.estado(), 'capacidades': ['dmn-guardia/1'], 'nodos': nodos, 'total': tot, 'lecciones': lecciones(25), 'log': LOG[-30:], 'precios': precios(), 'analista': noticias(15)}
     _cache_mapa.update(t=time.time(), v=v)
     return v
 
@@ -1723,10 +1801,25 @@ def agente(aid):
     f, n = aptitud(a)
     return {**{k: a[k] for k in ('id', 'nombre', 'estado', 'ultimo', 'generacion', 'padre', 'intentos', 'metas', 'max_equity')},
             'genoma': _g(a), 'aptitud': f, 'trades_genoma': n, 'cuenta': motor.cuenta(a['cuenta_id']),
+            'animo': emociones.vista(a), 'sentimientos': emociones.diario(aid), 'medallas': _medallas(a), 'ascendido': bool(a.get('ascendido')),
             'intentos_lista': db.q('SELECT id,inicio,fin,max_equity,final,trades,ganados,resultado,causa FROM ag_intentos WHERE agente_id=? ORDER BY id DESC LIMIT 15', (aid,)),
             'lecciones': db.q('SELECT * FROM ag_lecciones WHERE agente_id=? ORDER BY id DESC LIMIT 20', (aid,)),
             'trades': db.q("""SELECT t.simbolo,t.direccion,t.entrada,t.salida,t.pnl,t.r,t.abierto,t.cerrado,ag.causa FROM ag_trades ag JOIN trades t ON t.id=ag.trade_id
                               WHERE ag.agente_id=? ORDER BY t.id DESC LIMIT 20""", (aid,))}
+
+
+def ranking(n=15):
+    """Tabla de líderes: aptitud (esperanza en R con constancia), medallas, ascenso y lo que siente cada uno."""
+    filas = []
+    for a in agentes():
+        if _llm(a):
+            continue
+        f, k = aptitud(a)
+        filas.append({'id': a['id'], 'nombre': a['nombre'], 'aptitud': round(f, 3) if f is not None else None, 'trades': k, 'generacion': a['generacion'],
+                      'sistema': f"{_g(a)['estrategia']} {_g(a)['marco']}", 'medallas': _medallas(a), 'ascendido': bool(a.get('ascendido')),
+                      'metas': a['metas'] or 0, 'animo': emociones.vista(a)})
+    filas.sort(key=lambda x: (x['ascendido'], x['aptitud'] if x['aptitud'] is not None else -99), reverse=True)
+    return {'ranking': filas[:n], 'animo': emociones.colectivo(agentes()), 'ascendidos': ascendidos()[-10:], 'reglas_ascenso': ASCENSO}
 
 
 def lecciones(limite=50):
@@ -1789,6 +1882,8 @@ def informe(desde=None):
         (f" · mejor capital alcanzado {mx['max_equity']:.2f} $ (meta {mx['meta']:.0f} $)." if mx else '.'),
         'Sistemas que mejor funcionan: ' + (', '.join(f"{k} {m:+.2f}R ({n})" for k, m, n in ranking[:4]) or 'aún sin datos suficientes') + '.',
         'Sistemas que peor: ' + (', '.join(f"{k} {m:+.2f}R ({n})" for k, m, n in ranking[-3:]) if len(ranking) > 4 else '—') + '.',
+        'Ánimo: ' + ((emociones.colectivo(agentes()) or {}).get('texto') or 'aún sin emociones') + '.',
+        'Ascendidos (candidatos a dinero real): ' + (', '.join(f"{x['agente']} {x['aptitud']:+.2f}R en {x['trades']}" for x in ascendidos()[-5:]) or 'ninguno todavía') + '.',
         'Mejores agentes ahora: ' + (', '.join(f"{a['nombre']} {f:+.2f}R ({_g(a)['estrategia']} {_g(a)['marco']})" for f, a in mejores if f is not None) or '—') + '.',
         'Por qué se pierde (autopsias): ' + (', '.join(f"{x['tipo']} ×{x['n']}" for x in lec) or '—') + '.',
         ia.resumen(),

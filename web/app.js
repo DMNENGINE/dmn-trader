@@ -330,9 +330,23 @@ $('#btnBorrar').onclick = async () => { if (E.cuentas.length < 2) return msg('#a
 $('#btnWebhook').onclick = async () => { try { await api('/ajustes', 'POST', { webhook: $('#wUrl').value.trim() }); msg('#avMsg', 'Webhook guardado: los avisos (stops, alertas, bloqueos) llegarán ahí.', true); } catch (e) { msg('#avMsg', e.message); } };
 
 // ---------- enjambre ----------
+const EMO_NOMBRE = { hambre: 'con hambre', confianza: 'confiado', miedo: 'con miedo', euforia: 'eufórico', frustracion: 'frustrado', orgullo: 'orgulloso', calma: 'tranquilo' };
+const EMO_EMOJI = { hambre: '😤', confianza: '😎', miedo: '😰', euforia: '🤯', frustracion: '😔', orgullo: '🏆', calma: '🙂' };
+const medallas = m => m ? '🥇'.repeat(Math.min(m.oro || 0, 3)) + '🥈'.repeat(Math.min(m.plata || 0, 3)) + '🥉'.repeat(Math.min(m.bronce || 0, 3)) : '';
+function pintarAnimo(col, rk) {
+  $('#agAnimo').innerHTML = col ? `<div style="font-size:15px;margin-bottom:8px">${esc(col.texto)}</div>` +
+    Object.entries(col.medias || {}).map(([k, v]) => `<div class="fila2" style="align-items:center;margin:3px 0"><span>${EMO_EMOJI[k] || ''} ${esc(EMO_NOMBRE[k] || k)}</span><div style="background:var(--borde);height:8px;border-radius:4px;flex:1;margin-left:8px"><div style="width:${Math.round(v * 100)}%;height:8px;border-radius:4px;background:var(--acento)"></div></div><span class="tenue" style="width:40px;text-align:right">${Math.round(v * 100)} %</span></div>`).join('')
+    : '<span class="tenue">Aún sin emociones: aparecen cuando el enjambre opera.</span>';
+  if (!rk) return;
+  $('#agRanking').innerHTML = tabla([['#', a => a.i + 1], ['Agente', a => `<b>${esc(a.nombre)}</b>${a.ascendido ? ' 🎖️' : ''}`], ['Aptitud', a => a.aptitud != null ? sg(a.aptitud) + 'R' : '—'], ['Trades', a => a.trades],
+    ['Sistema', a => esc(a.sistema)], ['Medallas', a => medallas(a.medallas)], ['Siente', a => a.animo ? `<span title="${esc(a.animo.frase || '')}">${a.animo.emoji || ''}</span>` : '']], rk.ranking.map((a, i) => ({ ...a, i })), 'Aún sin agentes.');
+  const r = rk.reglas_ascenso || {};
+  $('#agReglasAsc').textContent = `🎖️ Ascenso a candidato a dinero real: aptitud ≥ ${r.aptitud}R con ≥ ${r.trades} operaciones y ≥ ${r.gana_pct} % ganadas. El podio de cada generación gana medalla, el doble de hijos e inmunidad una generación.`;
+  $('#agAscendidos').innerHTML = (rk.ascendidos || []).length ? rk.ascendidos.slice().reverse().map(x => `<div>🎖️ <b>${esc(x.agente)}</b> ${sg(x.aptitud)}R en ${x.trades} ops (${x.gana_pct} % ganadas) · ${esc(x.genoma?.estrategia || '')} ${esc(x.genoma?.marco || '')} · <span class="tenue">${esc(x.estado)}</span></div>`).join('') : '<span class="tenue">Ningún ascendido todavía.</span>';
+}
 async function cargarAgente() {
   try {
-    const [m, inf] = await Promise.all([api('/enjambre/mapa'), api('/enjambre/informe')]);
+    const [m, inf, rk] = await Promise.all([api('/enjambre/mapa'), api('/enjambre/informe'), api('/enjambre/ranking').catch(() => null)]);
     const loc = m.nodos.find(x => x.local) || m.nodos[0], k = loc.kpis, t = (x, y) => `<div class="tile"><small>${x}</small><b>${y}</b></div>`;
     $('#agEstado').innerHTML = k.activo ? `<span class="verde">● ${k.agentes} agentes operando</span> · ciclo ${k.tick_s}s` : '<span class="tenue">○ parado</span>';
     if (k.esperando_cierre) $('#agEstado').innerHTML += ` · <span class="ambar">${n(k.esperando_cierre, 0)} esperando cierre anterior; conservan capital y se incorporan cuando quede confirmado</span>`;
@@ -344,7 +358,10 @@ async function cargarAgente() {
     const todos = m.nodos.flatMap(x => (x.agentes || []).map(a => ({ ...a, nodo: x.nodo }))).sort((a, b) => (b.r_medio ?? -9) - (a.r_medio ?? -9));
     $('#agTabla').innerHTML = tabla([['Agente', a => `<b>${esc(a.nombre)}</b>`], ['Nodo', a => a.nodo], ['Gen', a => a.generacion], ['Sistema', a => `${a.estrategia} · ${a.marco}${a.tendencia ? ' · tend' : ''} · ${a.riesgo_pct}%`],
       ['Capital', a => n(a.equity, 2)], ['Máximo', a => n(a.max_equity, 2)], ['Trades', a => `${a.trades} (${a.ganados}✔)`], ['R medio', a => a.r_medio != null ? sg(a.r_medio) : '—'],
+      ['Siente', a => a.animo ? `<span title="${esc(a.animo.frase || '')}">${a.animo.emoji || ''} ${esc(EMO_NOMBRE[a.animo.emocion] || a.animo.emocion || '')}</span>` : '—'],
+      ['Medallas', a => medallas(a.medallas) + (a.ascendido ? ' 🎖️' : '')],
       ['Intentos', a => a.intentos], ['🏆', a => a.metas || ''], ['Estado', a => esc(a.estado)], ['Último', a => `<span class="chico">${esc(a.ultimo || '')}</span>`]], todos);
+    pintarAnimo(m.animo, rk);
     $('#agInforme').textContent = inf.texto;
     guardarCerebro('enjambre', m.lecciones || [], m.log || []);
   } catch (e) { msg('#agMsg', e.message); }

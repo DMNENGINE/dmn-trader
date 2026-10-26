@@ -339,6 +339,12 @@ def r_enj_ag(q, b, aid):
     return agente.agente(int(aid))
 
 
+@ruta('GET', '/api/enjambre/ranking')
+def r_enjambre_ranking(q, b):
+    """Tabla de líderes del enjambre con medallas, ascensos y emociones."""
+    return agente.ranking()
+
+
 @ruta('GET', '/api/enjambre/lecciones')
 def r_enj_lec(q, b):
     return agente.lecciones(int(q.get('n', 50)))

@@ -154,6 +154,11 @@ for (const x of [1, 5, 9, 13]) TR_SITIOS.push({ sala: 'privadas', tx: x + 2, ty:
   mmObj('tr_mampara', 1, 4, 1, 12, c => { const p = p0(c); c.fillStyle = 'rgba(150,200,240,.22)'; c.fillRect(12, 0, 8, 140); p(12, 0, 2, 140, '#8fb3d6'); p(18, 0, 2, 140, '#5d7a99'); p(12, 0, 8, 3, '#b8d4ee'); }, null, null);
 })();
 
+// ---------- emociones de los agentes (las calcula el motor: trader/emociones.py) ----------
+const TR_EMO = { hambre: ['😤', 'con hambre', [255, 140, 60]], confianza: ['😎', 'confiado', [61, 255, 138]], miedo: ['😰', 'con miedo', [110, 150, 255]],
+  euforia: ['🤯', 'eufórico', [255, 207, 77]], frustracion: ['😔', 'frustrado', [150, 140, 175]], orgullo: ['🏆', 'orgulloso', [255, 215, 90]], calma: ['🙂', 'tranquilo', null] };
+const trMedallas = m => m ? '🥇'.repeat(Math.min(m.oro || 0, 3)) + '🥈'.repeat(Math.min(m.plata || 0, 3)) + '🥉'.repeat(Math.min(m.bronce || 0, 3)) : '';
+
 // ---------- personajes ----------
 function trLook(a) {
   const base = String(a.nombre || '').split('-')[a.estrategia === 'llm' ? 1 : 0], h = trHash(base);
@@ -328,6 +333,7 @@ registrarVistaPlugin('dmn-trader', 'trading', {
       ['grafica', 'R. MEDIO', k.r_medio != null ? (k.r_medio > 0 ? '+' : '') + k.r_medio.toFixed(2) : '—', `${tr('generación')} ${k.generacion || 0}`],
       ['estrella', 'METAS', d.total.metas, `${tr('mejor capital')} ${(k.max_equity || 0).toFixed(3)} $ / ${k.meta || 100} $`],
       ['escudo', 'QUIEBRAS', d.total.quiebras, k.activo ? `${tr('ciclo')} ${k.tick_s}s` : tr('parado')],
+      ['persona', 'ÁNIMO', d.animo ? `${d.animo.emoji} ${tr(d.animo.nombre)}` : '—', d.animo ? Object.entries(d.animo.cuenta || {}).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([e, n]) => `${(TR_EMO[e] || ['?'])[0]} ${n}`).join(' · ') : tr('aún sin emociones')],
     ].map(([i, t, n, s]) => `<div class="tr-kpi"><small>${ic(i)}${tr(t)}</small><b>${n}</b><span>${esc(s)}</span></div>`).join('');
     $('#trTop', this.v).innerHTML = this.top.length ? this.top.map(a => `<div class="tr-top" data-ag="${esc(a.nodo)}:${a.id}"><i style="background:${TR_ROPA[a.estrategia] || '#888'};box-shadow:0 0 0 2px ${a.nodo === 'pi' ? '#2fd1b0' : '#c77dff'}"></i>
       <div><b>${esc(a.nombre)}</b><span>${esc(a.estrategia)} · ${esc(a.marco)} · ${esc(a.nodo)}</span></div><em class="${a.r_medio > 0 ? 'ok' : 'mal'}">${a.r_medio > 0 ? '+' : ''}${a.r_medio.toFixed(2)}R</em><small>${esc(a.trades)}</small></div>`).join('')
@@ -447,7 +453,12 @@ registrarVistaPlugin('dmn-trader', 'trading', {
       const f = p.anda ? Math.floor(t / 120 + trHash(p.k)) % 4 : Math.floor(t / 400 + trHash(p.k)) % 2;
       const sp = trSprite(L, p.dir, f, p.anda ? 'anda' : sentado && p.sitio.sala !== 'cafe' ? 'trabaja' : 'quieto');
       if (!sp) continue;
-      const bx = Math.round(p.x - ew / 2), by = Math.round(p.y - 50 * TR_E);
+      // lo que siente se le nota: tiembla de miedo, salta de alegría, se encoge frustrado; y le rodea un brillo de su color
+      const emo = a.animo?.emocion, fuerte = (a.animo?.intensidad || 0) >= .5 && emo && emo !== 'calma', fase = trHash(p.k) % 100;
+      const ox = fuerte && emo === 'miedo' && quieto ? Math.sin(t / 35 + fase) * 1.3 : 0;
+      const oy = fuerte && ['euforia', 'orgullo'].includes(emo) && quieto ? -Math.abs(Math.sin(t / 170 + fase)) * 5 : fuerte && emo === 'frustracion' ? 2 : 0;
+      const bx = Math.round(p.x - ew / 2 + ox), by = Math.round(p.y - 50 * TR_E + oy);
+      if (fuerte && TR_EMO[emo]?.[2]) luces.push({ x: p.x, y: p.y - 26, r: 34 + 26 * a.animo.intensidad, col: TR_EMO[emo][2], a: .22 + .25 * a.animo.intensidad });
       c.fillStyle = 'rgba(0,0,0,.38)'; c.beginPath(); c.ellipse(p.x, p.y, 11, 4, 0, 0, 7); c.fill();
       const sel = this.sel && this.sel.id === a.id && this.sel.nodo === p.n.nodo;
       if (sel || this.encima === p) { c.strokeStyle = '#ffcf4d'; c.lineWidth = 1.5; c.beginPath(); c.ellipse(p.x, p.y, 15, 6, 0, 0, 7); c.stroke(); }
@@ -459,6 +470,7 @@ registrarVistaPlugin('dmn-trader', 'trading', {
       if (p.zona === 'privadas' && sentado) { c.font = '700 9px monospace'; c.textAlign = 'center'; c.fillStyle = '#ffcf4d'; c.fillText(a.nombre, p.x, p.y + 14); }
       if (a.estrategia === 'llm') luces.push({ x: p.x, y: p.y - 30, r: 50, col: [47, 209, 176], a: .3 });
       const b = this.burbujas.get(p.k) || (p.zona === 'lab' && sentado && Math.floor(t / 1000 + trHash(p.k)) % 5 === 0 ? { em: '🧠', hasta: ahora + 1 } : null);
+      if (!(b && b.hasta > ahora) && fuerte && (Math.floor(t / 1500) + fase) % 3 !== 0) { c.font = '11px sans-serif'; c.textAlign = 'center'; c.textBaseline = 'alphabetic'; c.fillText(TR_EMO[emo][0], bx + ew / 2, by - 2); }
       if (b && b.hasta > ahora) { c.fillStyle = 'rgba(255,255,255,.95)'; c.fillRect(bx + ew - 6, by + 4, 18, 16); c.fillStyle = 'rgba(255,255,255,.95)'; c.fillRect(bx + ew - 4, by + 20, 4, 3); c.font = '12px sans-serif'; c.textAlign = 'center'; c.textBaseline = 'alphabetic'; c.fillStyle = '#000'; c.fillText(b.em, bx + ew + 3, by + 17); }
       this.cajas.push({ x: bx, y: by + 10, w: ew, h: eh - 10, p, a: { ...a, nodo: p.n.nodo } });
     }
@@ -498,7 +510,7 @@ registrarVistaPlugin('dmn-trader', 'trading', {
     const a = this.agenteEn(e), tip = $('#trTip', this.v);
     if (!a) { tip.hidden = true; this.cv.style.cursor = this.salaEn(e) ? 'pointer' : ''; return; }
     this.cv.style.cursor = 'pointer';
-    tip.innerHTML = `<b>${esc(a.nombre)}</b> · ${esc(a.nodo)}<br>${esc(a.estrategia)} · ${esc(a.marco)} · ${tr('gen')} ${esc(a.generacion)}<br>${tr('capital')} ${(a.equity ?? 0).toFixed(4)} $ (${(a.pnl_pct ?? 0).toFixed(1)}%) · ${tr('máx')} ${(a.max_equity ?? 0).toFixed(3)} $<br>${esc(a.trades)} ${tr('operaciones')} · ${esc(a.ganados)} ${tr('ganadas')} · ${esc(a.quiebras || 0)} ${tr('quiebras')}${a.r_medio != null ? ` · ${a.r_medio > 0 ? '+' : ''}${a.r_medio.toFixed(2)}R` : ''}<br><span class="sutil">${esc(a.estado)} · ${esc(a.ultimo || '')}</span>`;
+    tip.innerHTML = `<b>${esc(a.nombre)}</b> · ${esc(a.nodo)}<br>${esc(a.estrategia)} · ${esc(a.marco)} · ${tr('gen')} ${esc(a.generacion)}<br>${tr('capital')} ${(a.equity ?? 0).toFixed(4)} $ (${(a.pnl_pct ?? 0).toFixed(1)}%) · ${tr('máx')} ${(a.max_equity ?? 0).toFixed(3)} $<br>${esc(a.trades)} ${tr('operaciones')} · ${esc(a.ganados)} ${tr('ganadas')} · ${esc(a.quiebras || 0)} ${tr('quiebras')}${a.r_medio != null ? ` · ${a.r_medio > 0 ? '+' : ''}${a.r_medio.toFixed(2)}R` : ''}<br><span class="sutil">${esc(a.estado)} · ${esc(a.ultimo || '')}</span>${a.animo ? `<br>${a.animo.emoji} <b>${esc(tr((TR_EMO[a.animo.emocion] || [, a.animo.emocion])[1]))}</b>: ${esc(a.animo.frase || '')}` : ''}${trMedallas(a.medallas) || a.ascendido ? `<br>${trMedallas(a.medallas)}${a.ascendido ? ' 🎖️ ' + tr('ascendido') : ''}` : ''}`;
     const r = this.cv.parentElement.getBoundingClientRect();
     tip.style.left = Math.min(e.clientX - r.left + 14, r.width - 250) + 'px'; tip.style.top = (e.clientY - r.top + 14) + 'px'; tip.hidden = false;
   },
@@ -530,13 +542,16 @@ registrarVistaPlugin('dmn-trader', 'trading', {
         const g = d.genoma;
         extra = `<p class="sutil">stop ${esc(g.stop_atr)} ATR · ${tr('objetivo')} ${esc(g.rr)}R · ${tr('máx')} ${esc(g.max_barras)} ${tr('velas')} · BE ${esc(g.be_en_r || 'no')} · ${tr('entrada')} ${esc(g.entrada || 'mercado')} · ${tr('tramos')} ${esc(g.tramos || 1)}${g.trail_r ? ' · trailing ' + esc(g.trail_r) + 'R' : ''}${g.filtro_ia ? ' · IA ≥ ' + esc(g.filtro_ia) : ''}</p>` +
           `<div class="tr-tit">${tr('Intentos')}</div>` + d.intentos_lista.slice(0, 5).map(i => `<div class="sutil">#${esc(i.id)} · máx ${(+i.max_equity).toFixed(3)} $ · ${esc(i.trades)} trades · ${esc(i.resultado || tr('en curso'))}${i.causa ? ' · ' + esc(i.causa) : ''}</div>`).join('') +
-          `<div class="tr-tit">${tr('Lo que aprendió')}</div>` + (d.lecciones.slice(0, 5).map(l => `<div class="tr-l">${esc(l.texto)}</div>`).join('') || `<p class="sutil">—</p>`);
+          `<div class="tr-tit">${tr('Lo que aprendió')}</div>` + (d.lecciones.slice(0, 5).map(l => `<div class="tr-l">${esc(l.texto)}</div>`).join('') || `<p class="sutil">—</p>`) +
+          `<div class="tr-tit">${tr('Lo que ha sentido')}</div>` + ((d.sentimientos || []).slice(0, 6).map(x => `<div class="tr-l">${(TR_EMO[x.emocion] || ['•'])[0]} <span class="sutil">${new Date(x.ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span> ${esc(x.texto)}</div>`).join('') || `<p class="sutil">—</p>`);
         this.detalles.set(clave, extra);
       } catch { if (!vigente()) return; extra = ''; }
     } else if (refresco) extra = this.detalles.get(clave) || '';
     el.innerHTML = `<div class="tr-tit tr-ed">${ic('persona')}<div>${esc(a.nombre)}<span>${esc(a.nodo)} · ${tr('gen')} ${esc(a.generacion)}</span></div></div>
       <div class="tr-fk"><div><small>${tr('Capital')}</small><b>${(a.equity ?? 0).toFixed(4)} $</b></div><div><small>${tr('Máximo')}</small><b>${(a.max_equity ?? 0).toFixed(3)} $</b></div>
       <div><small>Trades</small><b>${esc(a.trades)} <span class="sutil">(${esc(a.ganados)}✔)</span></b></div><div><small>R</small><b class="${(a.r_medio || 0) > 0 ? 'ok' : 'mal'}">${a.r_medio != null ? a.r_medio.toFixed(2) : '—'}</b></div></div>
+      ${a.animo ? `<p class="tr-desc" style="font-size:13px">${a.animo.emoji} <b>${esc(tr((TR_EMO[a.animo.emocion] || [, a.animo.emocion])[1]))}</b> — ${esc(a.animo.frase || '')}</p>` : ''}
+      ${trMedallas(a.medallas) || a.ascendido ? `<p class="tr-desc">${trMedallas(a.medallas)}${a.ascendido ? ' 🎖️ ' + tr('ascendido: su sistema es candidato a dinero real') : ''}</p>` : ''}
       ${pie}<p class="tr-desc">${esc(a.estado)} · ${esc(a.ultimo || '')}</p>${extra}`;
   },
 });
