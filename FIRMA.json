@@ -2,7 +2,7 @@
   "formato": "apolo-firma/1",
   "autor": "DMNENGINE",
   "clavePublica": "fwdqHj9gcc4wD68fHBkRnGm0VwQyYFrJcYryj+8lSCI=",
-  "fecha": "2026-10-26T06:29:09.229Z",
+  "fecha": "2026-10-26T08:03:21.426Z",
   "archivos": {
     ".gitattributes": "c230339ad0282ad80de83b1765c45682618096ad2f0de6c125263131e34ebe00",
     ".gitignore": "e855002a95f08d987f1c8288ec210ac6607695b2f8b00f404c2e4fca8ff12c84",
@@ -56,6 +56,7 @@
     "tests/test_piloto_apolo.py": "066af1aed083055ca4ae0e2b5b300e0a943633d1e6567f25dbafcfca0cb002cb",
     "tests/test_pnl_confirmado.py": "9c3ca4b0268fc4650dc8a99e24ea82cecf20c4837300cdd37a40d21f852b27d0",
     "tests/test_presupuesto_gmgn.py": "b386db574ecc1d8d1ceadc88a6d5428b4498d0d66d69a2bee5d2054d97cfd5c2",
+    "tests/test_proteccion_fut.py": "908213eec876bfaf2a1a66ee83d4a8b0aa08b06ab7b7f6fa33cc71fcab0d35b3",
     "tests/test_reactivacion.py": "da4c1e4a1e41b93e62daa64bfeff56a09b88251f6af428fd27d471dd14b30e1b",
     "tests/test_reparacion.py": "36297ac6afb4d2510fca68011de59565686ed5cc3feefef0d4dca0f1723f03f9",
     "tests/test_salida_gmgn.py": "a1338d7be2cc644c42068457a44ec7b1ce2dbe5c03bce2b71d9661217df9b41a",
@@ -87,7 +88,7 @@
     "trader/motor.py": "3980cbcabbfaf544dba0444b9344ed5f440d1bd1593850b6337db028a11b4551",
     "trader/observatorio_gmgn.py": "708d73d7aa7299aecff220b82046e92ea9ad318824ee6cc24333c9fc5413657e",
     "trader/onchain.py": "6bc3f1da90d0b12862b277d2007e76dc56aaf755e980d7baadf416ea3c9982f2",
-    "trader/piloto_fut.py": "75563e9ceb48f0941e40036b276a32da5890e22b6b698b4915c94ae7de28e926",
+    "trader/piloto_fut.py": "412b59c499db821463dfb7a1aef366c3b226883513caa9b1a2903cb9d6a594a4",
     "trader/piloto.py": "124993b19b4a70d5471d4c5f279e08f7e17e5c56c0bf0cc29f053f45c991b8bb",
     "trader/presupuesto_gmgn.py": "bc775b4a059865cd929d1b73e6b6607de89ad8cf5c10579a773efe61faef850b",
     "trader/reactivacion.py": "f110ad123724971bf9b8a440ad6ea5465c2c90449791c61a99cb8330c2644dee",
@@ -100,11 +101,11 @@
     "trader/supervision_gmgn.py": "5ccf8df42529db9ed2d0dfa565ab2345be7123cbbd8585112f2f55df0d157762",
     "trader/updown.py": "14dd1534143baf4802a873f2cb797492c9cf5378679e2594b9830dcb5486bb59",
     "trader/validacion_fabrica.py": "4bbd8a8002f75a46a90d36c893856f79c9378f7a3207854144f3cd1cb142ffb9",
-    "web/app.js": "1befb29339ee815d9d5db7c20484d22bf24d93f4d6d1834cc2058892e9e941aa",
+    "web/app.js": "bd2c6ca94d57cc4b27d279dfa58f8a7352c43c0bf8378f44fe44899256d5b396",
     "web/estilo.css": "15d7769a3ee72e0d8a91fcba13f9798f6b5f84440bc3cb4f79ddf3f009ed8aae",
     "web/grafo3d.js": "b4b5ccbc7bd441223e82af2e5faf269d56d416cbfb39a2995f712977c1ef5826",
     "web/index.html": "f6bb3cd422cf961350ef17b260be6a10e108bf00752c07efe8ed894b10ea78c3",
     "web/vendor/lightweight-charts.js": "0c146b9bfbc6e5f19da1a0de876dae43023c332d5157d82f7575f9b7653ee519"
   },
-  "firma": "kfzg8WUQ78SZ3MdNGldzovX0ndMb6CLNRX0qL9icK4+wKYthxo/FC2dgtcEJami75qlkVjYEk1F5+GnaAolKAQ=="
+  "firma": "lMstJEhUzMqjPwEcp685le7Xm0OgdKcxtQOpjPMAsTdQwemXqc+9d+aBin0FirfBBw/x9IRTRRs+2o/KB3//Dg=="
 }
