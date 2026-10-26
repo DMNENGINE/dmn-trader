@@ -2,7 +2,7 @@
   "formato": "apolo-firma/1",
   "autor": "DMNENGINE",
   "clavePublica": "fwdqHj9gcc4wD68fHBkRnGm0VwQyYFrJcYryj+8lSCI=",
-  "fecha": "2026-10-25T23:46:57.630Z",
+  "fecha": "2026-10-26T00:18:58.132Z",
   "archivos": {
     ".gitattributes": "c230339ad0282ad80de83b1765c45682618096ad2f0de6c125263131e34ebe00",
     ".gitignore": "e855002a95f08d987f1c8288ec210ac6607695b2f8b00f404c2e4fca8ff12c84",
@@ -46,6 +46,7 @@
     "tests/test_ejecucion_real.py": "7c66dfb6fd491db9862367651433da8f153c834391fc05d3f0b96c6e3dd5dfe0",
     "tests/test_ejecutor.py": "44bc5af895853404171e74a270957735d7dc26c7ad5903ef12cd2e6f1001ee8c",
     "tests/test_fabrica_causal.py": "c5d0dba2aeb5f45533d8ffcdb5196a57f74a09b25dcc1deb41615b5d732431cf",
+    "tests/test_fabrica_cola.py": "7c1b1d532357b17a40a253c49db62e8cff881f9e64684e9d479d8c8840fcd3cf",
     "tests/test_gmgn_denegacion.py": "257c92f81de6f2a5b03149693315129254b8d16ac954f76ce2d57060b7a2946b",
     "tests/test_guardia.py": "1d11e2978fad2ca0c72a8f41620b0d9372d542b89024cbd16e41c103f723494e",
     "tests/test_mercado_gmgn.py": "229484335255c9552fed19f5e4bea6780f5fcbe54a8e77f1c4044711806c7cd5",
@@ -72,7 +73,7 @@
     "trader/escuadron.py": "e15b6bf06ec046063d34aa7d109a787423048f059eed5ab437da73ddfc35540b",
     "trader/estres_fabrica.py": "a46d18a0d31898ed7e53abbe019dda7ed4214c29bd1b0aa26b80e42f28cf23f5",
     "trader/fabrica_fut.py": "e32e9aa87ce9b7be3eb306eacfc8d3786a2ad9d8ca100d4527886a035eac10fa",
-    "trader/fabrica.py": "b9bb53f4ba83b0f8687f653f30976ba37ce9ff713e85c23a2b714c664c8d75da",
+    "trader/fabrica.py": "c0a4867eebeb74b1825554f93015c4eb273f9a85792647800e4cc7199baeefed",
     "trader/flujo.py": "feb19a9559768a5ce3efca0201118539b4eccb40ad513e75d90f8e35f65f1c4e",
     "trader/guardia.py": "941cbc39b68f0d7d48ed8cc86d058ac7472a6a5e5dce47d88e046d4547b417f0",
     "trader/ia.py": "6007de1a198ebf4021cda86c44639570e6853d3b0c726edef2d47765e5110400",
@@ -103,5 +104,5 @@
     "web/index.html": "188edd51b55f18b792a814d0f6e3fb0afb852569be0f7e5cc486b37921f41359",
     "web/vendor/lightweight-charts.js": "0c146b9bfbc6e5f19da1a0de876dae43023c332d5157d82f7575f9b7653ee519"
   },
-  "firma": "QGKEvpYFqy24iR+dgUF+76GKGKDc0thVeofnRyzzIo1HfkGhWB8Xvno2UoSfwKBJ5NdiCIR5G48nixScShHNBg=="
+  "firma": "K7mD4UNZrnoVD3mtBCoP2i5zuJtK7M/7fgBimpXB8qrWdfz4OjEDiLRCCO6el+qpIi0ad++dfuz4EUz4aJ+OBQ=="
 }
