@@ -15,6 +15,7 @@ from . import conciencia, db, onchain, validacion_fabrica as VF, estres_fabrica 
 
 CADA, CADA_EVO, HORIZONTE, BARRA, COSTES = 600, 1800, 7200, 300, 6.0
 PASOS = HORIZONTE // BARRA  # 24 velas de 5 min
+TRAMO, CADA_COMPLETAR = 6 * 3600, 60  # completar: tramo de muestras por token y pasada (la foto añade ≈ 120 tokens cada 10 min)
 VERSION_VALIDACION = 'gmgn-causal-20261024-2'
 ESQUEMA = """
 CREATE TABLE IF NOT EXISTS fab_muestras (id INTEGER PRIMARY KEY, ts INTEGER, token TEXT, simbolo TEXT, origen TEXT, precio REAL,
@@ -124,14 +125,18 @@ def _ruta(v, i, p):
     return [[round((x['h'] / p - 1) * 100, 2), round((x['l'] / p - 1) * 100, 2), round((x['c'] / p - 1) * 100, 2)] for x in fut]
 
 
-def completar(max_tokens=30):
-    """Pone rasgos de velas y ruta a las muestras de hace más de 2 h (una petición de velas por token)."""
+def completar(max_tokens=20):
+    """Pone rasgos de velas y ruta a las muestras de hace más de 2 h. Primero las más antiguas (antes salían por orden
+    alfabético del token y las de muchos tokens no se completaban nunca) y por tramos de TRAMO s por token, para pedir pocas
+    páginas de velas aunque la cola de un token acumule días."""
     lim = int(time.time()) - HORIZONTE - BARRA
-    toks = db.q('SELECT token, simbolo, MIN(ts) a, MAX(ts) b FROM fab_muestras WHERE lista=0 AND ts<? GROUP BY token LIMIT ?', (lim, max_tokens))
+    toks = db.q('SELECT token, simbolo, MIN(ts) a FROM fab_muestras WHERE lista=0 AND ts<? GROUP BY token ORDER BY a LIMIT ?', (lim, max_tokens))
     hechos, lote = 0, []
     for t in toks:
         ap = {'token': t['token'], 'simbolo': t['simbolo'], 'n': 0, 'mx': 0.0, 'ci': 0.0}
-        filas = db.q('SELECT id, ts, precio, f FROM fab_muestras WHERE lista=0 AND token=? AND ts<?', (t['token'], lim))
+        hasta = min(lim, t['a'] + TRAMO)
+        filas = db.q('SELECT id, ts, precio, f FROM fab_muestras WHERE lista=0 AND token=? AND ts<?', (t['token'], hasta))
+        t = {**t, 'b': max(fl['ts'] for fl in filas)}
         try:
             s = onchain.registrar('SOL', t['token'], t['simbolo'])
             v = onchain.velas(s, '5m', inicio=t['a'] - 4 * 3600 - BARRA, fin=t['b'] + HORIZONTE + BARRA)
@@ -593,11 +598,10 @@ def _bucle():
             _ultimo['msg'] = f'Histórico falló: {ex}'[:120]
     while True:
         t0 = time.time()
-        for fn in (foto, completar):
-            try:
-                fn()
-            except Exception:
-                pass
+        try:
+            foto()
+        except Exception:
+            pass
         if time.time() - _ultimo['evo'] > CADA_EVO:
             try:
                 evolucionar()
@@ -607,6 +611,17 @@ def _bucle():
         time.sleep(max(30, CADA - (time.time() - t0)))
 
 
+def _bucle_completar():
+    """Completar va en su propio hilo, cada minuto: a 30 tokens cada 10 min la cola crecía sin parar (720 muestras/h entrando, 170 saliendo)."""
+    while True:
+        t0 = time.time()
+        try:
+            completar()
+        except Exception:
+            pass
+        time.sleep(max(5, CADA_COMPLETAR - (time.time() - t0)))
+
+
 def arrancar():
     preparar()
     conciencia.preparar()
@@ -614,3 +629,4 @@ def arrancar():
     if not (_hilo['t'] and _hilo['t'].is_alive()):
         _hilo['t'] = threading.Thread(target=_bucle, daemon=True)
         _hilo['t'].start()
+        threading.Thread(target=_bucle_completar, daemon=True).start()
