@@ -168,6 +168,7 @@ async function estadoReal() {
     return { k, n: l.length, sol: l.reduce((a, x) => a + (x.pnl_sol ?? x.variacion_saldo_sol ?? 0), 0) };
   });
   const siguiente = perfiles.reduce((a, b) => (b.n < a.n ? b : a)).k;
+  const cand = !o && c.activo ? await motor('/piloto/candidatas?perfil=' + siguiente).then(x => x.candidatas || []).catch(() => []) : [];
   const lineas = [
     `Wallet GMGN: ${r.sol != null ? r.sol.toFixed(4) + ' SOL' : '—'}${r.sol_usd ? ` (≈ ${(r.sol * r.sol_usd).toFixed(2)} $)` : ''}${r.wallet ? ` · ${r.wallet}` : ''}`,
     `Piloto: ${c.activo ? 'ACTIVO' : 'PARADO'} · ${c.por_op_sol} SOL por operación (máx. 0,1) · se apaga si pierde ${c.perdida_max_sol} SOL · máx. ${c.max_ops_dia} ops/día · reserva ${c.reserva_sol} SOL`,
@@ -178,6 +179,7 @@ async function estadoReal() {
     `Estrategias promovidas por el laboratorio: ${(F.promovidas || []).map(x => x.nombre).join(', ') || 'ninguna'}`,
     `Última petición tuya: ${p.peticion_apolo ? JSON.stringify(p.peticion_apolo) : (await motor('/piloto/apolo').then(x => x.id ? JSON.stringify(x) : 'ninguna').catch(() => '—'))}`,
     `Candidatos del último escaneo: ${((p.ultimo_scan || {}).top || []).map(x => `${x.simbolo} ${x.token}`).join(' · ') || '—'}`,
+    `Candidatas para el perfil ${siguiente} (ranking 1 h de GMGN ya filtrado; el piloto vuelve a comprobar al comprar):\n${cand.map(x => `- ${x.simbolo} ${x.token} · liq ${x.liquidez} $ · vol 1h ${x.volumen_1h} $ · 5m ${x.cambio_5m ?? '?'} % · 1h ${x.cambio_1h ?? '?'} % · rug ${x.rug ?? '?'} · top10 ${x.top10 ?? '?'} · ${x.edad_h ?? '?'} h`).join('\n') || '- ninguna ahora'}`,
     'Para operar usa trader_real_operar (el piloto aplica los límites). Nunca gmgn-cli swap por la terminal.',
   ];
   return lineas.join('\n');

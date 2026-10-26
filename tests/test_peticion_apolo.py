@@ -97,3 +97,12 @@ class PeticionApolo(unittest.TestCase):
         b,err=self.comprar('moderado',self.info());self.assertIsNone(err);self.assertEqual(b['est_id'],'apolo-moderado')
         for kw,txt in (({'price':{'volume_24h':5000}},'volumen'),({'dev':{'top_10_holder_rate':0.8}},'top 10'),({'open_timestamp':int(time.time())},'nuevo')):
             b,err=self.comprar('moderado',self.info(**kw));self.assertIsNone(b);self.assertIn(txt,err)
+    def test_candidatas_por_perfil(self):
+        P._CAND.clear();ahora=int(time.time())
+        filas=[{'address':'A'*44,'symbol':'VIEJO','liquidity':30000,'volume':200000,'top_10_holder_rate':0.3,'open_timestamp':1700000000},
+               {'address':'B'*44,'symbol':'NUEVO','liquidity':30000,'volume':200000,'top_10_holder_rate':0.9,'open_timestamp':ahora},
+               {'address':'C'*44,'symbol':'TRAMPA','liquidity':90000,'is_honeypot':1,'open_timestamp':1700000000}]
+        with patch.object(P.onchain,'_api',return_value={'rank':filas}):
+            self.assertEqual([x['simbolo'] for x in P.candidatas_perfil('agresivo')],['VIEJO','NUEVO'])
+            self.assertEqual([x['simbolo'] for x in P.candidatas_perfil('moderado')],['VIEJO'])
+        with self.assertRaises(ValueError):P.candidatas_perfil('otro')

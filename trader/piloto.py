@@ -846,6 +846,40 @@ def _filtro_perfil(tok, perfil):
     return mal
 
 
+_CAND = {}
+
+
+def candidatas_perfil(perfil, n=8):
+    """Preselección del ranking de 1 h de GMGN para un perfil (una petición, 60 s de caché), para que APOLO tenga entre
+    qué elegir sin terminal. No autoriza nada: al comprar se vuelve a pasar el filtro del perfil."""
+    if perfil not in PERFILES:
+        raise ValueError('perfil: ' + ', '.join(PERFILES))
+    if time.time() - _CAND.get(perfil, (0, None))[0] < 60:
+        return _CAND[perfil][1]
+    p = PERFILES[perfil]
+    d = onchain._api('/v1/market/rank', chain='sol', interval='1h', limit=100, order_by='volume', direction='desc',
+                     filters=['not_wash_trading'], min_liquidity=onchain.FILTRO['liquidez_min'] if perfil == 'conservador' else p['liquidez'])
+    res = []
+    for t in (d or {}).get('rank') or []:
+        if t.get('is_honeypot') == 1 or not isinstance(t.get('address'), str):
+            continue
+        if perfil == 'conservador':
+            if [m for m in onchain.revisar(t) if m != 'poco volumen'] or (t.get('volume') or 0) < 100_000:
+                continue
+        else:
+            nacido = t.get('open_timestamp') or t.get('creation_timestamp')
+            if (t.get('liquidity') or 0) < p['liquidez'] or ('top10' in p and (t.get('top_10_holder_rate') is None or t['top_10_holder_rate'] > p['top10']))                     or ('edad_h' in p and (not nacido or time.time() - nacido < p['edad_h'] * 3600)):
+                continue
+        nacido = t.get('open_timestamp') or t.get('creation_timestamp')
+        res.append({'simbolo': t.get('symbol'), 'token': t['address'], 'liquidez': round(t.get('liquidity') or 0), 'volumen_1h': round(t.get('volume') or 0),
+                    'cambio_5m': t.get('price_change_percent5m'), 'cambio_1h': t.get('price_change_percent1h'), 'rug': t.get('rug_ratio'),
+                    'top10': t.get('top_10_holder_rate'), 'edad_h': round((time.time() - nacido) / 3600, 1) if nacido else None})
+        if len(res) >= n:
+            break
+    _CAND[perfil] = (time.time(), res)
+    return res
+
+
 def _comprar_apolo(e, w, pet):
     from . import mercado_gmgn
     perfil = pet.get('perfil', 'conservador')

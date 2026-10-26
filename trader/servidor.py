@@ -426,6 +426,12 @@ def r_piloto_apolo(q, b):
     return piloto.pedir_apolo(b)
 
 
+@ruta('GET', '/api/piloto/candidatas')
+def r_piloto_candidatas(q, b):
+    """Candidatas para el perfil que pide APOLO (preselección; el filtro definitivo se aplica al comprar)."""
+    return {'perfil': q.get('perfil', 'conservador'), 'candidatas': piloto.candidatas_perfil(q.get('perfil', 'conservador'))}
+
+
 @ruta('GET', '/api/piloto/apolo')
 def r_piloto_apolo_estado(q, b):
     return piloto.peticion_apolo() or {}
