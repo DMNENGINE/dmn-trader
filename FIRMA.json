@@ -2,7 +2,7 @@
   "formato": "apolo-firma/1",
   "autor": "DMNENGINE",
   "clavePublica": "fwdqHj9gcc4wD68fHBkRnGm0VwQyYFrJcYryj+8lSCI=",
-  "fecha": "2026-10-26T05:40:01.073Z",
+  "fecha": "2026-10-26T06:06:19.292Z",
   "archivos": {
     ".gitattributes": "c230339ad0282ad80de83b1765c45682618096ad2f0de6c125263131e34ebe00",
     ".gitignore": "e855002a95f08d987f1c8288ec210ac6607695b2f8b00f404c2e4fca8ff12c84",
@@ -98,11 +98,11 @@
     "trader/supervision_gmgn.py": "5ccf8df42529db9ed2d0dfa565ab2345be7123cbbd8585112f2f55df0d157762",
     "trader/updown.py": "14dd1534143baf4802a873f2cb797492c9cf5378679e2594b9830dcb5486bb59",
     "trader/validacion_fabrica.py": "4bbd8a8002f75a46a90d36c893856f79c9378f7a3207854144f3cd1cb142ffb9",
-    "web/app.js": "388eab12cc457f81ce3dfca66a63827e486000f14b685d9dfd4b5ee05722d757",
+    "web/app.js": "0c08c0e8c75374a3af162902ebe3f957747341c52501347790337d175d85cdd0",
     "web/estilo.css": "15d7769a3ee72e0d8a91fcba13f9798f6b5f84440bc3cb4f79ddf3f009ed8aae",
     "web/grafo3d.js": "b4b5ccbc7bd441223e82af2e5faf269d56d416cbfb39a2995f712977c1ef5826",
-    "web/index.html": "188edd51b55f18b792a814d0f6e3fb0afb852569be0f7e5cc486b37921f41359",
+    "web/index.html": "4b7cb473b06e44b71a46e37294656ef601b46689f26f26f5cf89987d859237f4",
     "web/vendor/lightweight-charts.js": "0c146b9bfbc6e5f19da1a0de876dae43023c332d5157d82f7575f9b7653ee519"
   },
-  "firma": "o0tqhclK3uTL0ZBv2g6WJKiU4Yu3Uw3ovtG9Q72DJFAfQ0prBaYvZZlq/LnRf4HkPJBdZ/S4bx5vDi4eVs+8Cg=="
+  "firma": "CXug0O7KgrUFV5egpKPqP6PZGwH2WU+IkCTy0MK/LxdOQwEYJjGBUhwPJGL7XrT2vwToZA1Sfn9446g2pTONCg=="
 }
