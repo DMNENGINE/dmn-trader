@@ -523,7 +523,8 @@ async function cargarPiloto() {
     : !autorizada ? `⚠️ ${esc(fcfg.cuenta_real)} activada aquí pero falta autorizarla en puente.json del PC` : `💵 <b>${esc(fcfg.cuenta_real)} ACTIVA</b> · freno ${fcfg.real_perdida_dia} $/día · ${fcfg.qty} contrato(s)`;
   $('#piFut').innerHTML = (U ? `<div class="chico" style="margin-bottom:4px">${fcfg.activo ? '🧪 Sim operando' : '⏸️ Futuros parados'} · ${estadoReal}</div>` : '') + (U ? (U.error ? `<div class="re-bot" style="border-left-color:var(--rojo)">⚠️ ${esc(U.error)}</div>` : '')
     + `<div class="chico">${(U.cuentas || []).filter(c => c.conectada).map(c => `<b>${esc(c.nombre)}</b> ${c.simulada ? '(sim)' : '<b>(REAL)</b>'}: ${n(c.saldo, 2)} $ · realizado ${sg(c.realizado, 2)} $`).join(' · ') || 'NinjaTrader sin cuentas conectadas'}</div>`
-    + `<div class="chico">Abiertas: ${Object.values(U.abiertas || {}).map(o => `${o.real ? '💵' : '🧪'} ${esc(o.nt)} ${o.lado === 1 ? 'largo' : 'corto'} («${esc(o.estrategia)}»)`).join(' · ') || 'ninguna'}</div>`
+    + `<div class="chico">Abiertas: ${Object.values(U.abiertas || {}).map(o => `${o.real ? '💵' : '🧪'} ${esc(o.nt)} ${o.lado === 1 ? 'largo' : 'corto'} («${esc(o.estrategia)}»)${o.stop_virtual != null ? ` 🛡️ +${o.stop_virtual} ticks` : ''}`).join(' · ') || 'ninguna'}</div>`
+    + (U.comparativa ? pintarProteccion(U.comparativa, fcfg.proteger) : '')
     + (FF && FF.promovidas ? `<div class="re-bot" style="margin-top:6px;border-left-color:var(--verde)">💰 <b>Estrategias autorizadas para la cuenta real</b>: ${FF.promovidas.length ? FF.promovidas.map(x => `<b>${esc(x.nombre || x.id)}</b> (${usd(x.vivo)})`).join(' · ') : '<span class="tenue">ninguna todavía (se promueven en Laboratorio → Fábrica)</span>'}</div>` : '')
     : '<div class="tenue chico">Solo en el PC.</div>');
   // la fábrica de futuros es simulación: va al Laboratorio
@@ -535,6 +536,16 @@ async function cargarPiloto() {
   guardarCerebro('piloto', [], p.log || []);
   E.piloto = p;
   pintarSeguridad(p);
+}
+// breakeven/trailing virtual del piloto de futuros (solo Sim): lo que dio CON protección frente a su sombra SIN ella
+function pintarProteccion(C, activa) {
+  const gana = C.diferencia > 0, igual = !C.actuo;
+  return `<div class="re-bot" style="margin-top:6px;border-left-color:var(--${igual ? 'ambar' : gana ? 'verde' : 'rojo'})">🛡️ <b>Protección de ganancias (Sim)</b>: ${activa === false ? 'apagada' : 'activa'}
+    · breakeven al 50 % del objetivo, trailing desde el 75 % guardando la mitad de lo máximo
+    <div class="chico">${C.ops} operaciones medidas · la protección actuó en ${C.actuo}${C.pendientes ? ` · ${C.pendientes} sombra(s) aún en curso` : ''}</div>
+    <div class="chico">CON protección <b class="${C.con >= 0 ? 'verde' : 'rojo'}">${sg(C.con, 2)} $</b> · SIN protección <b class="${C.sin >= 0 ? 'verde' : 'rojo'}">${sg(C.sin, 2)} $</b>
+      → ${igual ? 'todavía sin diferencias' : `<b class="${gana ? 'verde' : 'rojo'}">${gana ? 'la protección gana' : 'la protección pierde'} ${sg(C.diferencia, 2)} $</b> (salvó ${C.salvadas}, recortó ${C.recortadas})`}</div>
+    ${(C.detalle || []).slice(-6).reverse().map(x => `<div class="tenue chico">${fecha(x.cerrada)} · ${esc(x.nt)} «${esc(x.estrategia)}»: con ${sg(x.con, 2)} $ · sin ${sg(x.sin, 2)} $ (llegó a +${x.mfe_ticks} ticks)</div>`).join('')}</div>`;
 }
 async function guardarFuturos(extra = {}) {
   try {

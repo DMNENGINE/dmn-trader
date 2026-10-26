@@ -5,7 +5,10 @@
 - CUENTA REAL: solo las estrategias PROMOVIDAS (ganan en vivo) y con freno diario: si las pérdidas del día llegan a
   `real_perdida_dia` $ se para hasta el día siguiente, y ninguna entrada arriesga más de lo que queda de ese margen.
   Además la cuenta tiene que estar en `cuentas_orden` de Documents/NinjaTrader 8/dmn/puente.json (el AddOn rechaza las demás).
-Toda entrada lleva stop y objetivo (OCO) que pone el AddOn al llenarse; el piloto cierra por tiempo al pasar el `hold`."""
+Toda entrada lleva stop y objetivo (OCO) que pone el AddOn al llenarse; el piloto cierra por tiempo al pasar el `hold`.
+PROTECCIÓN (solo Sim, `proteger`): cuando la operación ha recorrido parte del camino al objetivo el piloto pone un stop
+virtual (breakeven y luego trailing) y cierra a mercado si el precio vuelve a él. Cada cierre protegido deja una «sombra»
+que sigue el precio con el stop y el objetivo originales: así se compara el resultado CON protección y SIN ella."""
 import hashlib
 import urllib.parse
 import json, os, threading, time, urllib.request, math
@@ -15,7 +18,9 @@ PUENTE = os.environ.get('DMN_NT_PUENTE', 'http://localhost:36990')
 TOKEN = os.path.join(os.path.expanduser('~'), 'Documents', 'NinjaTrader 8', 'dmn', 'token.txt')
 EST = 'piloto_fut'
 DEFECTO = {'activo': True, 'cuenta_sim': 'Sim101', 'cuenta_real': None, 'real_activo': False, 'real_perdida_dia': 20.0, 'qty': 1, 'cada': 60,
-           'cambiado': 0, 'cerrar_todo': 0}
+           'cambiado': 0, 'cerrar_todo': 0, 'proteger': True}
+# breakeven al recorrer el 50 % del objetivo (+2 ticks de colchón); desde el 75 % el stop guarda la mitad de lo máximo ganado
+PROTECCION = {'activar': 0.5, 'colchon_ticks': 2, 'trailing_desde': 0.75, 'trailing_guarda': 0.5}
 # se controla desde el panel (en la Pi o en el PC): la configuración más reciente gana (real.py la sincroniza con el nodo)
 _hilo = {'t': None}
 
@@ -48,7 +53,7 @@ def puente(ruta, cuerpo=None, timeout=70):
 
 def cfg():
     c = {**DEFECTO, **(db.ajuste(EST + '_cfg') or {})}
-    if any(not isinstance(c[k], bool) for k in ('activo', 'real_activo')) or isinstance(c['qty'], bool) or not isinstance(c['qty'], int) or not 1 <= c['qty'] <= 2 or isinstance(c['real_perdida_dia'], bool) or not isinstance(c['real_perdida_dia'], (int, float)) or not math.isfinite(c['real_perdida_dia']) or c['real_perdida_dia'] < 0 or (c['real_activo'] and not c['real_perdida_dia']):
+    if any(not isinstance(c[k], bool) for k in ('activo', 'real_activo', 'proteger')) or isinstance(c['qty'], bool) or not isinstance(c['qty'], int) or not 1 <= c['qty'] <= 2 or isinstance(c['real_perdida_dia'], bool) or not isinstance(c['real_perdida_dia'], (int, float)) or not math.isfinite(c['real_perdida_dia']) or c['real_perdida_dia'] < 0 or (c['real_activo'] and not c['real_perdida_dia']):
         return {**DEFECTO, 'activo': False, 'real_activo': False, 'error_cfg': 'configuracion persistida invalida; piloto bloqueado'}
     return c
 
@@ -56,7 +61,7 @@ def cfg():
 def poner_cfg(c):
     if not isinstance(c, dict):
         raise ValueError('configuracion debe ser un objeto')
-    for k in ('activo', 'real_activo'):
+    for k in ('activo', 'real_activo', 'proteger'):
         if k in c and not isinstance(c[k], bool):
             raise ValueError(k + ' debe ser booleano')
     for k in ('real_perdida_dia', 'qty', 'cerrar_todo'):
@@ -100,7 +105,8 @@ def estado():
         res = ff.resumen()
     except Exception:
         res = None
-    return {**_est(), 'cfg': cfg(), 'fabrica': res}
+    e = _est()
+    return {**e, 'cfg': cfg(), 'fabrica': res, 'comparativa': comparativa(e)}
 
 
 def _barras(s):
@@ -347,6 +353,15 @@ def paso():
                 _log(e, f"⌛ {o['cuenta']} {o['nt']}: cierre por tiempo ({o['hold'] * 5} min)")
             except SinPuente as ex:
                 _log(e, f"⚠️ No pude cerrar {o['nt']}: {ex}")
+    # 1b) protección (breakeven/trailing virtual) de las posiciones Sim y sombras para comparar con/sin
+    if c.get('proteger'):
+        for o in ab.values():
+            if o.get('estado') == 'enviada' and o['cuenta'] in cuentas:
+                try:
+                    _proteger(e, o, cuentas[o['cuenta']])
+                except SinPuente as ex:
+                    _log(e, f"⚠️ Protección de {o['nt']}: {ex}")
+    _sombras(e)
     if not c['activo']:
         db.poner_ajuste(EST, e)
         return
@@ -452,6 +467,112 @@ def paso():
             _log(e, f"{'💵 REAL' if real else '🧪 Sim'} {'compra' if x['lado'] == 1 else 'vende en corto'} {x['nt']} por «{x['estrategia']}»: "
                     f"stop {x['sl_ticks']} ticks / objetivo {x['tp_ticks']} ticks (arriesga {riesgo_total(x['riesgo_usd'], c['qty'] if real else 1)} $), máx. {x['hold'] * 5} min")
     db.poner_ajuste(EST, e)
+
+
+def _velas_1m(info):
+    """Velas de 1 min desde NinjaTrader como (apertura, h, l, c), incluida la que se está formando (su cierre = último precio)."""
+    d = puente('/barras?inst=' + urllib.parse.quote(info['nt']) + '&min=1&dias=1')
+    return [(v[0] - 60, v[2], v[3], v[4]) for v in d.get('velas') or []]
+
+
+def _proteger(e, o, cu):
+    """Stop virtual de una posición Sim abierta. Devuelve True si ha mandado cerrarla."""
+    from . import fabrica_fut as ff
+    info = ff.FUT.get(o.get('inst'))
+    if o.get('real') or not info:
+        return False
+    if o.get('proteccion'):  # ya decidió cerrar: reintenta hasta que el puente la confirme cerrada
+        puente('/cerrar', {'cuenta': o['cuenta'], 'inst': o['nt']})
+        return True
+    if o.get('entrada') is None:
+        p = next((x for x in cu.get('posiciones', []) if x.get('inst') == o.get('full', o['nt'])), None)
+        precio = p and p.get('precio')
+        if isinstance(precio, bool) or not isinstance(precio, (int, float)) or not math.isfinite(precio) or precio <= 0:
+            return False
+        o['entrada'] = precio
+    o['protegida'] = True
+    velas = [v for v in _velas_1m(info) if v[0] >= o['ts']]
+    if not velas:
+        return False
+    t = info['tick']
+    favor = [((h - o['entrada']) if o['lado'] == 1 else (o['entrada'] - l)) / t for _, h, l, _ in velas]
+    o['mfe_ticks'] = max(o.get('mfe_ticks') or 0, round(max(favor), 1))
+    stop = None
+    if o['mfe_ticks'] >= PROTECCION['activar'] * o['tp_ticks']:
+        stop = PROTECCION['colchon_ticks']
+    if o['mfe_ticks'] >= PROTECCION['trailing_desde'] * o['tp_ticks']:
+        stop = max(stop, math.floor(o['mfe_ticks'] * PROTECCION['trailing_guarda']))
+    if stop is not None and stop != o.get('stop_virtual'):
+        o['stop_virtual'] = stop
+        _log(e, f"🛡️ {o['nt']}: stop virtual en +{stop} ticks (llegó a +{o['mfe_ticks']:g} de {o['tp_ticks']})")
+    ahora = (velas[-1][3] - o['entrada']) * o['lado'] / t
+    if stop is None or ahora > stop:
+        return False
+    o['proteccion'] = {'ts': int(time.time()), 'ticks': round(ahora, 1), 'mfe_ticks': o['mfe_ticks'], 'stop': stop}
+    e.setdefault('sombras', []).append({'orden': o['orden'], 'inst': o['inst'], 'nt': o['nt'], 'lado': o['lado'], 'entrada': o['entrada'],
+                                        'sl_ticks': o['sl_ticks'], 'tp_ticks': o['tp_ticks'], 'desde': int(time.time()),
+                                        'hasta': o['ts'] + o['hold'] * 300, 'qty': o.get('qty_ejecutada') or o.get('qty') or 1, 'pnl': None})
+    _log(e, f"🛡️ Protección: cierro {o['nt']} en {ahora:+.0f} ticks (llegó a +{o['mfe_ticks']:g}); sigo su sombra sin protección")
+    db.poner_ajuste(EST, e)  # la sombra queda guardada antes de mandar el cierre
+    puente('/cerrar', {'cuenta': o['cuenta'], 'inst': o['nt']})
+    return True
+
+
+def resolver_sombra(s, velas, info, ahora=None):
+    """Lo que habría pasado sin protección: stop u objetivo originales (si los dos caben en la misma vela cuenta el stop)
+    o, al pasar el `hold`, el último precio. None mientras no se sabe."""
+    ahora = ahora or time.time()
+    t, pv, q = info['tick'], info['pv'], s['qty']
+    sl = s['entrada'] - s['lado'] * s['sl_ticks'] * t
+    tp = s['entrada'] + s['lado'] * s['tp_ticks'] * t
+    ultima = None
+    for ap, h, l, c in velas:
+        if ap < s['desde'] - 60:
+            continue
+        if ap >= s['hasta']:
+            break
+        if (l <= sl) if s['lado'] == 1 else (h >= sl):
+            return round(-s['sl_ticks'] * t * pv * q, 2)
+        if (h >= tp) if s['lado'] == 1 else (l <= tp):
+            return round(s['tp_ticks'] * t * pv * q, 2)
+        ultima = c
+    if ahora >= s['hasta'] + 60 and ultima is not None:
+        return round((ultima - s['entrada']) * s['lado'] * pv * q, 2)
+    return None
+
+
+def _sombras(e):
+    from . import fabrica_fut as ff
+    quedan = []
+    for s in e.get('sombras') or []:
+        if s['pnl'] is None:
+            try:
+                s['pnl'] = resolver_sombra(s, _velas_1m(ff.FUT[s['inst']]), ff.FUT[s['inst']])
+            except SinPuente:
+                pass
+            if s['pnl'] is not None:
+                _log(e, f"👻 Sombra de {s['nt']}: sin protección habría hecho {s['pnl']:+.2f} $")
+        op = next((x for x in reversed(e.get('ops') or []) if x.get('orden') == s['orden']), None)
+        if s['pnl'] is not None and op is not None:
+            op['pnl_sin'] = s['pnl']
+        else:
+            quedan.append(s)
+    e['sombras'] = quedan
+
+
+def comparativa(e):
+    """Operaciones Sim que pasaron por la protección: total CON (lo que hizo NinjaTrader) y SIN (la sombra o, si la
+    protección no llegó a cerrar, lo mismo)."""
+    ops = [o for o in e.get('ops') or [] if o.get('protegida') and isinstance(o.get('pnl'), (int, float))]
+    hechas = [o for o in ops if not o.get('proteccion') or 'pnl_sin' in o]
+    actuo = [o for o in hechas if o.get('proteccion')]
+    con = round(sum(o['pnl'] for o in hechas), 2)
+    sin = round(sum(o.get('pnl_sin', o['pnl']) for o in hechas), 2)
+    return {'ops': len(hechas), 'actuo': len(actuo), 'pendientes': len(ops) - len(hechas) + sum(1 for s in e.get('sombras') or [] if s['pnl'] is None),
+            'con': con, 'sin': sin, 'diferencia': round(con - sin, 2),
+            'salvadas': sum(1 for o in actuo if o['pnl'] > o['pnl_sin']), 'recortadas': sum(1 for o in actuo if o['pnl'] < o['pnl_sin']),
+            'detalle': [{'nt': o['nt'], 'estrategia': o['estrategia'], 'con': o['pnl'], 'sin': o['pnl_sin'],
+                         'mfe_ticks': o['proteccion']['mfe_ticks'], 'cerrada': o['cerrada']} for o in actuo][-20:]}
 
 
 def _bucle():
