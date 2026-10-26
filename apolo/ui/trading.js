@@ -579,7 +579,7 @@ registrarVistaPlugin('dmn-trader', 'trading', {
   .tr-logo b{display:block;font:800 22px/1 system-ui;letter-spacing:.06em;color:var(--tr-acento);white-space:nowrap}.tr-logo span{font-size:11px;letter-spacing:.14em;opacity:.7}
   .tr-cab p{flex:1;margin:0;font-size:13px;opacity:.85}.tr-ley{display:flex;gap:16px;font-size:11px;opacity:.85;border:1px solid var(--tr-borde);border-radius:6px;padding:6px 10px;white-space:nowrap}
   .tr-ley i{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
-  .tr-kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:10px}
+  .tr-kpis{display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin-bottom:10px}
   .tr-kpi{background:var(--tr-card);border:1px solid var(--tr-borde);border-radius:8px;padding:10px 14px}.tr-kpi small{display:flex;align-items:center;gap:8px;font-size:11px;letter-spacing:.06em;opacity:.8}
   .tr-kpi small .i{width:16px;height:16px}.tr-kpi b{display:block;font:700 26px/1.2 system-ui;margin:4px 0 2px}.tr-kpi span{font-size:11px;opacity:.65}
   .tr-sala{position:relative;background:#05080d;border:1px solid var(--tr-borde);border-radius:10px;padding:6px;margin-bottom:12px}
