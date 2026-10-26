@@ -160,12 +160,21 @@ async function motor(ruta, opciones = {}) {
 }
 async function estadoReal() {
   const [p, r] = await Promise.all([motor('/piloto'), motor('/real').catch(() => ({}))]);
-  const c = p.cfg || {}, o = p.orden, F = p.fabrica || {};
+  const c = p.cfg || {}, o = p.orden, F = p.fabrica || {}, ops = p.ops || [];
+  const hoy = new Date().toDateString(), nHoy = ops.filter(x => new Date(x.creada * 1000).toDateString() === hoy && x.resultado !== 'no_entro').length;
+  // rotación de perfiles: el que menos operaciones lleva es el siguiente; el resultado usa el neto confirmado si ya lo hay
+  const perfiles = ['conservador', 'moderado', 'agresivo'].map(k => {
+    const l = ops.filter(x => x.est_id === 'apolo-' + k);
+    return { k, n: l.length, sol: l.reduce((a, x) => a + (x.pnl_sol ?? x.variacion_saldo_sol ?? 0), 0) };
+  });
+  const siguiente = perfiles.reduce((a, b) => (b.n < a.n ? b : a)).k;
   const lineas = [
     `Wallet GMGN: ${r.sol != null ? r.sol.toFixed(4) + ' SOL' : '—'}${r.sol_usd ? ` (≈ ${(r.sol * r.sol_usd).toFixed(2)} $)` : ''}${r.wallet ? ` · ${r.wallet}` : ''}`,
     `Piloto: ${c.activo ? 'ACTIVO' : 'PARADO'} · ${c.por_op_sol} SOL por operación (máx. 0,1) · se apaga si pierde ${c.perdida_max_sol} SOL · máx. ${c.max_ops_dia} ops/día · reserva ${c.reserva_sol} SOL`,
     `Supervisión: ${(p.supervision || {}).estado || '—'} — ${(p.supervision || {}).motivo || ''}`,
     o ? `Posición: ${o.simbolo} (${o.token}) ${o.entro ? `dentro, va ${o.pnl_pct ?? '?'} %` : 'pendiente de confirmar'} · TP +${o.tp} % / SL −${o.sl} %` : 'Posición: ninguna',
+    `Operaciones hoy: ${nHoy}/${c.max_ops_dia}`,
+    `Perfiles: ${perfiles.map(x => `${x.k} ${x.n} ops (${x.sol >= 0 ? '+' : ''}${x.sol.toFixed(5)} SOL)`).join(' · ')} → siguiente a probar: ${siguiente}`,
     `Estrategias promovidas por el laboratorio: ${(F.promovidas || []).map(x => x.nombre).join(', ') || 'ninguna'}`,
     `Última petición tuya: ${p.peticion_apolo ? JSON.stringify(p.peticion_apolo) : (await motor('/piloto/apolo').then(x => x.id ? JSON.stringify(x) : 'ninguna').catch(() => '—'))}`,
     `Candidatos del último escaneo: ${((p.ultimo_scan || {}).top || []).map(x => `${x.simbolo} ${x.token}`).join(' · ') || '—'}`,
